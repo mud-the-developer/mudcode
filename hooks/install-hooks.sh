@@ -23,7 +23,7 @@ if [[ -d "$HOME/.claude" ]]; then
   # Backup
   cp "$CLAUDE_SETTINGS" "$CLAUDE_SETTINGS.bak.$(date +%s)"
 
-  # Add hook using jq (correct format: matcher as string, not matchers array)
+  # Add PostToolUse hook
   HOOK_CMD="$SCRIPT_DIR/claude-post-tool.sh"
   jq --arg cmd "$HOOK_CMD" '
     .hooks.PostToolUse //= [] |
@@ -40,7 +40,25 @@ if [[ -d "$HOME/.claude" ]]; then
     end
   ' "$CLAUDE_SETTINGS" > "$CLAUDE_SETTINGS.tmp" && mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
 
-  echo "  ✅ Claude Code hook installed"
+  # Add PreToolUse hook (Discord approval)
+  PRE_HOOK_CMD="$SCRIPT_DIR/claude-pre-tool.sh"
+  jq --arg cmd "$PRE_HOOK_CMD" '
+    .hooks.PreToolUse //= [] |
+    if (.hooks.PreToolUse | map(select(.hooks[]?.command == $cmd)) | length) == 0 then
+      .hooks.PreToolUse += [{
+        "matcher": "",
+        "hooks": [{
+          "type": "command",
+          "command": $cmd,
+          "timeout": 120
+        }]
+      }]
+    else
+      .
+    end
+  ' "$CLAUDE_SETTINGS" > "$CLAUDE_SETTINGS.tmp" && mv "$CLAUDE_SETTINGS.tmp" "$CLAUDE_SETTINGS"
+
+  echo "  ✅ Claude Code hooks installed (PostToolUse + PreToolUse)"
 else
   echo "  ⏭️  Claude Code not found, skipping"
 fi

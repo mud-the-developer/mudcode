@@ -27,6 +27,7 @@ export class DiscordClient {
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildMessageReactions,
       ],
     });
 
@@ -136,6 +137,66 @@ export class DiscordClient {
         return '❌';
       default:
         return '📝';
+    }
+  }
+
+  /**
+   * Send a tool approval request to a channel and wait for user reaction
+   * @returns true if approved, false if denied
+   */
+  async sendApprovalRequest(
+    channelId: string,
+    toolName: string,
+    toolInput: any,
+    timeoutMs: number = 120000
+  ): Promise<boolean> {
+    const channel = await this.client.channels.fetch(channelId);
+    if (!channel?.isTextBased()) {
+      console.warn(`Channel ${channelId} is not a text channel, auto-approving`);
+      return true;
+    }
+
+    const textChannel = channel as TextChannel;
+
+    // Format the approval message
+    let inputPreview = '';
+    if (toolInput) {
+      const inputStr = typeof toolInput === 'string' ? toolInput : JSON.stringify(toolInput, null, 2);
+      inputPreview = inputStr.length > 500 ? inputStr.substring(0, 500) + '...' : inputStr;
+    }
+
+    const message = await textChannel.send(
+      `🔒 **Permission Request**\n` +
+      `Tool: \`${toolName}\`\n` +
+      `\`\`\`\n${inputPreview}\n\`\`\`\n` +
+      `React ✅ to allow, ❌ to deny (${Math.round(timeoutMs / 1000)}s timeout, auto-allow on timeout)`
+    );
+
+    await message.react('✅');
+    await message.react('❌');
+
+    try {
+      const collected = await message.awaitReactions({
+        filter: (reaction, user) =>
+          ['✅', '❌'].includes(reaction.emoji.name || '') && !user.bot,
+        max: 1,
+        time: timeoutMs,
+      });
+
+      if (collected.size === 0) {
+        await message.edit(message.content + '\n\n⏰ **Timed out — auto-allowed**');
+        return true;
+      }
+
+      const approved = collected.first()?.emoji.name === '✅';
+      await message.edit(
+        message.content + `\n\n${approved ? '✅ **Allowed**' : '❌ **Denied**'}`
+      );
+      return approved;
+    } catch {
+      // On error, default to allow so we don't block the agent
+      await message.edit(message.content + '\n\n⚠️ **Error — auto-allowed**').catch(() => {});
+      return true;
     }
   }
 

@@ -74,6 +74,8 @@ export class AgentBridge {
     const agentNames = agentRegistry.getAll().map(a => a.config.hookEndpoint).join('|');
     const hookPattern = new RegExp(`^/hook/([^/]+)/(${agentNames})$`);
 
+    const approvePattern = new RegExp(`^/approve/([^/]+)/(${agentNames})$`);
+
     this.httpServer = createServer(async (req, res) => {
       if (req.method !== 'POST') {
         res.writeHead(405);
@@ -83,26 +85,36 @@ export class AgentBridge {
 
       const { pathname } = parse(req.url || '');
 
-      // Expected path: /hook/{projectName}/{agentType}
-      const match = pathname?.match(hookPattern);
-      if (!match) {
-        res.writeHead(404);
-        res.end('Not found');
-        return;
-      }
-
-      const [, projectName, agentType] = match;
-
       let body = '';
       req.on('data', chunk => { body += chunk; });
       req.on('end', async () => {
         try {
-          const hookData = JSON.parse(body);
-          await this.handleHookOutput(projectName, agentType, hookData);
-          res.writeHead(200);
-          res.end('OK');
+          const data = JSON.parse(body);
+
+          // Route: /approve/{projectName}/{agentType}
+          const approveMatch = pathname?.match(approvePattern);
+          if (approveMatch) {
+            const [, projectName, agentType] = approveMatch;
+            const approved = await this.handleApprovalRequest(projectName, agentType, data);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ approved }));
+            return;
+          }
+
+          // Route: /hook/{projectName}/{agentType}
+          const hookMatch = pathname?.match(hookPattern);
+          if (hookMatch) {
+            const [, projectName, agentType] = hookMatch;
+            await this.handleHookOutput(projectName, agentType, data);
+            res.writeHead(200);
+            res.end('OK');
+            return;
+          }
+
+          res.writeHead(404);
+          res.end('Not found');
         } catch (error) {
-          console.error('Hook processing error:', error);
+          console.error('Request processing error:', error);
           res.writeHead(500);
           res.end('Internal error');
         }
@@ -130,6 +142,35 @@ export class AgentBridge {
       : this.formatGenericHookOutput(hookData, agentType);
 
     await this.discord.sendToChannel(channelId, message);
+  }
+
+  private async handleApprovalRequest(
+    projectName: string,
+    agentType: string,
+    data: any
+  ): Promise<boolean> {
+    const project = stateManager.getProject(projectName);
+    if (!project) {
+      console.warn(`Approval request for unknown project: ${projectName}, auto-approving`);
+      return true;
+    }
+
+    const channelId = project.discordChannels[agentType];
+    if (!channelId) {
+      console.warn(`No channel for ${agentType} in ${projectName}, auto-approving`);
+      return true;
+    }
+
+    const toolName = data.tool_name || data.toolName || 'unknown';
+    const toolInput = data.tool_input || data.input || '';
+
+    console.log(`🔒 [${projectName}/${agentType}] Approval request for: ${toolName}`);
+
+    const approved = await this.discord.sendApprovalRequest(channelId, toolName, toolInput);
+
+    console.log(`🔒 [${projectName}/${agentType}] ${toolName}: ${approved ? 'APPROVED' : 'DENIED'}`);
+
+    return approved;
   }
 
   private formatGenericHookOutput(hookData: any, agentType: string): string {

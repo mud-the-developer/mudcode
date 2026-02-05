@@ -70,8 +70,21 @@ EOF
    * Get the settings.json hook configuration
    */
   getSettingsConfig(hookScriptPath: string): object {
+    const hooksDir = hookScriptPath.replace(/\/[^/]+$/, '');
     return {
       hooks: {
+        PreToolUse: [
+          {
+            matcher: '',
+            hooks: [
+              {
+                type: 'command',
+                command: `${hooksDir}/claude-pre-tool.sh`,
+                timeout: 120,
+              },
+            ],
+          },
+        ],
         PostToolUse: [
           {
             matcher: '',
