@@ -281,7 +281,7 @@ program
 
       const projectPath = process.cwd();
       const projectName = options.name || basename(projectPath);
-      const port = DaemonManager.getProjectPort(projectName);
+      const port = DaemonManager.getPort();
 
       console.log(chalk.cyan(`\n🚀 agent-discord go — ${projectName}\n`));
 
@@ -330,17 +330,17 @@ program
         }
       }
 
-      // Ensure daemon is running for this project
-      const running = await DaemonManager.isRunning(port);
+      // Ensure global daemon is running
+      const running = await DaemonManager.isRunning();
       if (!running) {
         console.log(chalk.gray('   Starting bridge daemon...'));
         const entryPoint = resolve(import.meta.dirname, '../src/daemon-entry.js');
-        DaemonManager.startDaemon(entryPoint, projectName, port);
-        const ready = await DaemonManager.waitForReady(port);
+        DaemonManager.startDaemon(entryPoint);
+        const ready = await DaemonManager.waitForReady();
         if (ready) {
           console.log(chalk.green(`✅ Bridge daemon started (port ${port})`));
         } else {
-          console.log(chalk.yellow(`⚠️  Daemon may not be ready yet. Check logs: ${DaemonManager.getLogFile(projectName)}`));
+          console.log(chalk.yellow(`⚠️  Daemon may not be ready yet. Check logs: ${DaemonManager.getLogFile()}`));
         }
       } else {
         console.log(chalk.green(`✅ Bridge daemon already running (port ${port})`));
@@ -362,7 +362,7 @@ program
         const adapter = agentRegistry.get(agentName)!;
         const channelDisplayName = `${adapter.config.displayName} - ${projectName}`;
         const agents = { [agentName]: true };
-        const result = await bridge.setupProject(projectName, projectPath, agents, channelDisplayName, port, yolo);
+        const result = await bridge.setupProject(projectName, projectPath, agents, channelDisplayName, undefined, yolo);
 
         console.log(chalk.green(`✅ Project created`));
         console.log(chalk.cyan(`   Channel: #${result.channelName}`));
@@ -640,12 +640,61 @@ program
       console.log(chalk.green(`✅ Project removed from state`));
     }
 
-    // 4. Stop this project's daemon
-    if (DaemonManager.stopDaemon(projectName)) {
-      console.log(chalk.green(`✅ Bridge daemon stopped`));
-    }
+    // Note: daemon is global and shared, don't stop it here
+    // Use `agent-discord daemon stop` to stop the daemon
 
     console.log(chalk.cyan('\n✨ Done\n'));
+  });
+
+// Daemon command - manage the global daemon
+program
+  .command('daemon <action>')
+  .description('Manage the global bridge daemon (start|stop|status)')
+  .action(async (action: string) => {
+    const port = DaemonManager.getPort();
+
+    switch (action) {
+      case 'start': {
+        const running = await DaemonManager.isRunning();
+        if (running) {
+          console.log(chalk.green(`✅ Daemon already running (port ${port})`));
+          return;
+        }
+        console.log(chalk.gray('Starting daemon...'));
+        const entryPoint = resolve(import.meta.dirname, '../src/daemon-entry.js');
+        DaemonManager.startDaemon(entryPoint);
+        const ready = await DaemonManager.waitForReady();
+        if (ready) {
+          console.log(chalk.green(`✅ Daemon started (port ${port})`));
+        } else {
+          console.log(chalk.yellow(`⚠️  Daemon may not be ready. Check logs: ${DaemonManager.getLogFile()}`));
+        }
+        break;
+      }
+      case 'stop': {
+        if (DaemonManager.stopDaemon()) {
+          console.log(chalk.green('✅ Daemon stopped'));
+        } else {
+          console.log(chalk.gray('Daemon was not running'));
+        }
+        break;
+      }
+      case 'status': {
+        const running = await DaemonManager.isRunning();
+        if (running) {
+          console.log(chalk.green(`✅ Daemon running (port ${port})`));
+        } else {
+          console.log(chalk.gray('Daemon not running'));
+        }
+        console.log(chalk.gray(`   Log: ${DaemonManager.getLogFile()}`));
+        console.log(chalk.gray(`   PID: ${DaemonManager.getPidFile()}`));
+        break;
+      }
+      default:
+        console.error(chalk.red(`Unknown action: ${action}`));
+        console.log(chalk.gray('Available actions: start, stop, status'));
+        process.exit(1);
+    }
   });
 
 // Install hooks command

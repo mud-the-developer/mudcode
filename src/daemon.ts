@@ -1,6 +1,6 @@
 /**
  * Daemon manager for running bridge server in background
- * Each project gets its own daemon process with separate port, PID file, and log file
+ * Single global daemon serves all projects on a fixed port
  */
 
 import { spawn } from 'child_process';
@@ -10,35 +10,30 @@ import { join } from 'path';
 import { homedir } from 'os';
 
 const DAEMON_DIR = join(homedir(), '.discord-agent-bridge');
-const BASE_PORT = 18470;
-const PORT_RANGE = 1000;
+const DEFAULT_PORT = 18470;
 
 export class DaemonManager {
   /**
-   * Get a deterministic port for a project name
+   * Get the fixed daemon port
    */
-  static getProjectPort(projectName: string): number {
-    let hash = 0;
-    for (let i = 0; i < projectName.length; i++) {
-      hash = ((hash << 5) - hash + projectName.charCodeAt(i)) | 0;
-    }
-    return BASE_PORT + (Math.abs(hash) % PORT_RANGE);
+  static getPort(): number {
+    return DEFAULT_PORT;
   }
 
-  private static pidFile(projectName: string): string {
-    return join(DAEMON_DIR, `${projectName}.pid`);
+  private static pidFile(): string {
+    return join(DAEMON_DIR, 'daemon.pid');
   }
 
-  private static logFile(projectName: string): string {
-    return join(DAEMON_DIR, `${projectName}.log`);
+  private static logFile(): string {
+    return join(DAEMON_DIR, 'daemon.log');
   }
 
   /**
-   * Check if something is listening on the given port
+   * Check if daemon is running on the default port
    */
-  static isRunning(port: number): Promise<boolean> {
+  static isRunning(): Promise<boolean> {
     return new Promise((resolve) => {
-      const conn = createConnection({ port, host: '127.0.0.1' });
+      const conn = createConnection({ port: DEFAULT_PORT, host: '127.0.0.1' });
       conn.on('connect', () => {
         conn.destroy();
         resolve(true);
@@ -50,15 +45,15 @@ export class DaemonManager {
   }
 
   /**
-   * Start the bridge server as a detached background process for a specific project
+   * Start the global bridge daemon
    */
-  static startDaemon(entryPoint: string, projectName: string, port: number): number {
+  static startDaemon(entryPoint: string): number {
     if (!existsSync(DAEMON_DIR)) {
       mkdirSync(DAEMON_DIR, { recursive: true });
     }
 
-    const logFile = DaemonManager.logFile(projectName);
-    const pidFile = DaemonManager.pidFile(projectName);
+    const logFile = DaemonManager.logFile();
+    const pidFile = DaemonManager.pidFile();
 
     const out = openSync(logFile, 'a');
     const err = openSync(logFile, 'a');
@@ -73,7 +68,7 @@ export class DaemonManager {
       stdio: ['ignore', out, err],
       env: {
         ...process.env,
-        HOOK_SERVER_PORT: String(port),
+        HOOK_SERVER_PORT: String(DEFAULT_PORT),
       },
     });
 
@@ -86,10 +81,10 @@ export class DaemonManager {
   }
 
   /**
-   * Stop the daemon for a specific project
+   * Stop the global daemon
    */
-  static stopDaemon(projectName: string): boolean {
-    const pidFile = DaemonManager.pidFile(projectName);
+  static stopDaemon(): boolean {
+    const pidFile = DaemonManager.pidFile();
 
     if (!existsSync(pidFile)) {
       return false;
@@ -107,12 +102,12 @@ export class DaemonManager {
   }
 
   /**
-   * Wait for the daemon to start listening on a port
+   * Wait for the daemon to start listening
    */
-  static async waitForReady(port: number, timeoutMs: number = 5000): Promise<boolean> {
+  static async waitForReady(timeoutMs: number = 5000): Promise<boolean> {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
-      if (await DaemonManager.isRunning(port)) {
+      if (await DaemonManager.isRunning()) {
         return true;
       }
       await new Promise((r) => setTimeout(r, 250));
@@ -120,11 +115,11 @@ export class DaemonManager {
     return false;
   }
 
-  static getLogFile(projectName: string): string {
-    return DaemonManager.logFile(projectName);
+  static getLogFile(): string {
+    return DaemonManager.logFile();
   }
 
-  static getPidFile(projectName: string): string {
-    return DaemonManager.pidFile(projectName);
+  static getPidFile(): string {
+    return DaemonManager.pidFile();
   }
 }
