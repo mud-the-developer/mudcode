@@ -51,6 +51,13 @@ if [[ -z "$LAST_RESPONSE" ]]; then
   exit 0
 fi
 
+# Only notify for completion messages (filter out intermediate responses)
+COMPLETION_PATTERN='완료|끝|마쳤|했습니다|됩니다|done|complete|finish|fixed|implement'
+if ! echo "$LAST_RESPONSE" | grep -qiE "$COMPLETION_PATTERN"; then
+  echo "[stop-hook] SKIP: not a completion message" >> "$LOG"
+  exit 0
+fi
+
 # Truncate for Discord (2000 char limit, leave room for header)
 MAX_LEN=1900
 if [[ ${#LAST_RESPONSE} -gt $MAX_LEN ]]; then

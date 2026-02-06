@@ -89,7 +89,7 @@ program
       const installedAgents = agentRegistry.getAll().filter(a => a.isInstalled());
       console.log(chalk.white('\n🤖 Installed agents:'));
       if (installedAgents.length === 0) {
-        console.log(chalk.yellow('   None detected. Install an agent CLI (claude, gemini-cli, codex) first.'));
+        console.log(chalk.yellow('   None detected. Install an agent CLI (claude, opencode, codex) first.'));
       } else {
         for (const a of installedAgents) {
           console.log(chalk.green(`   ✓ ${a.config.displayName} (${a.config.command})`));
@@ -199,7 +199,7 @@ program
 program
   .command('init')
   .description('Initialize Discord bridge for current project')
-  .argument('<agent>', 'Agent to use (claude, gemini, or codex)')
+  .argument('<agent>', 'Agent to use (claude, opencode, or codex)')
   .argument('<description>', 'Channel description (e.g., "내 프로젝트 작업")')
   .option('-n, --name <name>', 'Project name (defaults to directory name)')
   .action(async (agentName: string, description: string, options) => {
@@ -266,7 +266,7 @@ program
 program
   .command('go')
   .description('Quick start: launch daemon, setup project, attach tmux')
-  .argument('[agent]', 'Agent to use (claude, gemini, codex)')
+  .argument('[agent]', 'Agent to use (claude, opencode, codex)')
   .option('-n, --name <name>', 'Project name (defaults to directory name)')
   .option('--no-attach', 'Do not attach to tmux session')
   .option('--yolo', 'YOLO mode: run agent with --dangerously-skip-permissions (no approval needed)')
@@ -310,7 +310,7 @@ program
         // Auto-detect installed agents
         const installed = agentRegistry.getAll().filter(a => a.isInstalled());
         if (installed.length === 0) {
-          console.error(chalk.red('No agent CLIs found. Install one first (claude, gemini-cli, codex).'));
+          console.error(chalk.red('No agent CLIs found. Install one first (claude, opencode, codex).'));
           process.exit(1);
         } else if (installed.length === 1) {
           agentName = installed[0].config.name;

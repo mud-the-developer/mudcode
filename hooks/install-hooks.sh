@@ -81,33 +81,14 @@ else
   echo "  ⏭️  Claude Code not found, skipping"
 fi
 
-# Gemini CLI
-GEMINI_SETTINGS="$HOME/.gemini/settings.json"
-if command -v gemini &>/dev/null || [[ -d "$HOME/.gemini" ]]; then
-  echo "  📦 Found Gemini CLI"
-
-  mkdir -p "$HOME/.gemini"
-  if [[ ! -f "$GEMINI_SETTINGS" ]]; then
-    echo '{}' > "$GEMINI_SETTINGS"
-  fi
-
-  cp "$GEMINI_SETTINGS" "$GEMINI_SETTINGS.bak.$(date +%s)"
-
-  HOOK_CMD="$SCRIPT_DIR/gemini-post-tool.sh"
-  jq --arg cmd "$HOOK_CMD" '
-    .hooks.post_tool_use //= [] |
-    if (.hooks.post_tool_use | map(select(.command == $cmd)) | length) == 0 then
-      .hooks.post_tool_use += [{
-        "command": $cmd
-      }]
-    else
-      .
-    end
-  ' "$GEMINI_SETTINGS" > "$GEMINI_SETTINGS.tmp" && mv "$GEMINI_SETTINGS.tmp" "$GEMINI_SETTINGS"
-
-  echo "  ✅ Gemini CLI hook installed"
+# OpenCode
+if command -v opencode &>/dev/null; then
+  echo "  📦 Found OpenCode"
+  echo "  ℹ️  OpenCode uses a plugin system for hooks."
+  echo "     See docs for plugin setup: https://opencode.ai/docs/plugins/"
+  echo "  ✅ OpenCode detected"
 else
-  echo "  ⏭️  Gemini CLI not found, skipping"
+  echo "  ⏭️  OpenCode not found, skipping"
 fi
 
 # Codex CLI (TOML format)

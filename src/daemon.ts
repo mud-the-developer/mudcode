@@ -61,7 +61,7 @@ export class DaemonManager {
     // Use caffeinate on macOS to prevent sleep while daemon is running
     const isMac = process.platform === 'darwin';
     const command = isMac ? 'caffeinate' : 'node';
-    const args = isMac ? ['-dims', 'node', entryPoint] : [entryPoint];
+    const args = isMac ? ['-ims', 'node', entryPoint] : [entryPoint];
 
     const child = spawn(command, args, {
       detached: true,

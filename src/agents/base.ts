@@ -75,7 +75,7 @@ export abstract class BaseAgentAdapter {
   abstract getSettingsConfig(hookScriptPath: string): object;
 }
 
-export type AgentType = 'claude' | 'gemini' | 'codex' | 'aider' | string;
+export type AgentType = 'claude' | 'opencode' | 'codex' | string;
 
 /**
  * Registry for all available agent adapters

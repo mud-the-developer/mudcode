@@ -39,9 +39,15 @@ if [[ "$TOOL_NAME" == "AskUserQuestion" ]]; then
     end
   ' 2>/dev/null || echo "Question from Claude (check terminal)")
 
-  NOTIFY_MESSAGE="❓ **Claude is asking a question**\n\n${MESSAGE}\n\n💬 Reply here to answer (your message will be sent to the terminal)"
+  # Send structured question data so the bridge can render interactive buttons
+  PAYLOAD=$(echo "$TOOL_INPUT" | jq '{questions: .questions}' 2>/dev/null || echo '{}')
 
-  PAYLOAD=$(jq -n --arg msg "$NOTIFY_MESSAGE" '{message: $msg}')
+  # Fallback to plain text if question parsing fails
+  if [ "$PAYLOAD" = "{}" ] || [ "$PAYLOAD" = "null" ]; then
+    NOTIFY_MESSAGE="❓ **Claude is asking a question**\n\n${MESSAGE}\n\n💬 Reply here to answer"
+    PAYLOAD=$(jq -n --arg msg "$NOTIFY_MESSAGE" '{message: $msg}')
+  fi
+
   curl -s -X POST \
     -H "Content-Type: application/json" \
     -d "$PAYLOAD" \

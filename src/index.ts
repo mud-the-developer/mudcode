@@ -206,6 +206,24 @@ export class AgentBridge {
     const channelId = project.discordChannels[agentType];
     if (!channelId) return;
 
+    // Handle AskUserQuestion with interactive buttons
+    if (data.questions && Array.isArray(data.questions)) {
+      this.discord
+        .sendQuestionWithButtons(channelId, data.questions)
+        .then((selected) => {
+          if (selected) {
+            const proj = stateManager.getProject(projectName);
+            if (proj) {
+              this.tmux.sendKeysToWindow(proj.tmuxSession, agentType, selected);
+            }
+          }
+        })
+        .catch((err) => {
+          console.error(`Button interaction error: ${err}`);
+        });
+      return;
+    }
+
     const message = data.message || '';
     if (message) {
       console.log(`📢 [${projectName}/${agentType}] Notification sent`);

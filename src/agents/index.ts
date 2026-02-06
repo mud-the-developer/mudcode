@@ -4,17 +4,17 @@
 
 export * from './base.js';
 export { claudeAdapter, ClaudeAdapter } from './claude.js';
-export { geminiAdapter, GeminiAdapter } from './gemini.js';
+export { opencodeAdapter, OpenCodeAdapter } from './opencode.js';
 export { codexAdapter, CodexAdapter } from './codex.js';
 
 import { agentRegistry } from './base.js';
 import { claudeAdapter } from './claude.js';
-import { geminiAdapter } from './gemini.js';
+import { opencodeAdapter } from './opencode.js';
 import { codexAdapter } from './codex.js';
 
 // Register all available agents
 agentRegistry.register(claudeAdapter);
-agentRegistry.register(geminiAdapter);
+agentRegistry.register(opencodeAdapter);
 agentRegistry.register(codexAdapter);
 
 export { agentRegistry };
