@@ -194,7 +194,8 @@ export class AgentBridge {
     agents: ProjectAgents,
     channelDisplayName?: string,
     overridePort?: number,
-    yolo = false
+    yolo = false,
+    sandbox = false
   ): Promise<{ channelName: string; channelId: string; agentName: string; tmuxSession: string }> {
     const guildId = this.stateManager.getGuildId();
     if (!guildId) {
@@ -230,6 +231,9 @@ export class AgentBridge {
     if (yolo) {
       this.tmux.setSessionEnv(tmuxSession, 'AGENT_DISCORD_YOLO', '1');
     }
+    if (sandbox) {
+      this.tmux.setSessionEnv(tmuxSession, 'AGENT_DISCORD_SANDBOX', '1');
+    }
 
     // Start agent in tmux window
     const discordChannels: { [key: string]: string | undefined } = {
@@ -239,7 +243,7 @@ export class AgentBridge {
     this.tmux.startAgentInWindow(
       tmuxSession,
       adapter.config.name,
-      adapter.getStartCommand(projectPath, yolo)
+      adapter.getStartCommand(projectPath, yolo, sandbox)
     );
 
     // Save state

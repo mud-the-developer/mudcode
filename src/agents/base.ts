@@ -36,7 +36,7 @@ export abstract class BaseAgentAdapter {
   /**
    * Get the command to start this agent in a directory
    */
-  getStartCommand(projectPath: string, _yolo = false): string {
+  getStartCommand(projectPath: string, _yolo = false, _sandbox = false): string {
     return `cd "${projectPath}" && ${this.config.command}`;
   }
 
@@ -48,7 +48,7 @@ export abstract class BaseAgentAdapter {
   }
 }
 
-export type AgentType = 'claude' | 'opencode' | 'codex' | string;
+export type AgentType = 'claude' | 'opencode' | string;
 
 /**
  * Registry for all available agent adapters

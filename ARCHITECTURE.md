@@ -19,7 +19,7 @@
 
 ### 1.1 프로젝트 목적
 
-discord-agent-bridge는 AI 에이전트 CLI(Claude Code, OpenCode, Codex CLI)의 출력을 Discord로 실시간 브릿징하는 도구입니다. 사용자는 Discord 채널에서 에이전트에게 명령을 보내고, 에이전트의 실행 상태와 결과를 실시간으로 모니터링할 수 있습니다.
+discord-agent-bridge는 AI 에이전트 CLI(Claude Code, OpenCode)의 출력을 Discord로 실시간 브릿징하는 도구입니다. 사용자는 Discord 채널에서 에이전트에게 명령을 보내고, 에이전트의 실행 상태와 결과를 실시간으로 모니터링할 수 있습니다.
 
 ### 1.2 해결하는 문제
 
@@ -104,8 +104,8 @@ discord-agent-bridge는 AI 에이전트 CLI(Claude Code, OpenCode, Codex CLI)의
     │         │      │          │      │          │      │        │
     │ ┌─────┐ │      │ ┌──────┐ │      │ ┌─────┐ │      │        │
     │ │cli  │ │      │ │cli   │ │      │ │cli  │ │      │        │
-    │ │claude├─┼──────┼─┤open  ├─┼──────┼─┤codex├─┼──────┼─ ...   │
-    │ │code │ │      │ │code  │ │      │ │cli  │ │      │        │
+    │ │claude├─┼──────┼─┤open  ├─┼──────┼─┤...  ├─┼──────┼─ ...   │
+    │ │code │ │      │ │code  │ │      │ │     │ │      │        │
     │ └─────┘ │      │ └──────┘ │      │ └─────┘ │      │        │
     │         │      │          │      │          │      │        │
     └─────────┘      └──────────┘      └──────────┘      └────────┘
@@ -379,9 +379,12 @@ export interface AgentConfig {
 **Claude Code (claude.ts)**
 ```typescript
 class ClaudeAdapter extends BaseAgentAdapter {
-  getStartCommand(projectPath: string, yolo = false): string {
-    const flags = yolo ? ' --dangerously-skip-permissions' : ''
-    return `cd "${projectPath}" && claude${flags}`
+  getStartCommand(projectPath: string, yolo = false, sandbox = false): string {
+    const flags = []
+    if (yolo) flags.push('--dangerously-skip-permissions')
+    if (sandbox) flags.push('--sandbox')
+    const flagStr = flags.length > 0 ? ' ' + flags.join(' ') : ''
+    return `cd "${projectPath}" && claude${flagStr}`
   }
 }
 ```
@@ -389,13 +392,6 @@ class ClaudeAdapter extends BaseAgentAdapter {
 **OpenCode (opencode.ts)**
 ```typescript
 class OpenCodeAdapter extends BaseAgentAdapter {
-  // 기본 구현 사용 (추가 옵션 없음)
-}
-```
-
-**Codex CLI (codex.ts)**
-```typescript
-class CodexAdapter extends BaseAgentAdapter {
   // 기본 구현 사용 (추가 옵션 없음)
 }
 ```
@@ -443,6 +439,8 @@ class AgentRegistry {
    import { newagentAdapter } from './newagent.js'
    agentRegistry.register(newagentAdapter)
    ```
+
+**참고**: Codex CLI 지원은 제거되었습니다. Claude Code와 OpenCode만 지원합니다.
 
 ---
 
@@ -734,7 +732,7 @@ abstract class BaseAgentAdapter {
   readonly config: AgentConfig
 
   isInstalled(): boolean
-  getStartCommand(projectPath: string, yolo = false): string
+  getStartCommand(projectPath: string, yolo = false, sandbox = false): string
   matchesChannel(channelName: string, projectName: string): boolean
 }
 ```
@@ -750,20 +748,30 @@ if (!adapter.isInstalled()) {
 }
 
 // 시작 명령 생성
-const command = adapter.getStartCommand('/path/to/project', false)
+const command = adapter.getStartCommand('/path/to/project', false, false)
 // "cd \"/path/to/project\" && claude"
 
 // YOLO 모드
-const yamaCommand = adapter.getStartCommand('/path/to/project', true)
+const yoloCommand = adapter.getStartCommand('/path/to/project', true, false)
 // "cd \"/path/to/project\" && claude --dangerously-skip-permissions"
+
+// Sandbox 모드
+const sandboxCommand = adapter.getStartCommand('/path/to/project', false, true)
+// "cd \"/path/to/project\" && claude --sandbox"
+
+// YOLO + Sandbox 모드
+const bothCommand = adapter.getStartCommand('/path/to/project', true, true)
+// "cd \"/path/to/project\" && claude --dangerously-skip-permissions --sandbox"
 ```
 
-### 5.3 YOLO 모드
+### 5.3 YOLO 모드 및 Sandbox 모드
+
+#### YOLO 모드
 
 YOLO 모드는 에이전트가 모든 권한 확인을 건너뛰도록 설정합니다:
 
 - Claude Code: `--dangerously-skip-permissions` 플래그 추가
-- OpenCode/Codex: 기본 구현 사용 (향후 확장 가능)
+- OpenCode: 기본 구현 사용 (향후 확장 가능)
 
 **사용 예시:**
 
@@ -778,6 +786,25 @@ agent-discord go --yolo
 tmux set-environment -t agent-myproject AGENT_DISCORD_YOLO 1
 ```
 
+#### Sandbox 모드
+
+Sandbox 모드는 Claude Code를 격리된 Docker 컨테이너에서 실행합니다:
+
+- Claude Code만 지원: `--sandbox` 플래그 추가
+- OpenCode: 지원하지 않음
+
+**사용 예시:**
+
+```bash
+agent-discord go --sandbox
+```
+
+**YOLO와 Sandbox 동시 사용:**
+
+```bash
+agent-discord go --yolo --sandbox
+```
+
 ### 5.4 에이전트 등록 시스템
 
 ```typescript
@@ -786,12 +813,10 @@ tmux set-environment -t agent-myproject AGENT_DISCORD_YOLO 1
 import { agentRegistry } from './base.js'
 import { claudeAdapter } from './claude.js'
 import { opencodeAdapter } from './opencode.js'
-import { codexAdapter } from './codex.js'
 
 // 모든 어댑터 등록
 agentRegistry.register(claudeAdapter)
 agentRegistry.register(opencodeAdapter)
-agentRegistry.register(codexAdapter)
 
 export { agentRegistry }
 ```
@@ -1044,6 +1069,7 @@ agent-discord go [agent] [options]
 - `-n, --name <name>`: 프로젝트명 (기본: 현재 디렉토리명)
 - `--no-attach`: tmux에 자동 연결하지 않음
 - `--yolo`: YOLO 모드 (권한 확인 생략)
+- `--sandbox`: Sandbox 모드 (Claude Code를 Docker 컨테이너에서 실행)
 
 **동작:**
 1. 데몬 확인/시작
@@ -1064,6 +1090,12 @@ agent-discord go claude
 # YOLO 모드
 agent-discord go --yolo
 
+# Sandbox 모드
+agent-discord go --sandbox
+
+# YOLO + Sandbox 모드
+agent-discord go --yolo --sandbox
+
 # 프로젝트명 지정
 agent-discord go -n my-awesome-project
 
@@ -1078,7 +1110,7 @@ agent-discord init <agent> <description> [options]
 ```
 
 **인자:**
-- `agent`: claude, opencode, codex 중 하나
+- `agent`: claude, opencode 중 하나
 - `description`: Discord 채널 설명 (예: "내 프로젝트 작업")
 
 **옵션:**
@@ -1268,8 +1300,7 @@ discord-agent-bridge/
 │   │   ├── index.ts              # 모듈 export, registry 등록
 │   │   ├── base.ts               # BaseAgentAdapter, AgentRegistry
 │   │   ├── claude.ts             # ClaudeAdapter
-│   │   ├── opencode.ts           # OpenCodeAdapter
-│   │   └── codex.ts              # CodexAdapter
+│   │   └── opencode.ts           # OpenCodeAdapter
 │   │
 │   ├── state/
 │   │   ├── index.ts              # StateManager export
@@ -1305,7 +1336,6 @@ discord-agent-bridge/
 | `src/agents/base.ts` | 어댑터 기본 클래스 | ~88 |
 | `src/agents/claude.ts` | Claude Code 어댑터 | ~26 |
 | `src/agents/opencode.ts` | OpenCode 어댑터 | ~22 |
-| `src/agents/codex.ts` | Codex CLI 어댑터 | ~22 |
 | `src/state/index.ts` | 상태 관리 | ~115 |
 | `src/config/index.ts` | 설정 관리 | ~90 |
 | `src/types/index.ts` | 타입 정의 | ~51 |
@@ -1412,6 +1442,7 @@ npm link             # 글로벌 agent-discord 명령어 등록
 | `AGENT_DISCORD_PROJECT` | 없음 | 프로젝트명 (tmux에서만) |
 | `AGENT_DISCORD_PORT` | 없음 | 훅 서버 포트 (tmux에서만) |
 | `AGENT_DISCORD_YOLO` | 없음 | YOLO 모드 플래그 (tmux에서만) |
+| `AGENT_DISCORD_SANDBOX` | 없음 | Sandbox 모드 플래그 (tmux에서만) |
 
 ### 주요 파일 위치
 

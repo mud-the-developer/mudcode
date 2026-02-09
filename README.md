@@ -9,19 +9,20 @@ Bridge AI agent CLIs to Discord for remote monitoring and collaboration.
 
 ## Overview
 
-Discord Agent Bridge connects AI coding assistants (Claude Code, OpenCode, Codex) to Discord, enabling remote monitoring and collaboration. Watch your AI agents work in real-time through Discord channels, share progress with your team, and track multiple projects simultaneously.
+Discord Agent Bridge connects AI coding assistants (Claude Code, OpenCode) to Discord, enabling remote monitoring and collaboration. Watch your AI agents work in real-time through Discord channels, share progress with your team, and track multiple projects simultaneously.
 
 The bridge uses a polling-based architecture that captures tmux pane content every 30 seconds, detects state changes, and streams updates to dedicated Discord channels. Each project gets its own channel, and a single global daemon manages all connections efficiently.
 
 ## Features
 
-- **Multi-Agent Support**: Works with Claude Code, OpenCode, and Codex
+- **Multi-Agent Support**: Works with Claude Code and OpenCode
 - **Auto-Discovery**: Automatically detects installed AI agents on your system
 - **Real-Time Streaming**: Captures tmux output and streams to Discord every 30 seconds
 - **Project Isolation**: Each project gets a dedicated Discord channel
 - **Single Daemon**: One Discord bot connection manages all projects
 - **Session Management**: Persistent tmux sessions survive disconnections
-- **YOLO Mode**: Optional `--dangerously-skip-permissions` flag for agent autonomy
+- **YOLO Mode**: Optional `--yolo` flag runs agents with `--dangerously-skip-permissions`
+- **Sandbox Mode**: Optional `--sandbox` flag runs Claude Code in isolated Docker container
 - **Rich CLI**: Intuitive commands for setup, control, and monitoring
 - **Type-Safe**: Written in TypeScript with dependency injection pattern
 - **Well-Tested**: 129 unit tests with Vitest
@@ -36,7 +37,6 @@ The bridge uses a polling-based architecture that captures tmux pane content eve
 - **AI Agent**: At least one of:
   - [Claude Code](https://claude.ai/claude-code) (requires API key)
   - [OpenCode](https://github.com/OpenCodeAI/opencode) (requires API key)
-  - [Codex](https://github.com/codexai/codex) (requires API key)
 
 ## Installation
 
@@ -71,7 +71,7 @@ agent-discord setup YOUR_DISCORD_BOT_TOKEN
 # Navigate to your project directory
 cd ~/projects/my-app
 
-# Initialize with Claude Code (or 'opencode', 'codex')
+# Initialize with Claude Code (or 'opencode')
 agent-discord init claude "My awesome application"
 ```
 
@@ -159,6 +159,7 @@ Start the AI agent for this project.
 ```bash
 agent-discord start                    # Normal mode
 agent-discord start --yolo            # YOLO mode (skip permissions)
+agent-discord start --sandbox         # Sandbox mode (Docker isolation for Claude Code)
 agent-discord start --dangerously-skip-permissions  # Same as --yolo
 ```
 
@@ -194,7 +195,8 @@ Quick start: start daemon, start project, and attach.
 
 ```bash
 agent-discord go              # Normal mode
-agent-discord go --yolo      # YOLO mode
+agent-discord go --yolo      # YOLO mode (skip permissions)
+agent-discord go --sandbox   # Sandbox mode (Docker isolation for Claude Code)
 ```
 
 ## How It Works
@@ -203,7 +205,7 @@ agent-discord go --yolo      # YOLO mode
 
 ```
 ┌─────────────────┐
-│  AI Agent CLI   │  (Claude, OpenCode, Codex)
+│  AI Agent CLI   │  (Claude, OpenCode)
 │  Running in     │
 │  tmux session   │
 └────────┬────────┘
@@ -225,7 +227,7 @@ agent-discord go --yolo      # YOLO mode
 
 - **Daemon Manager**: Single global process managing Discord connection
 - **Capture Poller**: Polls tmux panes every 30s, detects changes, sends to Discord
-- **Agent Registry**: Factory pattern for multi-agent support (Claude, OpenCode, Codex)
+- **Agent Registry**: Factory pattern for multi-agent support (Claude, OpenCode)
 - **State Manager**: Tracks project state, sessions, and channels
 - **Dependency Injection**: Interfaces for storage, execution, environment (testable, mockable)
 
@@ -250,11 +252,10 @@ This approach is simpler and more reliable than hook-based systems, with minimal
 
 ## Supported Agents
 
-| Agent | Binary | Auto-Detect | YOLO Support | Notes |
-|-------|--------|-------------|--------------|-------|
-| **Claude Code** | `claude-code` | Yes | Yes | Official Anthropic CLI |
-| **OpenCode** | `opencode` | Yes | Yes | Open-source alternative |
-| **Codex** | `codex` | Yes | Yes | Legacy agent support |
+| Agent | Binary | Auto-Detect | YOLO Support | Sandbox Support | Notes |
+|-------|--------|-------------|--------------|-----------------|-------|
+| **Claude Code** | `claude-code` | Yes | Yes | Yes | Official Anthropic CLI |
+| **OpenCode** | `opencode` | Yes | Yes | No | Open-source alternative |
 
 ### Agent Detection
 
@@ -268,7 +269,7 @@ To add a new agent, implement the `AgentAdapter` interface in `src/agents/`:
 export interface AgentAdapter {
   name: string;
   detect(): Promise<boolean>;
-  getCommand(projectPath: string, yolo: boolean): string[];
+  getCommand(projectPath: string, yolo: boolean, sandbox: boolean): string[];
 }
 ```
 
@@ -442,7 +443,7 @@ MIT License - see [LICENSE](LICENSE) file for details.
 ## Acknowledgments
 
 - Built with [Discord.js](https://discord.js.org/)
-- Powered by [Claude Code](https://claude.ai/claude-code), [OpenCode](https://github.com/OpenCodeAI/opencode), and [Codex](https://github.com/codexai/codex)
+- Powered by [Claude Code](https://claude.ai/claude-code) and [OpenCode](https://github.com/OpenCodeAI/opencode)
 - Inspired by the need for remote AI agent monitoring and collaboration
 
 ## Support

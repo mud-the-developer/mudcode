@@ -16,8 +16,10 @@ export class ClaudeAdapter extends BaseAgentAdapter {
     super(claudeConfig);
   }
 
-  getStartCommand(projectPath: string, yolo = false): string {
-    const flags = yolo ? ' --dangerously-skip-permissions' : '';
+  getStartCommand(projectPath: string, yolo = false, sandbox = false): string {
+    let flags = '';
+    if (sandbox) flags += ' --sandbox';
+    if (yolo) flags += ' --dangerously-skip-permissions';
     return `cd "${projectPath}" && ${this.config.command}${flags}`;
   }
 }

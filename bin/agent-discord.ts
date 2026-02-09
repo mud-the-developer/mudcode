@@ -93,7 +93,7 @@ program
       const installedAgents = agentRegistry.getAll().filter(a => a.isInstalled());
       console.log(chalk.white('\n🤖 Installed agents:'));
       if (installedAgents.length === 0) {
-        console.log(chalk.yellow('   None detected. Install an agent CLI (claude, opencode, codex) first.'));
+        console.log(chalk.yellow('   None detected. Install an agent CLI (claude, opencode) first.'));
       } else {
         for (const a of installedAgents) {
           console.log(chalk.green(`   ✓ ${a.config.displayName} (${a.config.command})`));
@@ -193,7 +193,7 @@ program
 program
   .command('init')
   .description('Initialize Discord bridge for current project')
-  .argument('<agent>', 'Agent to use (claude, opencode, or codex)')
+  .argument('<agent>', 'Agent to use (claude or opencode)')
   .argument('<description>', 'Channel description (e.g., "내 프로젝트 작업")')
   .option('-n, --name <name>', 'Project name (defaults to directory name)')
   .action(async (agentName: string, description: string, options) => {
@@ -260,10 +260,11 @@ program
 program
   .command('go')
   .description('Quick start: launch daemon, setup project, attach tmux')
-  .argument('[agent]', 'Agent to use (claude, opencode, codex)')
+  .argument('[agent]', 'Agent to use (claude, opencode)')
   .option('-n, --name <name>', 'Project name (defaults to directory name)')
   .option('--no-attach', 'Do not attach to tmux session')
   .option('--yolo', 'YOLO mode: run agent with --dangerously-skip-permissions (no approval needed)')
+  .option('--sandbox', 'Sandbox mode: run Claude Code in a sandboxed Docker container')
   .action(async (agentArg: string | undefined, options) => {
     try {
       validateConfig();
@@ -304,7 +305,7 @@ program
         // Auto-detect installed agents
         const installed = agentRegistry.getAll().filter(a => a.isInstalled());
         if (installed.length === 0) {
-          console.error(chalk.red('No agent CLIs found. Install one first (claude, opencode, codex).'));
+          console.error(chalk.red('No agent CLIs found. Install one first (claude, opencode).'));
           process.exit(1);
         } else if (installed.length === 1) {
           agentName = installed[0].config.name;
@@ -342,7 +343,11 @@ program
 
       const tmux = new TmuxManager('agent-');
       const yolo = !!options.yolo;
+      const sandbox = !!options.sandbox;
 
+      if (sandbox) {
+        console.log(chalk.cyan('   🐳 Sandbox mode: --sandbox (Docker container)'));
+      }
       if (yolo) {
         console.log(chalk.yellow('   ⚡ YOLO mode: --dangerously-skip-permissions'));
       }
@@ -356,7 +361,7 @@ program
         const adapter = agentRegistry.get(agentName)!;
         const channelDisplayName = `${adapter.config.displayName} - ${projectName}`;
         const agents = { [agentName]: true };
-        const result = await bridge.setupProject(projectName, projectPath, agents, channelDisplayName, undefined, yolo);
+        const result = await bridge.setupProject(projectName, projectPath, agents, channelDisplayName, undefined, yolo, sandbox);
 
         console.log(chalk.green(`✅ Project created`));
         console.log(chalk.cyan(`   Channel: #${result.channelName}`));
@@ -381,6 +386,9 @@ program
         tmux.setSessionEnv(tmuxSession, 'AGENT_DISCORD_PORT', String(port));
         if (yolo) {
           tmux.setSessionEnv(tmuxSession, 'AGENT_DISCORD_YOLO', '1');
+        }
+        if (sandbox) {
+          tmux.setSessionEnv(tmuxSession, 'AGENT_DISCORD_SANDBOX', '1');
         }
         console.log(chalk.green(`✅ Existing project resumed`));
       }
