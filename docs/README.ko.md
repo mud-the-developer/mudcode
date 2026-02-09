@@ -33,9 +33,9 @@ Discord Agent Bridge는 AI 코딩 어시스턴트(Claude Code, OpenCode)를 Disc
 
 | 플랫폼 | 지원 | 비고 |
 |--------|------|------|
-| **macOS** | Yes | 완벽 지원 |
-| **Linux** | Yes | 완벽 지원 |
-| **Windows (WSL)** | Yes | WSL에 tmux 설치 필요 |
+| **macOS** | Yes | 개발 및 테스트 완료 |
+| **Linux** | Expected | tmux 기반이라 동작 예상, 미검증 |
+| **Windows (WSL)** | Expected | WSL에 tmux 설치 시 동작 예상, 미검증 |
 | **Windows (네이티브)** | No | tmux를 네이티브로 사용할 수 없음 |
 
 ## 사전 요구 사항

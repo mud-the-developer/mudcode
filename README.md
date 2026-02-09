@@ -33,9 +33,9 @@ The bridge uses a polling-based architecture that captures tmux pane content eve
 
 | Platform | Supported | Notes |
 |----------|-----------|-------|
-| **macOS** | Yes | Fully supported |
-| **Linux** | Yes | Fully supported |
-| **Windows (WSL)** | Yes | Requires WSL with tmux installed |
+| **macOS** | Yes | Developed and tested |
+| **Linux** | Expected | Should work (tmux-based), not yet tested |
+| **Windows (WSL)** | Expected | Should work with tmux installed in WSL, not yet tested |
 | **Windows (native)** | No | tmux is not available natively |
 
 ## Prerequisites
