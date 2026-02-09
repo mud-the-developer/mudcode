@@ -94,7 +94,7 @@ In the **"BOT PERMISSIONS"** section that appears below, check:
 
 **General Permissions:**
 - ✅ **View Channels** - Required to see and access channels
-- ✅ **Manage Channels** - For creating agent-specific channels (optional)
+- ✅ **Manage Channels** - Required for creating agent-specific channels
 
 ### Step 3.4: Invite the Bot
 
@@ -119,7 +119,7 @@ In the **"BOT PERMISSIONS"** section that appears below, check:
 | Read Message History | ✅ Yes | Track conversation context |
 | Embed Links | ⚠️ Recommended | Format rich messages |
 | Attach Files | ⚠️ Recommended | Send logs or output files |
-| Manage Channels | ❌ Optional | Auto-create agent channels |
+| Manage Channels | ✅ Yes | Auto-create agent channels on `init`/`go` |
 | Add Reactions | ❌ Optional | Interactive button responses |
 
 ### Permission Issues

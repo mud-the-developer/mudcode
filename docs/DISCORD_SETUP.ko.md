@@ -94,7 +94,7 @@ Discord Agent Bridge를 위한 Discord 봇 설정 완전 가이드입니다.
 
 **일반 권한:**
 - ✅ **View Channels** - 채널 보기 및 접근에 필요
-- ✅ **Manage Channels** - 에이전트 전용 채널 생성용 (선택)
+- ✅ **Manage Channels** - 에이전트 전용 채널 자동 생성에 필수
 
 ### Step 3.4: 봇 초대하기
 
@@ -119,7 +119,7 @@ Discord Agent Bridge를 위한 Discord 봇 설정 완전 가이드입니다.
 | Read Message History (메시지 기록 읽기) | ✅ 필수 | 대화 컨텍스트 추적 |
 | Embed Links (링크 임베드) | ⚠️ 권장 | 리치 메시지 포맷팅 |
 | Attach Files (파일 첨부) | ⚠️ 권장 | 로그나 출력 파일 전송 |
-| Manage Channels (채널 관리) | ❌ 선택 | 에이전트 전용 채널 자동 생성 |
+| Manage Channels (채널 관리) | ✅ 필수 | `init`/`go` 시 에이전트 채널 자동 생성 |
 | Add Reactions (반응 추가) | ❌ 선택 | 인터랙티브 버튼 응답 |
 
 ### 권한 문제
