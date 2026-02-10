@@ -8,6 +8,7 @@ import { stateManager as defaultStateManager } from './state/index.js';
 import { config as defaultConfig } from './config/index.js';
 import { agentRegistry as defaultAgentRegistry, AgentRegistry } from './agents/index.js';
 import { CapturePoller } from './capture/index.js';
+import { CodexSubmitter } from './codex/submitter.js';
 import { createServer } from 'http';
 import { parse } from 'url';
 import type { ProjectAgents } from './types/index.js';
@@ -18,6 +19,7 @@ import { escapeShellArg } from './infra/shell-escape.js';
 export interface AgentBridgeDeps {
   discord?: DiscordClient;
   tmux?: TmuxManager;
+  codexSubmitter?: CodexSubmitter;
   stateManager?: IStateManager;
   registry?: AgentRegistry;
   config?: BridgeConfig;
@@ -26,6 +28,7 @@ export interface AgentBridgeDeps {
 export class AgentBridge {
   private discord: DiscordClient;
   private tmux: TmuxManager;
+  private codexSubmitter: CodexSubmitter;
   private poller: CapturePoller;
   private httpServer?: ReturnType<typeof createServer>;
   private stateManager: IStateManager;
@@ -38,6 +41,7 @@ export class AgentBridge {
     this.tmux = deps?.tmux || new TmuxManager(this.bridgeConfig.tmux.sessionPrefix);
     this.stateManager = deps?.stateManager || defaultStateManager;
     this.registry = deps?.registry || defaultAgentRegistry;
+    this.codexSubmitter = deps?.codexSubmitter || new CodexSubmitter(this.tmux);
     this.poller = new CapturePoller(this.tmux, this.discord, 30000, this.stateManager);
   }
 
@@ -117,7 +121,25 @@ export class AgentBridge {
 
       // Send to tmux
       const windowName = project.tmuxWindows?.[agentType] || agentType;
-      this.tmux.sendKeysToWindow(project.tmuxSession, windowName, sanitized);
+      try {
+        if (agentType === 'codex') {
+          const ok = await this.codexSubmitter.submit(project.tmuxSession, windowName, sanitized);
+          if (!ok) {
+            await this.discord.sendToChannel(
+              channelId,
+              `⚠️ Codex에 메시지를 제출하지 못했습니다. Codex가 busy 상태일 수 있어요.\n` +
+              `tmux로 붙어서 Enter를 한 번 눌러보거나, 잠시 후 다시 보내주세요.`
+            );
+          }
+        } else {
+          this.tmux.sendKeysToWindow(project.tmuxSession, windowName, sanitized);
+        }
+      } catch (error) {
+        await this.discord.sendToChannel(
+          channelId,
+          `⚠️ tmux로 메시지 전달 실패: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
       this.stateManager.updateLastActive(projectName);
     });
 

@@ -4,10 +4,12 @@
 
 export * from './base.js';
 export { claudeAdapter, ClaudeAdapter } from './claude.js';
+export { codexAdapter, CodexAdapter } from './codex.js';
 export { opencodeAdapter, OpenCodeAdapter } from './opencode.js';
 
 import { AgentRegistry } from './base.js';
 import { claudeAdapter } from './claude.js';
+import { codexAdapter } from './codex.js';
 import { opencodeAdapter } from './opencode.js';
 
 /**
@@ -16,6 +18,7 @@ import { opencodeAdapter } from './opencode.js';
 export function createAgentRegistry(): AgentRegistry {
   const registry = new AgentRegistry();
   registry.register(claudeAdapter);
+  registry.register(codexAdapter);
   registry.register(opencodeAdapter);
   return registry;
 }

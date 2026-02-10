@@ -198,6 +198,24 @@ describe('TmuxManager', () => {
     });
   });
 
+  describe('typeKeysToWindow', () => {
+    it('types keys without sending Enter', () => {
+      tmux.typeKeysToWindow('agent-session', 'codex', 'hello');
+      expect(executor.calls).toHaveLength(1);
+      expect(executor.calls[0].command).toContain("tmux send-keys -t 'agent-session:codex'");
+      expect(executor.calls[0].command).toContain('hello');
+      expect(executor.calls[0].command).not.toContain(' Enter');
+    });
+  });
+
+  describe('sendEnterToWindow', () => {
+    it('sends Enter to the specified window', () => {
+      tmux.sendEnterToWindow('agent-session', 'codex');
+      expect(executor.calls).toHaveLength(1);
+      expect(executor.calls[0].command).toContain("tmux send-keys -t 'agent-session:codex' Enter");
+    });
+  });
+
   describe('capturePaneFromWindow', () => {
     it('returns captured pane content', () => {
       executor.nextResult = 'pane output line 1\npane output line 2';

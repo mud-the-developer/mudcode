@@ -295,6 +295,7 @@ This approach is simpler and more reliable than hook-based systems, with minimal
 | Agent | Binary | Auto-Detect | YOLO Support | Sandbox Support | Notes |
 |-------|--------|-------------|--------------|-----------------|-------|
 | **Claude Code** | `claude` | Yes | Yes | Yes | Official Anthropic CLI |
+| **Codex** | `codex` | Yes | No | No | OpenAI Codex CLI |
 | **OpenCode** | `opencode` | Yes | No | No | Open-source alternative |
 
 ### Agent Detection

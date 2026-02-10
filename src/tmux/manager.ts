@@ -152,6 +152,36 @@ export class TmuxManager {
   }
 
   /**
+   * Type keys into a specific window without pressing Enter.
+   * Useful when we want to control submission separately (e.g., Codex retries).
+   */
+  typeKeysToWindow(sessionName: string, windowName: string, keys: string): void {
+    const target = `${sessionName}:${windowName}`;
+    const escapedTarget = escapeShellArg(target);
+    const escapedKeys = escapeShellArg(keys);
+
+    try {
+      this.executor.exec(`tmux send-keys -t ${escapedTarget} ${escapedKeys}`);
+    } catch (error) {
+      throw new Error(`Failed to type keys to window '${windowName}' in session '${sessionName}': ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /**
+   * Send an Enter keypress to a specific window.
+   * Useful for TUIs that may drop a submit when busy.
+   */
+  sendEnterToWindow(sessionName: string, windowName: string): void {
+    const target = `${sessionName}:${windowName}`;
+    const escapedTarget = escapeShellArg(target);
+    try {
+      this.executor.exec(`tmux send-keys -t ${escapedTarget} Enter`);
+    } catch (error) {
+      throw new Error(`Failed to send Enter to window '${windowName}' in session '${sessionName}': ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /**
    * Capture pane output from a specific window
    * @param sessionName Full session name (already includes prefix)
    */

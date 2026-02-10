@@ -260,7 +260,8 @@ agent-discord go --sandbox   # 샌드박스 모드 (Docker 컨테이너에서 Cl
 
 | 에이전트 | 바이너리 | 자동 감지 | YOLO 지원 | 비고 |
 |-------|--------|-------------|--------------|-------|
-| **Claude Code** | `claude-code` | 예 | 예 | 공식 Anthropic CLI |
+| **Claude Code** | `claude` | 예 | 예 | 공식 Anthropic CLI |
+| **Codex** | `codex` | 예 | 아니오 | OpenAI Codex CLI |
 | **OpenCode** | `opencode` | 예 | 예 | 오픈소스 대안 |
 
 ### 에이전트 감지
