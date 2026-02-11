@@ -96,34 +96,6 @@ h1 {
   line-height: 1.55;
 }
 
-.actions {
-  margin-top: 1.4rem;
-  display: flex;
-  gap: 0.7rem;
-  flex-wrap: wrap;
-}
-
-.button {
-  display: inline-block;
-  text-decoration: none;
-  padding: 0.65rem 1.1rem;
-  border-radius: 999px;
-  font-size: 0.92rem;
-  font-weight: 600;
-  border: 1px solid transparent;
-}
-
-.button-primary {
-  background: var(--ink);
-  color: #ffffff;
-}
-
-.button-muted {
-  border-color: var(--line);
-  color: var(--ink);
-  background: #ffffff;
-}
-
 .panel {
   margin-top: 1rem;
   border: 1px solid var(--line);
@@ -155,31 +127,6 @@ pre {
   font-size: 0.86rem;
 }
 
-.simple-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.8rem;
-}
-
-.simple-grid article {
-  border: 1px solid var(--line);
-  border-radius: 0.85rem;
-  padding: 0.9rem;
-  background: #fbfcfd;
-}
-
-h2 {
-  margin: 0;
-  font-size: 1rem;
-}
-
-.simple-grid p {
-  margin: 0.5rem 0 0;
-  color: var(--muted);
-  line-height: 1.5;
-  font-size: 0.95rem;
-}
-
 .footer {
   padding: 1.6rem 0 2.4rem;
 }
@@ -191,10 +138,6 @@ h2 {
 }
 
 @media (max-width: 52rem) {
-  .simple-grid {
-    grid-template-columns: 1fr;
-  }
-
   .hero {
     padding-top: 2.8rem;
   }
