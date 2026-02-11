@@ -99,7 +99,7 @@ export class ConfigManager {
     if (!this.config.discord.token) {
       throw new Error(
         'Discord bot token not configured.\n' +
-        'Run: agent-discord config --token <your-token>\n' +
+        'Run: agent-bridge config --token <your-token>\n' +
         'Or set DISCORD_BOT_TOKEN environment variable'
       );
     }

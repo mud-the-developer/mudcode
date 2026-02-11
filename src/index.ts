@@ -330,7 +330,7 @@ export class AgentBridge {
   ): Promise<{ channelName: string; channelId: string; agentName: string; tmuxSession: string }> {
     const guildId = this.stateManager.getGuildId();
     if (!guildId) {
-      throw new Error('Server ID not configured. Run: agent-discord config --server <id>');
+      throw new Error('Server ID not configured. Run: agent-bridge config --server <id>');
     }
 
     // Create tmux session (default: per-project, optional: shared session)

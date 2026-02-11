@@ -59,8 +59,8 @@ Complete step-by-step guide to setting up your Discord bot for the Discord Agent
 3. Save this ID - you may need it for manual configuration
 
 **Note:**
-- The `agent-discord setup` command will auto-detect your server ID if you run it while Discord is active
-- Manual configuration: `agent-discord config --server YOUR_SERVER_ID`
+- The `agent-bridge setup` command will auto-detect your server ID if you run it while Discord is active
+- Manual configuration: `agent-bridge config --server YOUR_SERVER_ID`
 
 ---
 
@@ -132,7 +132,7 @@ If the bot cannot send messages, check:
 ### Step 5.1: Run Setup Command
 
 ```bash
-agent-discord setup YOUR_BOT_TOKEN
+agent-bridge setup YOUR_BOT_TOKEN
 ```
 
 Replace `YOUR_BOT_TOKEN` with the token you copied in Step 1.3.
@@ -150,7 +150,7 @@ Replace `YOUR_BOT_TOKEN` with the token you copied in Step 1.3.
 Setup complete! Your bot is ready to use.
 
 Next steps:
-1. Run: agent-discord go
+1. Run: agent-bridge go
 2. The bot will create a channel named 'agent-claude-XXXXX'
 3. All Claude CLI output will stream to that channel
 ```
@@ -165,7 +165,7 @@ Next steps:
 ### Step 5.4: Test with a Command
 
 ```bash
-agent-discord go
+agent-bridge go
 ```
 
 Then in your terminal, type a message and press Enter. You should see:
@@ -198,7 +198,7 @@ Then in your terminal, type a message and press Enter. You should see:
 
 - Token may have been regenerated - get a fresh token from Developer Portal
 - Ensure no extra spaces when copying the token
-- Run `agent-discord setup` again with the new token
+- Run `agent-bridge setup` again with the new token
 
 ### Cannot read messages or detect commands
 
@@ -247,9 +247,9 @@ Then in your terminal, type a message and press Enter. You should see:
 
 5. Invite bot to server
 
-6. Run: agent-discord setup YOUR_TOKEN
+6. Run: agent-bridge setup YOUR_TOKEN
 
-7. Start using: agent-discord go
+7. Start using: agent-bridge go
 ```
 
 ---

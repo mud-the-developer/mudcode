@@ -65,7 +65,7 @@ npm link
 
 ```bash
 # Discord 봇 토큰으로 일회성 설정
-agent-discord setup YOUR_DISCORD_BOT_TOKEN
+agent-bridge setup YOUR_DISCORD_BOT_TOKEN
 ```
 
 ### 2. 프로젝트 초기화
@@ -75,19 +75,19 @@ agent-discord setup YOUR_DISCORD_BOT_TOKEN
 cd ~/projects/my-app
 
 # Claude Code로 초기화 (또는 'opencode')
-agent-discord init claude "멋진 애플리케이션"
+agent-bridge init claude "멋진 애플리케이션"
 ```
 
 ### 3. 작업 시작
 
 ```bash
 # 빠른 시작: 데몬 + 프로젝트 + 연결을 한 번에
-agent-discord go
+agent-bridge go
 
 # 또는 단계별로:
-agent-discord daemon start    # 글로벌 데몬 시작
-agent-discord start          # 이 프로젝트 시작
-agent-discord attach         # tmux 세션에 연결
+agent-bridge daemon start    # 글로벌 데몬 시작
+agent-bridge start          # 이 프로젝트 시작
+agent-bridge attach         # tmux 세션에 연결
 ```
 
 이제 AI 에이전트가 tmux에서 실행되며, 30초마다 Discord로 출력이 스트리밍됩니다.
@@ -101,7 +101,7 @@ agent-discord attach         # tmux 세션에 연결
 일회성 설정: 봇 토큰 저장, Discord 연결하여 서버 자동 감지, 설치된 에이전트 확인.
 
 ```bash
-agent-discord setup YOUR_BOT_TOKEN
+agent-bridge setup YOUR_BOT_TOKEN
 ```
 
 설정 과정:
@@ -115,10 +115,10 @@ agent-discord setup YOUR_BOT_TOKEN
 글로벌 데몬 프로세스 제어.
 
 ```bash
-agent-discord daemon start    # 데몬 시작
-agent-discord daemon stop     # 데몬 중지
-agent-discord daemon restart  # 데몬 재시작
-agent-discord daemon status   # 데몬 상태 확인
+agent-bridge daemon start    # 데몬 시작
+agent-bridge daemon stop     # 데몬 중지
+agent-bridge daemon restart  # 데몬 재시작
+agent-bridge daemon status   # 데몬 상태 확인
 ```
 
 #### `list`
@@ -126,7 +126,7 @@ agent-discord daemon status   # 데몬 상태 확인
 등록된 모든 프로젝트 목록 표시.
 
 ```bash
-agent-discord list
+agent-bridge list
 ```
 
 #### `agents`
@@ -134,7 +134,7 @@ agent-discord list
 시스템에서 감지된 사용 가능한 AI 에이전트 목록 표시.
 
 ```bash
-agent-discord agents
+agent-bridge agents
 ```
 
 #### `config [options]`
@@ -142,10 +142,10 @@ agent-discord agents
 글로벌 설정 조회 및 수정.
 
 ```bash
-agent-discord config --show              # 현재 설정 표시
-agent-discord config --token NEW_TOKEN   # 봇 토큰 변경
-agent-discord config --server SERVER_ID  # Discord 서버 ID 수동 설정
-agent-discord config --port 18470        # 훅 서버 포트 설정
+agent-bridge config --show              # 현재 설정 표시
+agent-bridge config --token NEW_TOKEN   # 봇 토큰 변경
+agent-bridge config --server SERVER_ID  # Discord 서버 ID 수동 설정
+agent-bridge config --port 18470        # 훅 서버 포트 설정
 ```
 
 ### 프로젝트 명령어
@@ -157,8 +157,8 @@ agent-discord config --port 18470        # 훅 서버 포트 설정
 현재 디렉토리를 프로젝트로 초기화.
 
 ```bash
-agent-discord init claude "풀스택 웹 애플리케이션"
-agent-discord init opencode "데이터 파이프라인 프로젝트"
+agent-bridge init claude "풀스택 웹 애플리케이션"
+agent-bridge init opencode "데이터 파이프라인 프로젝트"
 ```
 
 #### `start [options]`
@@ -166,9 +166,9 @@ agent-discord init opencode "데이터 파이프라인 프로젝트"
 이 프로젝트의 AI 에이전트 시작.
 
 ```bash
-agent-discord start                    # 일반 모드
-agent-discord start --yolo            # YOLO 모드 (권한 확인 스킵)
-agent-discord start --dangerously-skip-permissions  # --yolo와 동일
+agent-bridge start                    # 일반 모드
+agent-bridge start --yolo            # YOLO 모드 (권한 확인 스킵)
+agent-bridge start --dangerously-skip-permissions  # --yolo와 동일
 ```
 
 #### `stop`
@@ -176,7 +176,7 @@ agent-discord start --dangerously-skip-permissions  # --yolo와 동일
 이 프로젝트의 AI 에이전트 중지.
 
 ```bash
-agent-discord stop
+agent-bridge stop
 ```
 
 #### `status`
@@ -184,7 +184,7 @@ agent-discord stop
 프로젝트 상태 표시.
 
 ```bash
-agent-discord status
+agent-bridge status
 ```
 
 #### `attach`
@@ -192,7 +192,7 @@ agent-discord status
 이 프로젝트의 tmux 세션에 연결.
 
 ```bash
-agent-discord attach
+agent-bridge attach
 ```
 
 에이전트를 중지하지 않고 tmux에서 분리하려면 `Ctrl-b d`를 누르세요.
@@ -202,9 +202,9 @@ agent-discord attach
 빠른 시작: 데몬 시작, 프로젝트 시작, 연결을 한 번에 수행.
 
 ```bash
-agent-discord go              # 일반 모드
-agent-discord go --yolo      # YOLO 모드
-agent-discord go --sandbox   # 샌드박스 모드 (Docker 컨테이너에서 Claude Code 실행)
+agent-bridge go              # 일반 모드
+agent-bridge go --yolo      # YOLO 모드
+agent-bridge go --sandbox   # 샌드박스 모드 (Docker 컨테이너에서 Claude Code 실행)
 ```
 
 ## 작동 원리
@@ -252,7 +252,7 @@ agent-discord go --sandbox   # 샌드박스 모드 (Docker 컨테이너에서 Cl
 
 ### 프로젝트 라이프사이클
 
-1. **Init**: 프로젝트 메타데이터와 함께 `.agent-discord.json` 생성
+1. **Init**: 프로젝트 메타데이터와 함께 `.agent-bridge.json` 생성
 2. **Start**: 명명된 tmux 세션에서 AI 에이전트 실행
 3. **Polling**: 데몬이 tmux 출력을 캡처하여 Discord로 스트리밍
 4. **Stop**: tmux 세션 종료 및 정리
@@ -268,7 +268,7 @@ agent-discord go --sandbox   # 샌드박스 모드 (Docker 컨테이너에서 Cl
 
 ### 에이전트 감지
 
-CLI는 `which <binary>`를 사용하여 설치된 에이전트를 자동으로 감지합니다. `agent-discord agents`를 실행하여 시스템에서 사용 가능한 에이전트를 확인하세요.
+CLI는 `which <binary>`를 사용하여 설치된 에이전트를 자동으로 감지합니다. `agent-bridge agents`를 실행하여 시스템에서 사용 가능한 에이전트를 확인하세요.
 
 ### 커스텀 에이전트 추가
 
@@ -301,8 +301,8 @@ export interface AgentAdapter {
 `token`과 `serverId` 모두 필요합니다. `setup` 명령이 서버 ID를 자동 감지하며, 수동 설정도 가능합니다:
 
 ```bash
-agent-discord config --show               # 현재 설정 확인
-agent-discord config --server SERVER_ID    # 서버 ID 수동 설정
+agent-bridge config --show               # 현재 설정 확인
+agent-bridge config --server SERVER_ID    # 서버 ID 수동 설정
 ```
 
 ### 프로젝트 상태
@@ -314,9 +314,9 @@ agent-discord config --server SERVER_ID    # 서버 ID 수동 설정
 환경 변수로 설정을 오버라이드할 수 있습니다:
 
 ```bash
-DISCORD_BOT_TOKEN=token agent-discord daemon start
-DISCORD_GUILD_ID=server_id agent-discord go
-HOOK_SERVER_PORT=18470 agent-discord go
+DISCORD_BOT_TOKEN=token agent-bridge daemon start
+DISCORD_GUILD_ID=server_id agent-bridge go
+HOOK_SERVER_PORT=18470 agent-bridge go
 ```
 
 ## 개발
@@ -395,14 +395,14 @@ const daemon = new DaemonManager(mockStorage);
 
 ### 봇이 연결되지 않음
 
-1. 토큰 확인: `agent-discord config --show`
+1. 토큰 확인: `agent-bridge config --show`
 2. Discord Developer Portal에서 봇 권한 확인
 3. MessageContent 인텐트가 활성화되어 있는지 확인
-4. 데몬 재시작: `agent-discord daemon stop && agent-discord daemon start`
+4. 데몬 재시작: `agent-bridge daemon stop && agent-bridge daemon start`
 
 ### 에이전트가 감지되지 않음
 
-1. 사용 가능한 에이전트 확인: `agent-discord agents`
+1. 사용 가능한 에이전트 확인: `agent-bridge agents`
 2. 에이전트 바이너리가 PATH에 있는지 확인: `which claude-code`
 3. 누락된 에이전트를 설치하고 재시도
 
@@ -410,11 +410,11 @@ const daemon = new DaemonManager(mockStorage);
 
 1. 세션이 존재하는지 확인: `tmux ls`
 2. 오래된 세션 종료: `tmux kill-session -t <session-name>`
-3. 프로젝트 재시작: `agent-discord stop && agent-discord start`
+3. 프로젝트 재시작: `agent-bridge stop && agent-bridge start`
 
 ### Discord에 메시지가 없음
 
-1. 데몬 상태 확인: `agent-discord daemon status`
+1. 데몬 상태 확인: `agent-bridge daemon status`
 2. 데몬 로그 확인
 3. Discord 채널 권한 확인 (봇에게 Send Messages 권한 필요)
 

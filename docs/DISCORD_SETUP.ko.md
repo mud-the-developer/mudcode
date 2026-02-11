@@ -59,8 +59,8 @@ Discord Agent Bridge를 위한 Discord 봇 설정 완전 가이드입니다.
 3. 이 ID를 저장하세요 - 수동 설정 시 필요할 수 있습니다
 
 **참고:**
-- `agent-discord setup` 명령은 Discord가 활성화된 상태에서 실행하면 서버 ID를 자동으로 감지합니다
-- 수동 설정: `agent-discord config --server YOUR_SERVER_ID`
+- `agent-bridge setup` 명령은 Discord가 활성화된 상태에서 실행하면 서버 ID를 자동으로 감지합니다
+- 수동 설정: `agent-bridge config --server YOUR_SERVER_ID`
 
 ---
 
@@ -132,7 +132,7 @@ Discord Agent Bridge를 위한 Discord 봇 설정 완전 가이드입니다.
 ### Step 5.1: 설정 명령 실행
 
 ```bash
-agent-discord setup YOUR_BOT_TOKEN
+agent-bridge setup YOUR_BOT_TOKEN
 ```
 
 `YOUR_BOT_TOKEN`을 Step 1.3에서 복사한 토큰으로 바꾸세요.
@@ -150,7 +150,7 @@ agent-discord setup YOUR_BOT_TOKEN
 설정 완료! 봇을 사용할 준비가 되었습니다.
 
 다음 단계:
-1. 실행: agent-discord go
+1. 실행: agent-bridge go
 2. 봇이 'agent-claude-XXXXX' 채널을 생성합니다
 3. 모든 Claude CLI 출력이 해당 채널로 스트리밍됩니다
 ```
@@ -165,7 +165,7 @@ agent-discord setup YOUR_BOT_TOKEN
 ### Step 5.4: 명령어로 테스트
 
 ```bash
-agent-discord go
+agent-bridge go
 ```
 
 터미널에 메시지를 입력하고 Enter를 누르세요. 다음이 보여야 합니다:
@@ -198,7 +198,7 @@ agent-discord go
 
 - 토큰이 재생성되었을 수 있습니다 - Developer Portal에서 새 토큰을 받으세요
 - 토큰 복사 시 불필요한 공백이 없는지 확인하세요
-- 새 토큰으로 `agent-discord setup`을 다시 실행하세요
+- 새 토큰으로 `agent-bridge setup`을 다시 실행하세요
 
 ### 메시지를 읽거나 명령을 감지할 수 없음
 
@@ -247,9 +247,9 @@ agent-discord go
 
 5. 서버에 봇 초대
 
-6. 실행: agent-discord setup YOUR_TOKEN
+6. 실행: agent-bridge setup YOUR_TOKEN
 
-7. 사용 시작: agent-discord go
+7. 사용 시작: agent-bridge go
 ```
 
 ---

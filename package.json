@@ -5,7 +5,7 @@
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
-    "agent-discord": "./dist/bin/agent-discord.js"
+    "agent-bridge": "./dist/bin/agent-bridge.js"
   },
   "scripts": {
     "dev": "tsx src/index.ts",
