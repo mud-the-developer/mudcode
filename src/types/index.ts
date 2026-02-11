@@ -42,6 +42,14 @@ export interface BridgeConfig {
     sharedSessionName?: string;
   };
   hookServerPort?: number;
+  opencode?: {
+    /**
+     * OpenCode permission mode applied at launch time.
+     * - 'allow': set OPENCODE_PERMISSION='"allow"' for launched OpenCode sessions.
+     * - 'default': do not override OpenCode permission behavior.
+     */
+    permissionMode?: 'allow' | 'default';
+  };
 }
 
 export interface ProjectAgents {

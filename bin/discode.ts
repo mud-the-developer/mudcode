@@ -53,6 +53,7 @@ function applyTmuxCliOverrides(base: BridgeConfig, options: TmuxCliOptions): Bri
   const baseDiscord = base.discord;
   const baseTmux = base.tmux;
   const baseHookPort = base.hookServerPort;
+  const baseOpencode = base.opencode;
 
   const modeRaw = options?.tmuxSessionMode as string | undefined;
   const sharedNameRaw = options?.tmuxSharedSessionName as string | undefined;
@@ -71,6 +72,7 @@ function applyTmuxCliOverrides(base: BridgeConfig, options: TmuxCliOptions): Bri
   return {
     discord: baseDiscord,
     hookServerPort: baseHookPort,
+    opencode: baseOpencode,
     tmux: {
       ...baseTmux,
       ...(mode !== undefined ? { sessionMode: mode } : {}),
@@ -105,6 +107,38 @@ function prompt(question: string): Promise<string> {
       resolve(answer.trim());
     });
   });
+}
+
+async function confirmYesNo(question: string, defaultValue: boolean): Promise<boolean> {
+  while (true) {
+    const answer = (await prompt(question)).trim().toLowerCase();
+    if (!answer) return defaultValue;
+    if (answer === 'y' || answer === 'yes') return true;
+    if (answer === 'n' || answer === 'no') return false;
+    console.log(chalk.yellow('Please answer y(es) or n(o).'));
+  }
+}
+
+async function ensureOpencodePermissionChoice(agentName: string): Promise<void> {
+  if (agentName !== 'opencode') return;
+  if (config.opencode?.permissionMode) return;
+
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    saveConfig({ opencodePermissionMode: 'default' });
+    console.log(chalk.yellow('⚠️ Non-interactive shell detected: OpenCode permission mode set to default.'));
+    return;
+  }
+
+  console.log(chalk.white('\nOpenCode permission setup (one-time):'));
+  console.log(chalk.gray('Discode can set OpenCode permissions to always allow to avoid approval prompts in Discord.'));
+  const allow = await confirmYesNo(chalk.white('Allow OpenCode permissions automatically? [Y/n]: '), true);
+
+  saveConfig({ opencodePermissionMode: allow ? 'allow' : 'default' });
+  if (allow) {
+    console.log(chalk.green('✅ OpenCode permission mode saved: allow'));
+  } else {
+    console.log(chalk.gray('OpenCode permission mode saved: default'));
+  }
 }
 
 function nextProjectName(baseName: string): string {
@@ -475,6 +509,7 @@ async function initCommand(agentName: string, description: string, options: Tmux
 
     const projectPath = process.cwd();
     const projectName = options.name || basename(projectPath);
+    await ensureOpencodePermissionChoice(adapter.config.name);
 
       // Channel name format: "Agent - description"
     const channelDisplayName = `${adapter.config.displayName} - ${description}`;
@@ -574,6 +609,8 @@ async function goCommand(
           agentName = installed[idx].config.name;
         }
       }
+
+    await ensureOpencodePermissionChoice(agentName);
 
       // Ensure global daemon is running
     const running = await defaultDaemonManager.isRunning();
@@ -681,13 +718,20 @@ async function goCommand(
   }
 }
 
-async function configCommand(options: { show?: boolean; server?: string; token?: string; port?: string | number }) {
+async function configCommand(options: {
+  show?: boolean;
+  server?: string;
+  token?: string;
+  port?: string | number;
+  opencodePermission?: 'allow' | 'default';
+}) {
   if (options.show) {
       console.log(chalk.cyan('\n📋 Current configuration:\n'));
       console.log(chalk.gray(`   Config file: ${getConfigPath()}`));
       console.log(chalk.gray(`   Server ID: ${stateManager.getGuildId() || '(not set)'}`));
       console.log(chalk.gray(`   Token: ${config.discord.token ? '****' + config.discord.token.slice(-4) : '(not set)'}`));
       console.log(chalk.gray(`   Hook Port: ${config.hookServerPort || 18470}`));
+      console.log(chalk.gray(`   OpenCode Permission Mode: ${config.opencode?.permissionMode || '(not set)'}`));
       console.log(chalk.cyan('\n🤖 Registered Agents:\n'));
       for (const adapter of agentRegistry.getAll()) {
         console.log(chalk.gray(`   - ${adapter.config.displayName} (${adapter.config.name})`));
@@ -718,11 +762,18 @@ async function configCommand(options: { show?: boolean; server?: string; token?:
       updated = true;
   }
 
+  if (options.opencodePermission) {
+    saveConfig({ opencodePermissionMode: options.opencodePermission });
+    console.log(chalk.green(`✅ OpenCode permission mode saved: ${options.opencodePermission}`));
+    updated = true;
+  }
+
   if (!updated) {
     console.log(chalk.yellow('No options provided. Use --help to see available options.'));
     console.log(chalk.gray('\nExample:'));
     console.log(chalk.gray('  discode config --token YOUR_BOT_TOKEN'));
     console.log(chalk.gray('  discode config --server YOUR_SERVER_ID'));
+    console.log(chalk.gray('  discode config --opencode-permission allow'));
     console.log(chalk.gray('  discode config --show'));
   }
 }
@@ -1083,8 +1134,20 @@ await yargs(hideBin(process.argv))
       .option('server', { alias: 's', type: 'string', describe: 'Set Discord server ID' })
       .option('token', { alias: 't', type: 'string', describe: 'Set Discord bot token' })
       .option('port', { alias: 'p', type: 'string', describe: 'Set hook server port' })
+      .option('opencode-permission', {
+        type: 'string',
+        choices: ['allow', 'default'],
+        describe: 'Set OpenCode permission mode',
+      })
       .option('show', { type: 'boolean', describe: 'Show current configuration' }),
-    async (argv: any) => configCommand(argv)
+    async (argv: any) =>
+      configCommand({
+        show: argv.show,
+        server: argv.server,
+        token: argv.token,
+        port: argv.port,
+        opencodePermission: argv.opencodePermission,
+      })
   )
   .command(
     'status',

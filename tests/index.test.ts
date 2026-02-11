@@ -423,7 +423,7 @@ describe('AgentBridge', () => {
         { claude: true }
       );
 
-      expect(mockTmux.getOrCreateSession).toHaveBeenCalledWith('test-project', 'claude');
+      expect(mockTmux.getOrCreateSession).toHaveBeenCalledWith('bridge', 'test-project-claude');
       expect(mockDiscord.createAgentChannels).toHaveBeenCalledWith(
         'guild-123',
         'test-project',
@@ -443,6 +443,36 @@ describe('AgentBridge', () => {
         agentName: 'Claude Code',
         tmuxSession: 'agent-test',
       });
+    });
+
+    it('sets OPENCODE_PERMISSION env when configured to allow', async () => {
+      const opencodeAdapter = {
+        config: { name: 'opencode', displayName: 'OpenCode', command: 'opencode', channelSuffix: 'opencode' },
+        getStartCommand: vi.fn().mockReturnValue('cd "/missing/project/path" && opencode'),
+        matchesChannel: vi.fn(),
+        isInstalled: vi.fn().mockReturnValue(true),
+      };
+      mockRegistry.getAll.mockReturnValue([opencodeAdapter]);
+      mockDiscord.createAgentChannels.mockResolvedValue({ opencode: 'ch-op' });
+
+      bridge = new AgentBridge({
+        discord: mockDiscord,
+        tmux: mockTmux,
+        stateManager: mockStateManager,
+        registry: mockRegistry,
+        config: {
+          ...createMockConfig(),
+          opencode: { permissionMode: 'allow' },
+        },
+      });
+
+      await bridge.setupProject('test-project', '/missing/project/path', { opencode: true });
+
+      expect(mockTmux.startAgentInWindow).toHaveBeenCalledWith(
+        'agent-test',
+        'test-project-opencode',
+        expect.stringContaining(`export OPENCODE_PERMISSION='\"allow\"';`)
+      );
     });
 
     it('throws when no guild ID configured', async () => {

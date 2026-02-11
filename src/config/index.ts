@@ -13,6 +13,7 @@ export interface StoredConfig {
   token?: string;
   serverId?: string;
   hookServerPort?: number;
+  opencodePermissionMode?: 'allow' | 'default';
 }
 
 export class ConfigManager {
@@ -39,6 +40,12 @@ export class ConfigManager {
       }
 
       const storedConfig = this.loadStoredConfig();
+      const envPermissionModeRaw = this.env.get('OPENCODE_PERMISSION_MODE');
+      const envPermissionMode =
+        envPermissionModeRaw === 'allow' || envPermissionModeRaw === 'default'
+          ? envPermissionModeRaw
+          : undefined;
+      const opencodePermissionMode = storedConfig.opencodePermissionMode || envPermissionMode;
 
       // Merge: stored config > environment variables > defaults
       const sessionModeRaw = this.env.get('TMUX_SESSION_MODE');
@@ -60,6 +67,9 @@ export class ConfigManager {
         },
         hookServerPort: storedConfig.hookServerPort ||
           (this.env.get('HOOK_SERVER_PORT') ? parseInt(this.env.get('HOOK_SERVER_PORT')!, 10) : 18470),
+        opencode: opencodePermissionMode
+          ? { permissionMode: opencodePermissionMode }
+          : undefined,
       };
     }
     return this._config;

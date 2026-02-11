@@ -92,6 +92,7 @@ describe('ConfigManager', () => {
         token: 'stored-token-123',
         serverId: 'stored-guild-456',
         hookServerPort: 9999,
+        opencodePermissionMode: 'allow',
       };
       storage.setFile(configFile, JSON.stringify(storedConfig));
 
@@ -101,6 +102,7 @@ describe('ConfigManager', () => {
       expect(config.discord.token).toBe('stored-token-123');
       expect(config.discord.guildId).toBe('stored-guild-456');
       expect(config.hookServerPort).toBe(9999);
+      expect(config.opencode?.permissionMode).toBe('allow');
     });
 
     it('falls back to env var when no stored config', () => {
@@ -169,6 +171,7 @@ describe('ConfigManager', () => {
         token: 'my-token',
         serverId: 'my-server',
         hookServerPort: 8888,
+        opencodePermissionMode: 'default',
       };
       storage.setFile(configFile, JSON.stringify(storedConfig));
 
@@ -177,6 +180,7 @@ describe('ConfigManager', () => {
       expect(manager.getConfigValue('token')).toBe('my-token');
       expect(manager.getConfigValue('serverId')).toBe('my-server');
       expect(manager.getConfigValue('hookServerPort')).toBe(8888);
+      expect(manager.getConfigValue('opencodePermissionMode')).toBe('default');
     });
   });
 

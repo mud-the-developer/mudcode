@@ -382,6 +382,11 @@ export class AgentBridge {
     const exportPrefix = this.buildExportPrefix({
       AGENT_DISCORD_PROJECT: projectName,
       AGENT_DISCORD_PORT: String(port),
+      ...(
+        adapter.config.name === 'opencode' && this.bridgeConfig.opencode?.permissionMode === 'allow'
+          ? { OPENCODE_PERMISSION: '"allow"' }
+          : {}
+      ),
       ...(yolo ? { AGENT_DISCORD_YOLO: '1' } : {}),
       ...(sandbox ? { AGENT_DISCORD_SANDBOX: '1' } : {}),
     });
