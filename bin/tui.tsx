@@ -34,6 +34,7 @@ const palette = {
 const slashCommands = [
   { command: '/session_new', description: 'create new session' },
   { command: '/new', description: 'alias for /session_new' },
+  { command: '/list', description: 'show current session list' },
   { command: '/stop', description: 'select and stop a project' },
   { command: '/projects', description: 'list configured projects' },
   { command: '/help', description: 'show available commands' },
@@ -44,6 +45,7 @@ const slashCommands = [
 const paletteCommands = [
   { command: '/session_new', description: 'Create a new session' },
   { command: '/new', description: 'Alias for /session_new' },
+  { command: '/list', description: 'Show current session list' },
   { command: '/stop', description: 'Select and stop a project' },
   { command: '/projects', description: 'List configured projects' },
   { command: '/help', description: 'Show help' },
@@ -61,6 +63,7 @@ function TuiApp(props: { input: TuiInput; close: () => void }) {
   const [paletteSelected, setPaletteSelected] = createSignal(0);
   const [newOpen, setNewOpen] = createSignal(false);
   const [newSelected, setNewSelected] = createSignal(0);
+  const [listOpen, setListOpen] = createSignal(false);
   const [stopOpen, setStopOpen] = createSignal(false);
   const [stopSelected, setStopSelected] = createSignal(0);
   const [projects, setProjects] = createSignal<Array<{
@@ -100,6 +103,17 @@ function TuiApp(props: { input: TuiInput; close: () => void }) {
     return openProjects()
       .filter((item) => item.session === props.input.currentSession)
       .sort((a, b) => a.window.localeCompare(b.window));
+  });
+  const sessionList = createMemo(() => {
+    const groups = new Map<string, Set<string>>();
+    openProjects().forEach((item) => {
+      const windows = groups.get(item.session) || new Set<string>();
+      windows.add(item.window);
+      groups.set(item.session, windows);
+    });
+    return Array.from(groups.entries())
+      .map(([session, windows]) => ({ session, windows: windows.size }))
+      .sort((a, b) => a.session.localeCompare(b.session));
   });
 
   const query = createMemo(() => {
@@ -185,6 +199,11 @@ function TuiApp(props: { input: TuiInput; close: () => void }) {
       setStopSelected(0);
       return;
     }
+    if (item.command === '/list') {
+      closeCommandPalette();
+      setListOpen(true);
+      return;
+    }
     closeCommandPalette();
     const shouldClose = await props.input.onCommand(item.command, () => {});
     if (shouldClose) {
@@ -205,6 +224,14 @@ function TuiApp(props: { input: TuiInput; close: () => void }) {
   const closeNewDialog = () => {
     setNewOpen(false);
     setNewSelected(0);
+    setTimeout(() => {
+      if (!textarea || textarea.isDestroyed) return;
+      textarea.focus();
+    }, 1);
+  };
+
+  const closeListDialog = () => {
+    setListOpen(false);
     setTimeout(() => {
       if (!textarea || textarea.isDestroyed) return;
       textarea.focus();
@@ -259,6 +286,11 @@ function TuiApp(props: { input: TuiInput; close: () => void }) {
     if (command === 'stop' || command === '/stop') {
       setStopOpen(true);
       setStopSelected(0);
+      return;
+    }
+
+    if (command === 'list' || command === '/list') {
+      setListOpen(true);
       return;
     }
 
@@ -367,6 +399,14 @@ function TuiApp(props: { input: TuiInput; close: () => void }) {
       if (evt.name === 'return') {
         evt.preventDefault();
         void executeNewSelection();
+        return;
+      }
+    }
+
+    if (listOpen()) {
+      if (evt.name === 'escape' || evt.name === 'return') {
+        evt.preventDefault();
+        closeListDialog();
         return;
       }
     }
@@ -585,6 +625,46 @@ function TuiApp(props: { input: TuiInput; close: () => void }) {
         </box>
       </Show>
 
+      <Show when={listOpen()}>
+        <box
+          width={dims().width}
+          height={dims().height}
+          backgroundColor={RGBA.fromInts(0, 0, 0, 150)}
+          position="absolute"
+          left={0}
+          top={0}
+          alignItems="center"
+          paddingTop={Math.floor(dims().height / 4)}
+        >
+          <box
+            width={Math.max(50, Math.min(70, dims().width - 2))}
+            backgroundColor={palette.panel}
+            flexDirection="column"
+            paddingTop={1}
+            paddingBottom={1}
+          >
+            <box paddingLeft={4} paddingRight={4} flexDirection="row" justifyContent="space-between">
+              <text fg={palette.primary} attributes={TextAttributes.BOLD}>Session list</text>
+              <text fg={palette.muted}>esc</text>
+            </box>
+            <Show when={sessionList().length > 0} fallback={<box paddingLeft={4} paddingRight={4} paddingTop={1}><text fg={palette.muted}>No running sessions</text></box>}>
+              <For each={sessionList().slice(0, 12)}>
+                {(item, index) => (
+                  <box paddingLeft={3} paddingRight={1} paddingTop={index() === 0 ? 1 : 0}>
+                    <text fg={palette.text}>{item.session}</text>
+                    <text fg={palette.muted}>{`  (${item.windows} windows)`}</text>
+                  </box>
+                )}
+              </For>
+            </Show>
+            <box paddingLeft={4} paddingRight={2} paddingTop={1}>
+              <text fg={palette.text}>Close </text>
+              <text fg={palette.muted}>enter</text>
+            </box>
+          </box>
+        </box>
+      </Show>
+
       <box backgroundColor={palette.bg} paddingLeft={2} paddingRight={2} paddingBottom={1}>
         <box border borderColor={palette.border} backgroundColor={palette.panel} flexDirection="column">
           <box paddingLeft={1} paddingRight={1}>
@@ -609,7 +689,7 @@ function TuiApp(props: { input: TuiInput; close: () => void }) {
                 setSelected(0);
               }}
               onKeyDown={(event) => {
-                if (paletteOpen() || stopOpen() || newOpen()) {
+                if (paletteOpen() || stopOpen() || newOpen() || listOpen()) {
                   event.preventDefault();
                   return;
                 }

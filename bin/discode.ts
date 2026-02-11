@@ -143,7 +143,24 @@ async function tuiCommand(options: TmuxCliOptions): Promise<void> {
     }
 
     if (command === '/help') {
-      append('Commands: /session_new [name] [agent] [--yolo] [--sandbox] [--attach], /projects, /help, /exit');
+      append('Commands: /session_new [name] [agent] [--yolo] [--sandbox] [--attach], /list, /projects, /help, /exit');
+      return false;
+    }
+
+    if (command === '/list') {
+      const sessions = new Set(
+        stateManager
+          .listProjects()
+          .map((project) => project.tmuxSession)
+          .filter((name) => tmux.sessionExistsFull(name)),
+      );
+      if (sessions.size === 0) {
+        append('No running sessions.');
+        return false;
+      }
+      [...sessions].sort((a, b) => a.localeCompare(b)).forEach((session) => {
+        append(`[session] ${session}`);
+      });
       return false;
     }
 
