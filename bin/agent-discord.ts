@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * CLI entry point for discord-agent-bridge
+ * CLI entry point for agent-messenger-bridge
  */
 
 import { Command } from 'commander';

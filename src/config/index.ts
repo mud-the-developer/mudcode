@@ -26,7 +26,7 @@ export class ConfigManager {
   constructor(storage?: IStorage, env?: IEnvironment, configDir?: string) {
     this.storage = storage || new FileStorage();
     this.env = env || new SystemEnvironment();
-    this.configDir = configDir || join(this.env.homedir(), '.discord-agent-bridge');
+    this.configDir = configDir || join(this.env.homedir(), '.agent-messenger-bridge');
     this.configFile = join(this.configDir, 'config.json');
   }
 

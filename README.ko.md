@@ -46,14 +46,14 @@ Discord Agent Bridge는 AI 코딩 어시스턴트(Claude Code, OpenCode)를 Disc
 ### npm을 통한 설치
 
 ```bash
-npm install -g discord-agent-bridge
+npm install -g agent-messenger-bridge
 ```
 
 ### 소스에서 설치
 
 ```bash
-git clone https://github.com/DoBuDevel/discord-agent-bridge.git
-cd discord-agent-bridge
+git clone https://github.com/siisee11/agent-messenger-bridge.git
+cd agent-messenger-bridge
 npm install
 npm run build
 npm link
@@ -105,7 +105,7 @@ agent-discord setup YOUR_BOT_TOKEN
 ```
 
 설정 과정:
-1. 봇 토큰을 `~/.discord-agent-bridge/config.json`에 저장
+1. 봇 토큰을 `~/.agent-messenger-bridge/config.json`에 저장
 2. Discord에 연결하여 봇이 참여한 서버를 자동 감지
 3. 봇이 여러 서버에 있으면 선택 프롬프트 표시
 4. 서버 ID 자동 저장
@@ -288,7 +288,7 @@ export interface AgentAdapter {
 
 ### 글로벌 설정
 
-`~/.discord-agent-bridge/config.json`에 저장:
+`~/.agent-messenger-bridge/config.json`에 저장:
 
 ```json
 {
@@ -307,7 +307,7 @@ agent-discord config --server SERVER_ID    # 서버 ID 수동 설정
 
 ### 프로젝트 상태
 
-프로젝트 상태는 `~/.discord-agent-bridge/state.json`에 저장되며 자동으로 관리됩니다.
+프로젝트 상태는 `~/.agent-messenger-bridge/state.json`에 저장되며 자동으로 관리됩니다.
 
 ### 환경 변수
 
@@ -348,7 +348,7 @@ npm run test:coverage # 커버리지 리포트
 ### 프로젝트 구조
 
 ```
-discord-agent-bridge/
+agent-messenger-bridge/
 ├── src/
 │   ├── agents/           # 에이전트 어댑터 (Claude, OpenCode)
 │   ├── core/             # 핵심 로직 (데몬, 폴러, 상태)
@@ -447,5 +447,5 @@ MIT License - 자세한 내용은 [LICENSE](LICENSE) 파일을 참조하세요.
 
 ## 지원
 
-- 이슈: [GitHub Issues](https://github.com/DoBuDevel/discord-agent-bridge/issues)
+- 이슈: [GitHub Issues](https://github.com/siisee11/agent-messenger-bridge/issues)
 - Discord 봇 설정: [설정 가이드](docs/DISCORD_SETUP.ko.md)

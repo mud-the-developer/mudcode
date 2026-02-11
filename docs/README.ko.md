@@ -54,14 +54,14 @@ Discord Agent Bridge는 AI 코딩 어시스턴트(Claude Code, OpenCode)를 Disc
 ### npm으로 설치
 
 ```bash
-npm install -g discord-agent-bridge
+npm install -g agent-messenger-bridge
 ```
 
 ### 소스에서 설치
 
 ```bash
-git clone https://github.com/DoBuDevel/discord-agent-bridge.git
-cd discord-agent-bridge
+git clone https://github.com/siisee11/agent-messenger-bridge.git
+cd agent-messenger-bridge
 npm install
 npm run build
 npm link
@@ -133,7 +133,7 @@ agent-discord setup YOUR_BOT_TOKEN
 ```
 
 설정 과정:
-1. `~/.discord-agent-bridge/config.json`에 봇 토큰 저장
+1. `~/.agent-messenger-bridge/config.json`에 봇 토큰 저장
 2. Discord에 연결하여 봇이 속한 서버 감지
 3. 봇이 여러 서버에 있으면 선택 프롬프트 표시
 4. 서버 ID 자동 저장
@@ -284,7 +284,7 @@ agent-discord go --no-attach  # tmux에 연결하지 않고 시작
 
 ### 프로젝트 라이프사이클
 
-1. **Go / Init**: `~/.discord-agent-bridge/state.json`에 프로젝트를 등록하고 Discord 채널 생성
+1. **Go / Init**: `~/.agent-messenger-bridge/state.json`에 프로젝트를 등록하고 Discord 채널 생성
 2. **Start**: 이름이 지정된 tmux 세션에서 AI 에이전트 실행
 3. **Polling**: 데몬이 tmux 출력을 캡처하여 Discord로 스트리밍
 4. **Stop**: tmux 세션을 종료하고, 채널을 삭제하고, 상태를 정리
@@ -328,7 +328,7 @@ export class MyAgentAdapter extends BaseAgentAdapter {
 
 ### 글로벌 설정
 
-`~/.discord-agent-bridge/config.json`에 저장됩니다:
+`~/.agent-messenger-bridge/config.json`에 저장됩니다:
 
 ```json
 {
@@ -353,7 +353,7 @@ agent-discord config --port 18470          # 훅 서버 포트 설정
 
 ### 프로젝트 상태
 
-프로젝트 상태는 `~/.discord-agent-bridge/state.json`에 저장되며 자동으로 관리됩니다.
+프로젝트 상태는 `~/.agent-messenger-bridge/state.json`에 저장되며 자동으로 관리됩니다.
 
 ### 환경 변수
 
@@ -411,7 +411,7 @@ npm run test:coverage # 커버리지 리포트
 ### 프로젝트 구조
 
 ```
-discord-agent-bridge/
+agent-messenger-bridge/
 ├── bin/                  # CLI 진입점 (agent-discord)
 ├── src/
 │   ├── agents/           # 에이전트 어댑터 (Claude, OpenCode)
@@ -513,5 +513,5 @@ MIT 라이선스 - 자세한 내용은 [LICENSE](../LICENSE) 파일을 참조하
 
 ## 지원
 
-- 이슈: [GitHub Issues](https://github.com/DoBuDevel/discord-agent-bridge/issues)
+- 이슈: [GitHub Issues](https://github.com/siisee11/agent-messenger-bridge/issues)
 - Discord 봇 설정: [설정 가이드](DISCORD_SETUP.ko.md)

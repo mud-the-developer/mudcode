@@ -56,14 +56,14 @@ The bridge uses a polling-based architecture that captures tmux pane content eve
 ### From npm
 
 ```bash
-npm install -g discord-agent-bridge
+npm install -g agent-messenger-bridge
 ```
 
 ### From source
 
 ```bash
-git clone https://github.com/DoBuDevel/discord-agent-bridge.git
-cd discord-agent-bridge
+git clone https://github.com/siisee11/agent-messenger-bridge.git
+cd agent-messenger-bridge
 npm install
 npm run build
 npm link
@@ -135,7 +135,7 @@ agent-discord setup YOUR_BOT_TOKEN
 ```
 
 The setup process will:
-1. Save your bot token to `~/.discord-agent-bridge/config.json`
+1. Save your bot token to `~/.agent-messenger-bridge/config.json`
 2. Connect to Discord and detect which server(s) your bot is in
 3. If the bot is in multiple servers, prompt you to select one
 4. Save the server ID automatically
@@ -286,7 +286,7 @@ This approach is simpler and more reliable than hook-based systems, with minimal
 
 ### Project Lifecycle
 
-1. **Go / Init**: Registers project in `~/.discord-agent-bridge/state.json` and creates a Discord channel
+1. **Go / Init**: Registers project in `~/.agent-messenger-bridge/state.json` and creates a Discord channel
 2. **Start**: Launches AI agent in a named tmux session
 3. **Polling**: Daemon captures tmux output and streams to Discord
 4. **Stop**: Terminates tmux session, deletes channel, and cleans up state
@@ -331,7 +331,7 @@ Register your adapter in `src/agents/index.ts`.
 
 ### Global Config
 
-Stored in `~/.discord-agent-bridge/config.json`:
+Stored in `~/.agent-messenger-bridge/config.json`:
 
 ```json
 {
@@ -356,7 +356,7 @@ agent-discord config --port 18470          # Set hook server port
 
 ### Project State
 
-Project state is stored in `~/.discord-agent-bridge/state.json` and managed automatically.
+Project state is stored in `~/.agent-messenger-bridge/state.json` and managed automatically.
 
 ### Environment Variables
 
@@ -414,7 +414,7 @@ Test suite includes 129 tests covering:
 ### Project Structure
 
 ```
-discord-agent-bridge/
+agent-messenger-bridge/
 ├── bin/                  # CLI entry point (agent-discord)
 ├── src/
 │   ├── agents/           # Agent adapters (Claude, OpenCode)
@@ -516,5 +516,5 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 ## Support
 
-- Issues: [GitHub Issues](https://github.com/DoBuDevel/discord-agent-bridge/issues)
+- Issues: [GitHub Issues](https://github.com/siisee11/agent-messenger-bridge/issues)
 - Discord Bot Setup: [Setup Guide](docs/DISCORD_SETUP.md)

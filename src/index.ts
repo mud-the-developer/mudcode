@@ -1,5 +1,5 @@
 /**
- * Main entry point for discord-agent-bridge
+ * Main entry point for agent-messenger-bridge
  */
 
 import { DiscordClient } from './discord/client.js';

@@ -145,7 +145,7 @@ agent-discord setup YOUR_BOT_TOKEN
 ✓ Discord에 연결되었습니다
 ✓ 봇이 온라인입니다: AI Agent Bridge#1234
 ✓ 서버를 찾았습니다: My Awesome Server (ID: 123456789...)
-✓ 설정이 ~/.discord-agent-bridge/config.json에 저장되었습니다
+✓ 설정이 ~/.agent-messenger-bridge/config.json에 저장되었습니다
 
 설정 완료! 봇을 사용할 준비가 되었습니다.
 

@@ -42,7 +42,7 @@ export class StateManager implements IStateManager {
 
   constructor(storage?: IStorage, stateDir?: string, stateFile?: string) {
     this.storage = storage || new FileStorage();
-    this.stateDir = stateDir || join(homedir(), '.discord-agent-bridge');
+    this.stateDir = stateDir || join(homedir(), '.agent-messenger-bridge');
     this.stateFile = stateFile || join(this.stateDir, 'state.json');
     this.state = this.loadState();
   }

@@ -145,7 +145,7 @@ Replace `YOUR_BOT_TOKEN` with the token you copied in Step 1.3.
 ✓ Connected to Discord
 ✓ Bot is online: AI Agent Bridge#1234
 ✓ Found server: My Awesome Server (ID: 123456789...)
-✓ Configuration saved to ~/.discord-agent-bridge/config.json
+✓ Configuration saved to ~/.agent-messenger-bridge/config.json
 
 Setup complete! Your bot is ready to use.
 

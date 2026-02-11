@@ -19,7 +19,7 @@
 
 ### 1.1 프로젝트 목적
 
-discord-agent-bridge는 AI 에이전트 CLI(Claude Code, OpenCode)의 출력을 Discord로 실시간 브릿징하는 도구입니다. 사용자는 Discord 채널에서 에이전트에게 명령을 보내고, 에이전트의 실행 상태와 결과를 실시간으로 모니터링할 수 있습니다.
+agent-messenger-bridge는 AI 에이전트 CLI(Claude Code, OpenCode)의 출력을 Discord로 실시간 브릿징하는 도구입니다. 사용자는 Discord 채널에서 에이전트에게 명령을 보내고, 에이전트의 실행 상태와 결과를 실시간으로 모니터링할 수 있습니다.
 
 ### 1.2 해결하는 문제
 
@@ -488,7 +488,7 @@ interface ProjectState {
 #### 상태 파일 위치
 
 ```
-~/.discord-agent-bridge/state.json
+~/.agent-messenger-bridge/state.json
 ```
 
 #### 상태 파일 구조
@@ -525,7 +525,7 @@ interface ProjectState {
 
 ```typescript
 function loadStoredConfig(): StoredConfig
-// ~/.discord-agent-bridge/config.json 로드
+// ~/.agent-messenger-bridge/config.json 로드
 
 function saveConfig(updates: Partial<StoredConfig>): void
 // 설정을 파일에 저장
@@ -543,7 +543,7 @@ function getConfigPath(): string
 #### 설정 파일 위치
 
 ```
-~/.discord-agent-bridge/config.json
+~/.agent-messenger-bridge/config.json
 ```
 
 #### 설정 파일 구조
@@ -586,8 +586,8 @@ class DaemonManager {
 #### 데몬 파일 위치
 
 ```
-~/.discord-agent-bridge/daemon.pid    # PID 저장
-~/.discord-agent-bridge/daemon.log    # 출력 로그
+~/.agent-messenger-bridge/daemon.pid    # PID 저장
+~/.agent-messenger-bridge/daemon.log    # 출력 로그
 ```
 
 #### 설계 결정
@@ -924,7 +924,7 @@ unlinkSync(pidFile)
 ### 6.5 로그 관리
 
 ```
-~/.discord-agent-bridge/daemon.log
+~/.agent-messenger-bridge/daemon.log
 
 모든 stdout/stderr를 파일에 append:
 spawn(command, args, {
@@ -940,7 +940,7 @@ spawn(command, args, {
 
 ```
 ┌────────────────────────────────┐
-│   ~/.discord-agent-bridge/     │
+│   ~/.agent-messenger-bridge/     │
 │   config.json                  │
 │ (저장된 설정)                  │
 └────────────────┬───────────────┘
@@ -1273,7 +1273,7 @@ agent-discord agents
 ## 9. 디렉토리 구조
 
 ```
-discord-agent-bridge/
+agent-messenger-bridge/
 ├── bin/
 │   └── agent-discord.ts          # CLI 진입점 (commander 기반)
 │
@@ -1450,18 +1450,18 @@ npm link             # 글로벌 agent-discord 명령어 등록
 
 | 파일 | 위치 |
 |------|------|
-| 설정 | `~/.discord-agent-bridge/config.json` |
-| 상태 | `~/.discord-agent-bridge/state.json` |
-| 데몬 PID | `~/.discord-agent-bridge/daemon.pid` |
-| 데몬 로그 | `~/.discord-agent-bridge/daemon.log` |
+| 설정 | `~/.agent-messenger-bridge/config.json` |
+| 상태 | `~/.agent-messenger-bridge/state.json` |
+| 데몬 PID | `~/.agent-messenger-bridge/daemon.pid` |
+| 데몬 로그 | `~/.agent-messenger-bridge/daemon.log` |
 
 ### 디버깅 팁
 
-1. **데몬 로그 확인**: `cat ~/.discord-agent-bridge/daemon.log`
+1. **데몬 로그 확인**: `cat ~/.agent-messenger-bridge/daemon.log`
 2. **프로세스 확인**: `ps aux | grep agent-discord`
 3. **포트 확인**: `lsof -i :18470`
 4. **tmux 세션 확인**: `tmux list-sessions`
-5. **상태 파일 확인**: `cat ~/.discord-agent-bridge/state.json`
+5. **상태 파일 확인**: `cat ~/.agent-messenger-bridge/state.json`
 
 ---
 
@@ -1474,6 +1474,6 @@ npm link             # 글로벌 agent-discord 명령어 등록
 
 ---
 
-**문서 작성자**: discord-agent-bridge 프로젝트
+**문서 작성자**: agent-messenger-bridge 프로젝트
 **마지막 업데이트**: 2024-02-07
 **버전**: 0.1.0

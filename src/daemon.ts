@@ -34,7 +34,7 @@ export class DaemonManager {
   constructor(storage?: IStorage, processManager?: IProcessManager, daemonDir?: string, port?: number) {
     this.storage = storage || new FileStorage();
     this.processManager = processManager || new SystemProcessManager();
-    this.daemonDir = daemonDir || join(homedir(), '.discord-agent-bridge');
+    this.daemonDir = daemonDir || join(homedir(), '.agent-messenger-bridge');
     this.port = port || DEFAULT_PORT;
   }
 
