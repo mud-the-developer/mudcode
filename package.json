@@ -27,10 +27,11 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@types/yargs": "^17.0.35",
     "chalk": "^5.3.0",
-    "commander": "^12.0.0",
     "discord.js": "^14.14.1",
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "yargs": "^18.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.5",
