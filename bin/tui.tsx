@@ -7,7 +7,9 @@ import { For, Show, createMemo, createSignal, onCleanup, onMount } from 'solid-j
 
 type TuiInput = {
   onCommand: (command: string, append: (line: string) => void) => Promise<boolean | void>;
+  onStopProject: (project: string) => Promise<void>;
   getProjects: () => Array<{
+    project: string;
     session: string;
     window: string;
     ai: string;
@@ -30,6 +32,7 @@ const palette = {
 const slashCommands = [
   { command: '/session_new', description: 'create new session' },
   { command: '/new', description: 'alias for /session_new' },
+  { command: '/stop', description: 'select and stop a project' },
   { command: '/projects', description: 'list configured projects' },
   { command: '/help', description: 'show available commands' },
   { command: '/exit', description: 'close the TUI' },
@@ -39,6 +42,7 @@ const slashCommands = [
 const paletteCommands = [
   { command: '/session_new', description: 'Create a new session' },
   { command: '/new', description: 'Alias for /session_new' },
+  { command: '/stop', description: 'Select and stop a project' },
   { command: '/projects', description: 'List configured projects' },
   { command: '/help', description: 'Show help' },
   { command: '/exit', description: 'Exit TUI' },
@@ -53,7 +57,10 @@ function TuiApp(props: { input: TuiInput; close: () => void }) {
   const [paletteOpen, setPaletteOpen] = createSignal(false);
   const [paletteQuery, setPaletteQuery] = createSignal('');
   const [paletteSelected, setPaletteSelected] = createSignal(0);
+  const [stopOpen, setStopOpen] = createSignal(false);
+  const [stopSelected, setStopSelected] = createSignal(0);
   const [projects, setProjects] = createSignal<Array<{
+    project: string;
     session: string;
     window: string;
     ai: string;
@@ -64,6 +71,11 @@ function TuiApp(props: { input: TuiInput; close: () => void }) {
   let paletteInput: InputRenderable;
 
   const openProjects = createMemo(() => projects().filter((item) => item.open));
+  const stoppableProjects = createMemo(() => {
+    const names = new Set<string>();
+    openProjects().forEach((item) => names.add(item.project));
+    return Array.from(names).sort((a, b) => a.localeCompare(b));
+  });
   const sessionTree = createMemo(() => {
     const groups = new Map<string, Array<{ window: string; ai: string; channel: string }>>();
     openProjects().forEach((item) => {
@@ -150,6 +162,12 @@ function TuiApp(props: { input: TuiInput; close: () => void }) {
   const executePaletteSelection = async () => {
     const item = paletteMatches()[paletteSelected()];
     if (!item) return;
+    if (item.command === '/stop') {
+      closeCommandPalette();
+      setStopOpen(true);
+      setStopSelected(0);
+      return;
+    }
     closeCommandPalette();
     const shouldClose = await props.input.onCommand(item.command, () => {});
     if (shouldClose) {
@@ -158,12 +176,41 @@ function TuiApp(props: { input: TuiInput; close: () => void }) {
     }
   };
 
+  const closeStopDialog = () => {
+    setStopOpen(false);
+    setStopSelected(0);
+    setTimeout(() => {
+      if (!textarea || textarea.isDestroyed) return;
+      textarea.focus();
+    }, 1);
+  };
+
+  const clampStopSelection = (offset: number) => {
+    const items = stoppableProjects();
+    if (items.length === 0) return;
+    const next = (stopSelected() + offset + items.length) % items.length;
+    setStopSelected(next);
+  };
+
+  const executeStopSelection = async () => {
+    const project = stoppableProjects()[stopSelected()];
+    if (!project) return;
+    closeStopDialog();
+    await props.input.onStopProject(project);
+  };
+
   const submit = async () => {
     const raw = textarea?.plainText ?? '';
     const command = raw.trim();
     textarea?.setText('');
     setValue('');
     if (!command) return;
+
+    if (command === 'stop' || command === '/stop') {
+      setStopOpen(true);
+      setStopSelected(0);
+      return;
+    }
 
     const shouldClose = await props.input.onCommand(command, () => {});
     if (shouldClose) {
@@ -224,6 +271,29 @@ function TuiApp(props: { input: TuiInput; close: () => void }) {
       }
       if (evt.name === 'tab') {
         evt.preventDefault();
+        return;
+      }
+    }
+
+    if (stopOpen()) {
+      if (evt.name === 'escape') {
+        evt.preventDefault();
+        closeStopDialog();
+        return;
+      }
+      if (evt.name === 'up' || (evt.ctrl && evt.name === 'p')) {
+        evt.preventDefault();
+        clampStopSelection(-1);
+        return;
+      }
+      if (evt.name === 'down' || (evt.ctrl && evt.name === 'n')) {
+        evt.preventDefault();
+        clampStopSelection(1);
+        return;
+      }
+      if (evt.name === 'return') {
+        evt.preventDefault();
+        void executeStopSelection();
         return;
       }
     }
@@ -358,6 +428,50 @@ function TuiApp(props: { input: TuiInput; close: () => void }) {
         </box>
       </Show>
 
+      <Show when={stopOpen()}>
+        <box
+          width={dims().width}
+          height={dims().height}
+          backgroundColor={RGBA.fromInts(0, 0, 0, 150)}
+          position="absolute"
+          left={0}
+          top={0}
+          alignItems="center"
+          paddingTop={Math.floor(dims().height / 4)}
+        >
+          <box
+            width={Math.max(50, Math.min(70, dims().width - 2))}
+            backgroundColor={palette.panel}
+            flexDirection="column"
+            paddingTop={1}
+            paddingBottom={1}
+          >
+            <box paddingLeft={4} paddingRight={4} flexDirection="row" justifyContent="space-between">
+              <text fg={palette.primary} attributes={TextAttributes.BOLD}>Stop project</text>
+              <text fg={palette.muted}>esc</text>
+            </box>
+            <Show when={stoppableProjects().length > 0} fallback={<box paddingLeft={4} paddingRight={4} paddingTop={1}><text fg={palette.muted}>No running projects</text></box>}>
+              <For each={stoppableProjects().slice(0, 10)}>
+                {(item, index) => (
+                  <box
+                    paddingLeft={3}
+                    paddingRight={1}
+                    paddingTop={index() === 0 ? 1 : 0}
+                    backgroundColor={stopSelected() === index() ? palette.selectedBg : palette.panel}
+                  >
+                    <text fg={stopSelected() === index() ? palette.selectedFg : palette.text}>{item}</text>
+                  </box>
+                )}
+              </For>
+            </Show>
+            <box paddingLeft={4} paddingRight={2} paddingTop={1}>
+              <text fg={palette.text}>Stop </text>
+              <text fg={palette.muted}>enter</text>
+            </box>
+          </box>
+        </box>
+      </Show>
+
       <box backgroundColor={palette.bg} paddingLeft={2} paddingRight={2} paddingBottom={1}>
         <box border borderColor={palette.border} backgroundColor={palette.panel} flexDirection="column">
           <box paddingLeft={1} paddingRight={1}>
@@ -382,7 +496,7 @@ function TuiApp(props: { input: TuiInput; close: () => void }) {
                 setSelected(0);
               }}
               onKeyDown={(event) => {
-                if (paletteOpen()) {
+                if (paletteOpen() || stopOpen()) {
                   event.preventDefault();
                   return;
                 }

@@ -141,6 +141,25 @@ async function tuiCommand(options: TmuxCliOptions): Promise<void> {
       return false;
     }
 
+    if (command === 'stop' || command === '/stop') {
+      append('Use stop dialog to choose a project.');
+      return false;
+    }
+
+    if (command.startsWith('stop ') || command.startsWith('/stop ')) {
+      const projectName = command.replace(/^\/?stop\s+/, '').trim();
+      if (!projectName) {
+        append('⚠️ Project name is required. Example: stop my-project');
+        return false;
+      }
+      await stopCommand(projectName, {
+        tmuxSessionMode: options.tmuxSessionMode,
+        tmuxSharedSessionName: options.tmuxSharedSessionName,
+      });
+      append(`✅ Stopped project: ${projectName}`);
+      return false;
+    }
+
     if (command.startsWith('/session_new') || command.startsWith('/new')) {
       try {
         validateConfig();
@@ -214,6 +233,12 @@ async function tuiCommand(options: TmuxCliOptions): Promise<void> {
   const mod = await import(sourceUrl.href);
   await mod.runTui({
     onCommand: handler,
+    onStopProject: async (project: string) => {
+      await stopCommand(project, {
+        tmuxSessionMode: options.tmuxSessionMode,
+        tmuxSharedSessionName: options.tmuxSharedSessionName,
+      });
+    },
     getProjects: () =>
       stateManager.listProjects().map((project) => {
         const agentName = Object.entries(project.agents).find(([_, enabled]) => enabled)?.[0] || 'none';
@@ -222,6 +247,7 @@ async function tuiCommand(options: TmuxCliOptions): Promise<void> {
         const channelId = project.discordChannels[agentName];
         const channelBase = channelId ? `discord#${agentName}-${project.projectName}` : 'not connected';
         return {
+          project: project.projectName,
           session: project.tmuxSession,
           window,
           ai: adapter?.config.displayName || agentName,
