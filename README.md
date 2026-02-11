@@ -7,7 +7,7 @@ Bridge AI agent CLIs to Discord for remote monitoring and collaboration.
 > Derived from [DoBuDevel/discord-agent-bridge](https://github.com/DoBuDevel/discord-agent-bridge). This project preserves original authorship and builds on top of the upstream work.
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg)](https://www.typescriptlang.org/)
-[![Node.js](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org/)
+[![Bun](https://img.shields.io/badge/Bun-1.3+-green.svg)](https://bun.sh/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Tests](https://img.shields.io/badge/Tests-129%20passing-brightgreen.svg)](./tests)
 
@@ -42,7 +42,7 @@ The bridge uses a polling-based architecture that captures tmux pane content eve
 
 ## Prerequisites
 
-- **Node.js**: Version 18 or higher
+- **Bun**: Version 1.3 or higher
 - **tmux**: Version 3.0 or higher
 - **Discord Bot**: Create a bot following the [Discord Bot Setup Guide](docs/DISCORD_SETUP.md)
   - Required permissions: Send Messages, Manage Channels, Read Message History, Embed Links, Add Reactions
@@ -53,10 +53,10 @@ The bridge uses a polling-based architecture that captures tmux pane content eve
 
 ## Installation
 
-### From npm
+### Global install
 
 ```bash
-npm install -g agent-messenger-bridge
+bun add -g agent-messenger-bridge
 ```
 
 ### From source
@@ -64,9 +64,9 @@ npm install -g agent-messenger-bridge
 ```bash
 git clone https://github.com/siisee11/agent-messenger-bridge.git
 cd agent-messenger-bridge
-npm install
-npm run build
-npm link
+bun install
+bun run build
+bun link
 ```
 
 ## Quick Start
@@ -164,6 +164,14 @@ List available AI agents detected on your system.
 
 ```bash
 agent-bridge agents
+```
+
+#### `tui`
+
+Open interactive terminal UI. Use `/session_new` (or `/new`) inside the TUI to create a new agent session.
+
+```bash
+agent-bridge tui
 ```
 
 #### `config [options]`
@@ -390,17 +398,17 @@ agent-bridge go --tmux-session-mode shared --tmux-shared-session-name bridge
 ### Building
 
 ```bash
-npm install
-npm run build          # Compile TypeScript
-npm run build:watch    # Watch mode
+bun install
+bun run build          # Compile TypeScript
+bun run dev            # Dev mode
 ```
 
 ### Testing
 
 ```bash
-npm test              # Run all tests
-npm run test:watch    # Watch mode
-npm run test:coverage # Coverage report
+bun test              # Run all tests
+bun run test:watch    # Watch mode
+bun run test:coverage # Coverage report
 ```
 
 Test suite includes 129 tests covering:

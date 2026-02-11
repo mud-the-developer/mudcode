@@ -5,7 +5,7 @@
 AI 에이전트 CLI를 Discord로 연결하여 원격 모니터링 및 협업을 지원합니다.
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg)](https://www.typescriptlang.org/)
-[![Node.js](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org/)
+[![Bun](https://img.shields.io/badge/Bun-1.3+-green.svg)](https://bun.sh/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Tests](https://img.shields.io/badge/Tests-129%20passing-brightgreen.svg)](../tests)
 
@@ -40,7 +40,7 @@ Discord Agent Bridge는 AI 코딩 어시스턴트(Claude Code, OpenCode)를 Disc
 
 ## 사전 요구 사항
 
-- **Node.js**: 버전 18 이상
+- **Bun**: 버전 1.3 이상
 - **tmux**: 버전 3.0 이상
 - **Discord 봇**: [Discord 봇 설정 가이드](DISCORD_SETUP.ko.md)를 따라 봇 생성
   - 필요 권한: Send Messages, Manage Channels, Read Message History, Embed Links, Add Reactions
@@ -51,10 +51,10 @@ Discord Agent Bridge는 AI 코딩 어시스턴트(Claude Code, OpenCode)를 Disc
 
 ## 설치
 
-### npm으로 설치
+### 전역 설치
 
 ```bash
-npm install -g agent-messenger-bridge
+bun add -g agent-messenger-bridge
 ```
 
 ### 소스에서 설치
@@ -62,9 +62,9 @@ npm install -g agent-messenger-bridge
 ```bash
 git clone https://github.com/siisee11/agent-messenger-bridge.git
 cd agent-messenger-bridge
-npm install
-npm run build
-npm link
+bun install
+bun run build
+bun link
 ```
 
 ## 빠른 시작
@@ -387,17 +387,17 @@ agent-bridge go --tmux-session-mode shared --tmux-shared-session-name bridge
 ### 빌드
 
 ```bash
-npm install
-npm run build          # TypeScript 컴파일
-npm run build:watch    # 감시 모드
+bun install
+bun run build          # TypeScript 컴파일
+bun run dev            # 개발 모드
 ```
 
 ### 테스트
 
 ```bash
-npm test              # 모든 테스트 실행
-npm run test:watch    # 감시 모드
-npm run test:coverage # 커버리지 리포트
+bun test              # 모든 테스트 실행
+bun run test:watch    # 감시 모드
+bun run test:coverage # 커버리지 리포트
 ```
 
 테스트 스위트에 129개의 테스트가 포함되어 있습니다:

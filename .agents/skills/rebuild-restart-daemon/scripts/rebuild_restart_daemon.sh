@@ -71,18 +71,18 @@ fi
 
 if [[ "$skip_build" -eq 0 ]]; then
   echo "[1/4] Build project"
-  run_cmd npm run build
+  run_cmd bun run build
 else
   echo "[1/4] Build skipped"
 fi
 
 echo "[2/4] Stop daemon"
-run_cmd node dist/bin/agent-bridge.js daemon stop
+run_cmd bun dist/bin/agent-bridge.js daemon stop
 
 echo "[3/4] Start daemon"
-run_cmd node dist/bin/agent-bridge.js daemon start
+run_cmd bun dist/bin/agent-bridge.js daemon start
 
 echo "[4/4] Check daemon status"
-run_cmd node dist/bin/agent-bridge.js daemon status
+run_cmd bun dist/bin/agent-bridge.js daemon status
 
 echo "Done. Log: ~/.agent-messenger-bridge/daemon.log"

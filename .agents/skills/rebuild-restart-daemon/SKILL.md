@@ -32,7 +32,7 @@ bash /Users/dev/.codex/skills/rebuild-restart-daemon/scripts/rebuild_restart_dae
 Use options:
 
 - `--repo <path>`: target repository path (default: current directory)
-- `--skip-build`: skip `npm run build` and only restart daemon
+- `--skip-build`: skip `bun run build` and only restart daemon
 - `--dry-run`: print commands without executing them
 
 ## Manual Fallback
@@ -41,14 +41,14 @@ Run:
 
 ```bash
 cd /path/to/discord-agent-bridge
-npm run build
-node dist/bin/agent-bridge.js daemon stop
-node dist/bin/agent-bridge.js daemon start
-node dist/bin/agent-bridge.js daemon status
+bun run build
+bun dist/bin/agent-bridge.js daemon stop
+bun dist/bin/agent-bridge.js daemon start
+bun dist/bin/agent-bridge.js daemon status
 ```
 
 ## Troubleshooting
 
 - Inspect daemon log at `~/.agent-messenger-bridge/daemon.log`.
 - Inspect daemon pid at `~/.agent-messenger-bridge/daemon.pid`.
-- Re-run `node dist/bin/agent-bridge.js daemon status` after resolving errors.
+- Re-run `bun dist/bin/agent-bridge.js daemon status` after resolving errors.

@@ -83,10 +83,11 @@ export class DaemonManager {
     const out = openSync(logFile, 'a');
     const err = openSync(logFile, 'a');
 
-    // Use caffeinate on macOS to prevent sleep while daemon is running
+    // Use caffeinate on macOS to prevent sleep while daemon is running.
+    // Runtime is Bun to match CLI/TUI execution.
     const isMac = process.platform === 'darwin';
-    const command = isMac ? 'caffeinate' : 'node';
-    const args = isMac ? ['-ims', 'node', entryPoint] : [entryPoint];
+    const command = isMac ? 'caffeinate' : 'bun';
+    const args = isMac ? ['-ims', 'bun', entryPoint] : [entryPoint];
 
     const child = this.processManager.spawn(command, args, {
       detached: true,

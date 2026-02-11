@@ -7,7 +7,7 @@ AI 에이전트 CLI를 Discord에 연결하여 원격 모니터링 및 협업을
 > 이 프로젝트는 [DoBuDevel/discord-agent-bridge](https://github.com/DoBuDevel/discord-agent-bridge)에서 파생되었습니다. 원 저작자 표기를 유지하며 업스트림 작업을 기반으로 확장합니다.
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg)](https://www.typescriptlang.org/)
-[![Node.js](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org/)
+[![Bun](https://img.shields.io/badge/Bun-1.3+-green.svg)](https://bun.sh/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Tests](https://img.shields.io/badge/Tests-129%20passing-brightgreen.svg)](./tests)
 
@@ -32,7 +32,7 @@ Discord Agent Bridge는 AI 코딩 어시스턴트(Claude Code, OpenCode)를 Disc
 
 ## 사전 요구사항
 
-- **Node.js**: 버전 18 이상
+- **Bun**: 버전 1.3 이상
 - **tmux**: 버전 3.0 이상
 - **Discord Bot**: [Discord 봇 설정 가이드](docs/DISCORD_SETUP.ko.md)를 따라 봇 생성
   - 필수 권한: Send Messages, Manage Channels, Read Message History, Embed Links, Add Reactions
@@ -43,10 +43,10 @@ Discord Agent Bridge는 AI 코딩 어시스턴트(Claude Code, OpenCode)를 Disc
 
 ## 설치
 
-### npm을 통한 설치
+### 전역 설치
 
 ```bash
-npm install -g agent-messenger-bridge
+bun add -g agent-messenger-bridge
 ```
 
 ### 소스에서 설치
@@ -54,9 +54,9 @@ npm install -g agent-messenger-bridge
 ```bash
 git clone https://github.com/siisee11/agent-messenger-bridge.git
 cd agent-messenger-bridge
-npm install
-npm run build
-npm link
+bun install
+bun run build
+bun link
 ```
 
 ## 빠른 시작
@@ -135,6 +135,14 @@ agent-bridge list
 
 ```bash
 agent-bridge agents
+```
+
+#### `tui`
+
+인터랙티브 터미널 UI를 엽니다. TUI 내부에서 `/session_new` (또는 `/new`)를 사용해 새로운 agent session을 만들 수 있습니다.
+
+```bash
+agent-bridge tui
 ```
 
 #### `config [options]`
@@ -324,17 +332,17 @@ HOOK_SERVER_PORT=18470 agent-bridge go
 ### 빌드
 
 ```bash
-npm install
-npm run build          # TypeScript 컴파일
-npm run build:watch    # 워치 모드
+bun install
+bun run build          # TypeScript 컴파일
+bun run dev            # 개발 모드
 ```
 
 ### 테스트
 
 ```bash
-npm test              # 모든 테스트 실행
-npm run test:watch    # 워치 모드
-npm run test:coverage # 커버리지 리포트
+bun test              # 모든 테스트 실행
+bun run test:watch    # 워치 모드
+bun run test:coverage # 커버리지 리포트
 ```
 
 테스트 스위트는 다음을 포함하는 129개의 테스트로 구성:

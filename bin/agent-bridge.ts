@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 
 /**
  * CLI entry point for agent-messenger-bridge
@@ -17,6 +17,8 @@ import { defaultDaemonManager } from '../src/daemon.js';
 import { basename, resolve } from 'path';
 import { execSync } from 'child_process';
 import { createInterface } from 'readline';
+import { existsSync } from 'fs';
+import { fileURLToPath } from 'url';
 import chalk from 'chalk';
 import type { BridgeConfig } from '../src/types/index.js';
 
@@ -85,6 +87,132 @@ function prompt(question: string): Promise<string> {
       rl.close();
       resolve(answer.trim());
     });
+  });
+}
+
+function nextProjectName(baseName: string): string {
+  if (!stateManager.getProject(baseName)) return baseName;
+  for (let i = 2; i < 1000; i += 1) {
+    const candidate = `${baseName}-${i}`;
+    if (!stateManager.getProject(candidate)) return candidate;
+  }
+  return `${baseName}-${Date.now()}`;
+}
+
+function parseSessionNew(raw: string): {
+  projectName?: string;
+  agentName?: string;
+  attach: boolean;
+  yolo: boolean;
+  sandbox: boolean;
+} {
+  const parts = raw.split(/\s+/).filter(Boolean);
+  const attach = parts.includes('--attach');
+  const yolo = parts.includes('--yolo');
+  const sandbox = parts.includes('--sandbox');
+  const values = parts.filter((item) => !item.startsWith('--'));
+  const projectName = values[1];
+  const agentName = values[2];
+  return { projectName, agentName, attach, yolo, sandbox };
+}
+
+async function tuiCommand(options: TmuxCliOptions): Promise<void> {
+  const handler = async (command: string, append: (line: string) => void): Promise<boolean> => {
+    if (command === '/exit' || command === '/quit') {
+      append('Bye!');
+      return true;
+    }
+
+    if (command === '/help') {
+      append('Commands: /session_new [name] [agent] [--yolo] [--sandbox] [--attach], /projects, /help, /exit');
+      return false;
+    }
+
+    if (command === '/projects') {
+      const projects = stateManager.listProjects();
+      if (projects.length === 0) {
+        append('No projects configured.');
+        return false;
+      }
+      projects.forEach((project) => {
+        const agentName = Object.entries(project.agents).find(([_, enabled]) => enabled)?.[0] || 'none';
+        append(`[project] ${project.projectName} (${agentName})`);
+      });
+      return false;
+    }
+
+    if (command.startsWith('/session_new') || command.startsWith('/new')) {
+      try {
+        validateConfig();
+        if (!stateManager.getGuildId()) {
+          append('⚠️ Not set up yet. Run: agent-bridge setup <token>');
+          return false;
+        }
+
+        const installed = agentRegistry.getAll().filter((agent) => agent.isInstalled());
+        if (installed.length === 0) {
+          append('⚠️ No agent CLIs found. Install one first (claude, codex, opencode).');
+          return false;
+        }
+
+        const parsed = parseSessionNew(command);
+        const cwdName = basename(process.cwd());
+        const projectName = parsed.projectName && parsed.projectName.trim().length > 0
+          ? parsed.projectName.trim()
+          : nextProjectName(cwdName);
+
+        const selected = parsed.agentName
+          ? installed.find((agent) => agent.config.name === parsed.agentName)
+          : installed[0];
+
+        if (!selected) {
+          append(`⚠️ Unknown agent '${parsed.agentName}'. Try claude, codex, or opencode.`);
+          return false;
+        }
+
+        append(`Creating session '${projectName}' with ${selected.config.displayName}...`);
+        await goCommand(selected.config.name, {
+          name: projectName,
+          attach: parsed.attach,
+          yolo: parsed.yolo,
+          sandbox: parsed.sandbox,
+          tmuxSessionMode: options.tmuxSessionMode,
+          tmuxSharedSessionName: options.tmuxSharedSessionName,
+        });
+        append(`✅ Session created: ${projectName}`);
+        append(`[project] ${projectName} (${selected.config.name})`);
+        return false;
+      } catch (error) {
+        append(`⚠️ ${error instanceof Error ? error.message : String(error)}`);
+        return false;
+      }
+    }
+
+    append(`Unknown command: ${command}`);
+    append('Try /help');
+    return false;
+  };
+
+  const isBunRuntime = Boolean((process as { versions?: { bun?: string } }).versions?.bun);
+  if (!isBunRuntime) {
+    throw new Error('TUI requires Bun runtime. Run with: bun dist/bin/agent-bridge.js');
+  }
+
+  const preloadModule = '@opentui/solid/preload';
+  await import(preloadModule);
+
+  const sourceCandidates = [
+    new URL('./tui.tsx', import.meta.url),
+    new URL('../../bin/tui.tsx', import.meta.url),
+  ];
+  const sourceUrl = sourceCandidates.find((candidate) => existsSync(fileURLToPath(candidate)));
+  if (!sourceUrl) {
+    throw new Error('OpenTUI source entry not found: bin/tui.tsx');
+  }
+
+  const mod = await import(sourceUrl.href);
+  await mod.runTui({
+    onCommand: handler,
   });
 }
 
@@ -755,10 +883,20 @@ function addTmuxOptions<T>(y: Argv<T>) {
 
 await yargs(hideBin(process.argv))
   .scriptName('agent-bridge')
-  .usage('$0 <command>')
+  .usage('$0 [command]')
   .version('0.1.0')
   .help()
   .strict()
+  .command(
+    ['$0', 'tui'],
+    'Interactive terminal UI (supports /session_new)',
+    (y: Argv) => addTmuxOptions(y),
+    async (argv: any) =>
+      tuiCommand({
+        tmuxSessionMode: argv.tmuxSessionMode,
+        tmuxSharedSessionName: argv.tmuxSharedSessionName,
+      })
+  )
   .command(
     'setup <token>',
     'One-time setup: save token, detect server, install hooks',
@@ -864,5 +1002,4 @@ await yargs(hideBin(process.argv))
     (y: Argv) => y.positional('action', { type: 'string', demandOption: true }),
     async (argv: any) => daemonCommand(argv.action)
   )
-  .demandCommand(1)
   .parseAsync();
