@@ -64,6 +64,7 @@ function TuiApp(props: { input: TuiInput; close: () => void }) {
   const [newOpen, setNewOpen] = createSignal(false);
   const [newSelected, setNewSelected] = createSignal(0);
   const [listOpen, setListOpen] = createSignal(false);
+  const [listSelected, setListSelected] = createSignal(0);
   const [stopOpen, setStopOpen] = createSignal(false);
   const [stopSelected, setStopSelected] = createSignal(0);
   const [projects, setProjects] = createSignal<Array<{
@@ -105,14 +106,22 @@ function TuiApp(props: { input: TuiInput; close: () => void }) {
       .sort((a, b) => a.window.localeCompare(b.window));
   });
   const sessionList = createMemo(() => {
-    const groups = new Map<string, Set<string>>();
+    const groups = new Map<string, { windows: Set<string>; projects: Set<string> }>();
     openProjects().forEach((item) => {
-      const windows = groups.get(item.session) || new Set<string>();
-      windows.add(item.window);
-      groups.set(item.session, windows);
+      const current = groups.get(item.session) || { windows: new Set<string>(), projects: new Set<string>() };
+      current.windows.add(item.window);
+      current.projects.add(item.project);
+      groups.set(item.session, current);
     });
     return Array.from(groups.entries())
-      .map(([session, windows]) => ({ session, windows: windows.size }))
+      .map(([session, info]) => {
+        const projects = Array.from(info.projects).sort((a, b) => a.localeCompare(b));
+        return {
+          session,
+          windows: info.windows.size,
+          attachProject: projects[0],
+        };
+      })
       .sort((a, b) => a.session.localeCompare(b.session));
   });
 
@@ -202,6 +211,7 @@ function TuiApp(props: { input: TuiInput; close: () => void }) {
     if (item.command === '/list') {
       closeCommandPalette();
       setListOpen(true);
+      setListSelected(0);
       return;
     }
     closeCommandPalette();
@@ -232,10 +242,25 @@ function TuiApp(props: { input: TuiInput; close: () => void }) {
 
   const closeListDialog = () => {
     setListOpen(false);
+    setListSelected(0);
     setTimeout(() => {
       if (!textarea || textarea.isDestroyed) return;
       textarea.focus();
     }, 1);
+  };
+
+  const clampListSelection = (offset: number) => {
+    const items = sessionList();
+    if (items.length === 0) return;
+    const next = (listSelected() + offset + items.length) % items.length;
+    setListSelected(next);
+  };
+
+  const executeListSelection = async () => {
+    const selectedSession = sessionList()[listSelected()];
+    if (!selectedSession?.attachProject) return;
+    closeListDialog();
+    await props.input.onAttachProject(selectedSession.attachProject);
   };
 
   const clampNewSelection = (offset: number) => {
@@ -291,6 +316,7 @@ function TuiApp(props: { input: TuiInput; close: () => void }) {
 
     if (command === 'list' || command === '/list') {
       setListOpen(true);
+      setListSelected(0);
       return;
     }
 
@@ -404,9 +430,24 @@ function TuiApp(props: { input: TuiInput; close: () => void }) {
     }
 
     if (listOpen()) {
-      if (evt.name === 'escape' || evt.name === 'return') {
+      if (evt.name === 'escape') {
         evt.preventDefault();
         closeListDialog();
+        return;
+      }
+      if (evt.name === 'up' || (evt.ctrl && evt.name === 'p')) {
+        evt.preventDefault();
+        clampListSelection(-1);
+        return;
+      }
+      if (evt.name === 'down' || (evt.ctrl && evt.name === 'n')) {
+        evt.preventDefault();
+        clampListSelection(1);
+        return;
+      }
+      if (evt.name === 'return') {
+        evt.preventDefault();
+        void executeListSelection();
         return;
       }
     }
@@ -650,16 +691,23 @@ function TuiApp(props: { input: TuiInput; close: () => void }) {
             <Show when={sessionList().length > 0} fallback={<box paddingLeft={4} paddingRight={4} paddingTop={1}><text fg={palette.muted}>No running sessions</text></box>}>
               <For each={sessionList().slice(0, 12)}>
                 {(item, index) => (
-                  <box paddingLeft={3} paddingRight={1} paddingTop={index() === 0 ? 1 : 0}>
-                    <text fg={palette.text}>{item.session}</text>
+                  <box
+                    paddingLeft={3}
+                    paddingRight={1}
+                    paddingTop={index() === 0 ? 1 : 0}
+                    backgroundColor={listSelected() === index() ? palette.selectedBg : palette.panel}
+                  >
+                    <text fg={listSelected() === index() ? palette.selectedFg : palette.text}>{item.session}</text>
                     <text fg={palette.muted}>{`  (${item.windows} windows)`}</text>
                   </box>
                 )}
               </For>
             </Show>
             <box paddingLeft={4} paddingRight={2} paddingTop={1}>
-              <text fg={palette.text}>Close </text>
+              <text fg={palette.text}>Open </text>
               <text fg={palette.muted}>enter</text>
+              <text fg={palette.text}>  Close </text>
+              <text fg={palette.muted}>esc</text>
             </box>
           </box>
         </box>
