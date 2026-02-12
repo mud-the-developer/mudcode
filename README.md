@@ -119,22 +119,6 @@ discode new --sandbox     # Sandbox mode (Docker isolation, Claude Code only)
 
 Your AI agent is now running in tmux, with output streaming to Discord every 30 seconds.
 
-### Advanced: Step-by-Step Setup
-
-For more control over project configuration, use `init` to set up the project separately:
-
-```bash
-cd ~/projects/my-app
-
-# Initialize with a specific agent and custom channel description
-discode init claude "My awesome application"
-
-# Then start step-by-step:
-discode daemon start    # Start global daemon
-discode start          # Start this project
-discode attach         # Attach to tmux session
-```
-
 ## CLI Reference
 
 ### Global Commands
@@ -206,15 +190,6 @@ discode config --port 18470        # Set hook server port
 
 Run these commands from your project directory.
 
-#### `init <agent> <description>`
-
-Initialize current directory as a project.
-
-```bash
-discode init claude "Full-stack web application"
-discode init opencode "Data pipeline project"
-```
-
 #### `start [options]`
 
 Start the bridge server for registered projects.
@@ -256,7 +231,7 @@ Press `Ctrl-b d` to detach from tmux without stopping the agent.
 
 #### `new [agent] [options]`
 
-Quick start: start daemon, setup project if needed, and attach to tmux. Works without `init` — auto-detects installed agents and creates the Discord channel automatically.
+Quick start: start daemon, set up project if needed, and attach to tmux. Auto-detects installed agents and creates the Discord channel automatically.
 
 ```bash
 discode new              # Auto-detect agent, setup & attach
