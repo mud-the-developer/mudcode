@@ -1,5 +1,7 @@
 # Discode
 
+![Discode](./discode.png)
+
 [English](README.md) | [한국어](docs/README.ko.md)
 
 Bridge AI agent CLIs to Discord for remote monitoring and collaboration.
@@ -25,6 +27,8 @@ Discode runs your AI agent in tmux and simply relays output to Discord - no wrap
 - Relay-only architecture
 - Persistent tmux sessions
 - Single daemon managing multiple projects
+
+![Discode Demo](./demo.png)
 
 ## Features
 
