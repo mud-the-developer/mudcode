@@ -88,6 +88,29 @@ function isTmuxPaneAlive(paneTarget?: string): boolean {
   }
 }
 
+function ensureTmuxInstalled(): void {
+  if (process.platform === 'win32') {
+    console.error(chalk.red('tmux is required but not available on native Windows.'));
+    console.log(chalk.gray('Use WSL, or run on macOS/Linux with tmux installed.'));
+    process.exit(1);
+  }
+
+  try {
+    execSync('tmux -V', { stdio: ['ignore', 'pipe', 'ignore'] });
+    return;
+  } catch {
+    console.error(chalk.red('tmux is required but not installed (or not in PATH).'));
+    console.log(chalk.gray('Install tmux and retry:'));
+    if (process.platform === 'darwin') {
+      console.log(chalk.gray('  brew install tmux'));
+    } else {
+      console.log(chalk.gray('  sudo apt-get install -y tmux   # Debian/Ubuntu'));
+      console.log(chalk.gray('  sudo dnf install -y tmux       # Fedora/RHEL'));
+    }
+    process.exit(1);
+  }
+}
+
 function applyTmuxCliOverrides(base: BridgeConfig, options: TmuxCliOptions): BridgeConfig {
   // NOTE: `config` comes from src/config via a Proxy (lazy getter). Do not spread it.
   // Access properties explicitly so the Proxy's `get` trap is used.
@@ -548,6 +571,7 @@ async function onboardCommand(options: { token?: string }) {
 
 async function startCommand(options: TmuxCliOptions & { project?: string; attach?: boolean }) {
   try {
+    ensureTmuxInstalled();
     validateConfig();
     const effectiveConfig = applyTmuxCliOverrides(config, options);
 
@@ -624,6 +648,7 @@ async function goCommand(
   options: TmuxCliOptions & { name?: string; attach?: boolean }
 ) {
   try {
+    ensureTmuxInstalled();
     validateConfig();
     const effectiveConfig = applyTmuxCliOverrides(config, options);
 
@@ -986,6 +1011,7 @@ function agentsCommand() {
 }
 
 function attachCommand(projectName: string | undefined, options: TmuxCliOptions) {
+  ensureTmuxInstalled();
   const effectiveConfig = applyTmuxCliOverrides(config, options);
     const tmux = new TmuxManager(effectiveConfig.tmux.sessionPrefix);
 
@@ -1104,6 +1130,7 @@ async function daemonCommand(action: string) {
 
     switch (action) {
       case 'start': {
+        ensureTmuxInstalled();
         const running = await defaultDaemonManager.isRunning();
         if (running) {
           console.log(chalk.green(`✅ Daemon already running (port ${port})`));
