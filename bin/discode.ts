@@ -47,6 +47,18 @@ function attachToTmux(sessionName: string, windowName?: string): void {
   }
 }
 
+function isTmuxPaneAlive(paneTarget?: string): boolean {
+  if (!paneTarget || paneTarget.trim().length === 0) return false;
+  try {
+    execSync(`tmux display-message -p -t ${escapeShellArg(paneTarget)} "#{pane_id}"`, {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function applyTmuxCliOverrides(base: BridgeConfig, options: TmuxCliOptions): BridgeConfig {
   // NOTE: `config` comes from src/config via a Proxy (lazy getter). Do not spread it.
   // Access properties explicitly so the Proxy's `get` trap is used.
@@ -287,6 +299,30 @@ async function tuiCommand(options: TmuxCliOptions): Promise<void> {
 
   const preloadModule = '@opentui/solid/preload';
   await import(preloadModule);
+  const tmuxPaneTarget = process.env.TMUX_PANE;
+  const startedFromTmux = !!process.env.TMUX;
+  if (startedFromTmux && !isTmuxPaneAlive(tmuxPaneTarget)) {
+    console.log(chalk.yellow('⚠️ Stale tmux environment detected; skipping TUI startup to avoid orphaned process.'));
+    return;
+  }
+
+  let tmuxHealthTimer: ReturnType<typeof setInterval> | undefined;
+  if (startedFromTmux) {
+    tmuxHealthTimer = setInterval(() => {
+      if (isTmuxPaneAlive(tmuxPaneTarget)) return;
+      console.log(chalk.yellow('\n⚠️ tmux session/pane ended; exiting TUI to prevent leaked process.'));
+      process.exit(0);
+    }, 5000);
+    tmuxHealthTimer.unref();
+  }
+
+  const clearTmuxHealthTimer = () => {
+    if (!tmuxHealthTimer) return;
+    clearInterval(tmuxHealthTimer);
+    tmuxHealthTimer = undefined;
+  };
+  process.once('exit', clearTmuxHealthTimer);
+
   const tmux = new TmuxManager(config.tmux.sessionPrefix);
   const currentSession = tmux.getCurrentSession(process.env.TMUX_PANE);
 
@@ -306,43 +342,50 @@ async function tuiCommand(options: TmuxCliOptions): Promise<void> {
     }
   }
   if (!mod) {
+    clearTmuxHealthTimer();
+    process.off('exit', clearTmuxHealthTimer);
     throw new Error('OpenTUI entry not found: bin/tui.tsx or dist/bin/tui.js');
   }
 
-  await mod.runTui({
-    currentSession: currentSession || undefined,
-    onCommand: handler,
-    onAttachProject: async (project: string) => {
-      attachCommand(project, {
-        tmuxSessionMode: options.tmuxSessionMode,
-        tmuxSharedSessionName: options.tmuxSharedSessionName,
-      });
-    },
-    onStopProject: async (project: string) => {
-      await stopCommand(project, {
-        tmuxSessionMode: options.tmuxSessionMode,
-        tmuxSharedSessionName: options.tmuxSharedSessionName,
-      });
-    },
-    getProjects: () =>
-      stateManager.listProjects().map((project) => {
-        const agentName = Object.entries(project.agents).find(([_, enabled]) => enabled)?.[0] || 'none';
-        const adapter = agentRegistry.get(agentName);
-        const window = project.tmuxWindows?.[agentName] || agentName;
-        const channelId = project.discordChannels[agentName];
-        const channelBase = channelId ? `discord#${agentName}-${project.projectName}` : 'not connected';
-        const sessionUp = tmux.sessionExistsFull(project.tmuxSession);
-        const windowUp = sessionUp ? tmux.windowExists(project.tmuxSession, window) : false;
-        return {
-          project: project.projectName,
-          session: project.tmuxSession,
-          window,
-          ai: adapter?.config.displayName || agentName,
-          channel: channelBase,
-          open: windowUp,
-        };
-      }),
-  });
+  try {
+    await mod.runTui({
+      currentSession: currentSession || undefined,
+      onCommand: handler,
+      onAttachProject: async (project: string) => {
+        attachCommand(project, {
+          tmuxSessionMode: options.tmuxSessionMode,
+          tmuxSharedSessionName: options.tmuxSharedSessionName,
+        });
+      },
+      onStopProject: async (project: string) => {
+        await stopCommand(project, {
+          tmuxSessionMode: options.tmuxSessionMode,
+          tmuxSharedSessionName: options.tmuxSharedSessionName,
+        });
+      },
+      getProjects: () =>
+        stateManager.listProjects().map((project) => {
+          const agentName = Object.entries(project.agents).find(([_, enabled]) => enabled)?.[0] || 'none';
+          const adapter = agentRegistry.get(agentName);
+          const window = project.tmuxWindows?.[agentName] || agentName;
+          const channelId = project.discordChannels[agentName];
+          const channelBase = channelId ? `discord#${agentName}-${project.projectName}` : 'not connected';
+          const sessionUp = tmux.sessionExistsFull(project.tmuxSession);
+          const windowUp = sessionUp ? tmux.windowExists(project.tmuxSession, window) : false;
+          return {
+            project: project.projectName,
+            session: project.tmuxSession,
+            window,
+            ai: adapter?.config.displayName || agentName,
+            channel: channelBase,
+            open: windowUp,
+          };
+        }),
+    });
+  } finally {
+    clearTmuxHealthTimer();
+    process.off('exit', clearTmuxHealthTimer);
+  }
 }
 
 async function setupCommand(token: string) {
@@ -691,10 +734,15 @@ async function goCommand(
     const projectState = stateManager.getProject(projectName);
     const sessionName = projectState?.tmuxSession || `${effectiveConfig.tmux.sessionPrefix}${projectName}`;
     const statusWindowName = projectState?.tmuxWindows?.[agentName] || agentName;
-    try {
-      ensureProjectTuiPane(tmux, sessionName, statusWindowName, options);
-    } catch (error) {
-      console.log(chalk.yellow(`⚠️ Could not start discode TUI pane: ${error instanceof Error ? error.message : String(error)}`));
+    const isInteractive = process.stdin.isTTY && process.stdout.isTTY;
+    if (isInteractive) {
+      try {
+        ensureProjectTuiPane(tmux, sessionName, statusWindowName, options);
+      } catch (error) {
+        console.log(chalk.yellow(`⚠️ Could not start discode TUI pane: ${error instanceof Error ? error.message : String(error)}`));
+      }
+    } else {
+      console.log(chalk.gray('   Non-interactive shell detected; skipping automatic discode TUI pane startup.'));
     }
     console.log(chalk.cyan('\n✨ Ready!\n'));
     console.log(chalk.gray(`   Project:  ${projectName}`));
