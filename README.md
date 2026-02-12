@@ -13,7 +13,7 @@ Bridge AI agent CLIs to Discord for remote monitoring and collaboration.
 
 ## Overview
 
-Discode connects AI coding assistants (Claude Code, OpenCode) to Discord, enabling remote monitoring and collaboration. Watch your AI agents work in real-time through Discord channels, share progress with your team, and track multiple projects simultaneously.
+Discode connects AI coding assistants (Claude Code, OpenCode) to Discord, enabling remote monitoring and collaboration. Watch your AI agents work in real-time through Discord channels and track multiple projects simultaneously.
 
 The bridge uses a polling-based architecture that captures tmux pane content every 30 seconds, detects state changes, and streams updates to dedicated Discord channels. Each project gets its own channel, and a single global daemon manages all connections efficiently.
 
@@ -266,57 +266,6 @@ discode new --sandbox    # Sandbox mode (Docker isolation, Claude Code only)
 discode new --no-attach  # Start without attaching to tmux
 ```
 
-## How It Works
-
-### Architecture
-
-```
-┌─────────────────┐
-│  AI Agent CLI   │  (Claude, OpenCode)
-│  Running in     │
-│  tmux session   │
-└────────┬────────┘
-         │
-         │ tmux capture-pane (every 30s)
-         │
-    ┌────▼─────────────┐
-    │  CapturePoller   │  Detects state changes
-    └────┬─────────────┘
-         │
-         │ Discord.js
-         │
-    ┌────▼──────────────┐
-    │  Discord Channel  │  #project-name
-    └───────────────────┘
-```
-
-### Components
-
-- **Daemon Manager**: Single global process managing Discord connection
-- **Capture Poller**: Polls tmux panes every 30s, detects changes, sends to Discord
-- **Agent Registry**: Factory pattern for multi-agent support (Claude, OpenCode)
-- **State Manager**: Tracks project state, sessions, and channels
-- **Dependency Injection**: Interfaces for storage, execution, environment (testable, mockable)
-
-### Polling Model
-
-The bridge uses a **polling-based** architecture instead of hooks:
-
-1. Every 30 seconds (configurable), the poller runs `tmux capture-pane`
-2. Compares captured content with previous snapshot
-3. If changes detected, sends new content to Discord
-4. Handles multi-line output, ANSI codes, and rate limiting
-
-This approach is simpler and more reliable than hook-based systems, with minimal performance impact.
-
-### Project Lifecycle
-
-1. **Go / Init**: Registers project in `~/.discode/state.json` and creates a Discord channel
-2. **Start**: Launches AI agent in a named tmux session
-3. **Polling**: Daemon captures tmux output and streams to Discord
-4. **Stop**: Terminates tmux session, deletes channel, and cleans up state
-5. **Attach**: User can join tmux session to interact directly
-
 ## Supported Agents
 
 | Agent | Binary | Auto-Detect | YOLO Support | Sandbox Support | Notes |
@@ -328,29 +277,6 @@ This approach is simpler and more reliable than hook-based systems, with minimal
 ### Agent Detection
 
 The CLI automatically detects installed agents using `command -v <binary>`. Run `discode agents` to see available agents on your system.
-
-### Adding Custom Agents
-
-To add a new agent, extend the `BaseAgentAdapter` class in `src/agents/`:
-
-```typescript
-export class MyAgentAdapter extends BaseAgentAdapter {
-  constructor() {
-    super({
-      name: 'myagent',
-      displayName: 'My Agent',
-      command: 'myagent-cli',
-      channelSuffix: 'myagent',
-    });
-  }
-
-  getStartCommand(projectPath: string, yolo = false, sandbox = false): string {
-    return `cd "${projectPath}" && ${this.config.command}`;
-  }
-}
-```
-
-Register your adapter in `src/agents/index.ts`.
 
 ## Configuration
 
@@ -402,14 +328,6 @@ Config values can be overridden with environment variables:
 ```bash
 DISCORD_BOT_TOKEN=token discode daemon start
 DISCORD_GUILD_ID=server_id discode new
-```
-
-### tmux Session Mode (CLI)
-
-You can also override tmux session behavior via CLI flags (no env vars needed):
-
-```bash
-discode new --tmux-session-mode shared --tmux-shared-session-name bridge
 ```
 
 ## Development
