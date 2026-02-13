@@ -344,6 +344,151 @@ function isInteractiveShell(): boolean {
   return !!(process.stdin.isTTY && process.stdout.isTTY);
 }
 
+function parseSemver(version: string): [number, number, number] | null {
+  const match = version.trim().match(/^v?(\d+)\.(\d+)\.(\d+)/);
+  if (!match) return null;
+  return [parseInt(match[1], 10), parseInt(match[2], 10), parseInt(match[3], 10)];
+}
+
+function compareSemver(a: string, b: string): number {
+  const parsedA = parseSemver(a);
+  const parsedB = parseSemver(b);
+
+  if (!parsedA || !parsedB) {
+    if (a === b) return 0;
+    return a > b ? 1 : -1;
+  }
+
+  for (let i = 0; i < 3; i += 1) {
+    if (parsedA[i] > parsedB[i]) return 1;
+    if (parsedA[i] < parsedB[i]) return -1;
+  }
+  return 0;
+}
+
+function isSourceRuntime(): boolean {
+  const argv1 = process.argv[1] || '';
+  return argv1.endsWith('.ts') || argv1.endsWith('.tsx') || argv1.includes('/bin/discode.ts');
+}
+
+function hasCommand(command: string): boolean {
+  try {
+    execSync(`${command} --version`, { stdio: ['ignore', 'ignore', 'ignore'] });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function commandNameFromArgs(args: string[]): string | undefined {
+  for (const arg of args) {
+    if (arg.startsWith('-')) continue;
+    return arg;
+  }
+  return undefined;
+}
+
+async function fetchLatestCliVersion(timeoutMs: number = 2500): Promise<string | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch('https://registry.npmjs.org/@siisee11/discode/latest', {
+      headers: { accept: 'application/json' },
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+    const data = (await response.json()) as { version?: unknown };
+    return typeof data.version === 'string' ? data.version : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+type UpgradeInstallPlan = {
+  label: string;
+  command: string;
+};
+
+function detectUpgradeInstallPlan(): UpgradeInstallPlan | null {
+  if (hasCommand('npm')) {
+    return { label: 'npm', command: 'npm install -g @siisee11/discode@latest' };
+  }
+  if (hasCommand('bun')) {
+    return { label: 'bun', command: 'bun add -g @siisee11/discode@latest' };
+  }
+  return null;
+}
+
+async function restartDaemonIfRunningForUpgrade(): Promise<void> {
+  const running = await defaultDaemonManager.isRunning();
+  if (!running) return;
+
+  const port = defaultDaemonManager.getPort();
+  console.log(chalk.gray('   Restarting bridge daemon to apply update...'));
+
+  if (!defaultDaemonManager.stopDaemon()) {
+    console.log(chalk.yellow('⚠️ Could not stop daemon automatically. Restart manually with: discode daemon stop && discode daemon start'));
+    return;
+  }
+
+  const entryPoint = resolve(import.meta.dirname, '../src/daemon-entry.js');
+  defaultDaemonManager.startDaemon(entryPoint);
+  const ready = await defaultDaemonManager.waitForReady();
+  if (ready) {
+    console.log(chalk.green(`✅ Bridge daemon restarted (port ${port})`));
+  } else {
+    console.log(chalk.yellow(`⚠️ Daemon may not be ready yet. Check logs: ${defaultDaemonManager.getLogFile()}`));
+  }
+}
+
+function shouldCheckForUpdate(rawArgs: string[]): boolean {
+  if (!isInteractiveShell()) return false;
+  if (process.env.DISCODE_SKIP_UPDATE_CHECK === '1') return false;
+  if (isSourceRuntime()) return false;
+  if (rawArgs.some((arg) => arg === '--help' || arg === '-h' || arg === '--version' || arg === '-v')) return false;
+
+  const command = commandNameFromArgs(rawArgs);
+  if (!command) return false;
+
+  if (command === 'tui' || command === 'daemon') return false;
+  return true;
+}
+
+async function maybePromptForUpgrade(rawArgs: string[]): Promise<void> {
+  if (!shouldCheckForUpdate(rawArgs)) return;
+
+  const latestVersion = await fetchLatestCliVersion();
+  if (!latestVersion) return;
+  if (compareSemver(latestVersion, CLI_VERSION) <= 0) return;
+
+  console.log(chalk.cyan(`\n⬆️  A new Discode version is available: ${CLI_VERSION} → ${latestVersion}`));
+  const shouldUpgrade = await confirmYesNo(chalk.white('Upgrade now? [Y/n]: '), true);
+  if (!shouldUpgrade) {
+    console.log(chalk.gray('   Skipping update for now.'));
+    return;
+  }
+
+  const plan = detectUpgradeInstallPlan();
+  if (!plan) {
+    console.log(chalk.yellow('⚠️ No supported package manager found for auto-upgrade.'));
+    console.log(chalk.gray('   Install manually: npm install -g @siisee11/discode@latest'));
+    return;
+  }
+
+  try {
+    console.log(chalk.gray(`   Running: ${plan.command}`));
+    execSync(plan.command, { stdio: 'inherit' });
+    console.log(chalk.green(`✅ Updated to latest via ${plan.label}`));
+    await restartDaemonIfRunningForUpgrade();
+  } catch (error) {
+    console.log(chalk.yellow(`⚠️ Auto-upgrade failed: ${error instanceof Error ? error.message : String(error)}`));
+    console.log(chalk.gray('   You can retry manually: npm install -g @siisee11/discode@latest'));
+  }
+}
+
 async function ensureOpencodePermissionChoice(options: {
   shouldPrompt: boolean;
   forcePrompt?: boolean;
@@ -1440,7 +1585,10 @@ function addTmuxOptions<T>(y: Argv<T>) {
     });
 }
 
-await yargs(hideBin(process.argv))
+const rawArgs = hideBin(process.argv);
+await maybePromptForUpgrade(rawArgs);
+
+await yargs(rawArgs)
   .scriptName('discode')
   .usage('$0 [command]')
   .version(CLI_VERSION)
