@@ -144,7 +144,7 @@ describe('CapturePoller', () => {
     expect(tmux.capturePaneFromWindow).toHaveBeenCalledWith('agent-proj1', 'gemini');
   });
 
-  it('sends "working" notification on first capture', async () => {
+  it('does not send "working" notification on first capture', async () => {
     const project = makeProject('proj1', 'channel1');
     const stateManager = createMockStateManager([project]);
     const tmux = createMockTmux();
@@ -156,7 +156,7 @@ describe('CapturePoller', () => {
     // First poll - content is new (working state)
     await (poller as any).pollAll();
 
-    expect(discord.sendToChannel).toHaveBeenCalledWith('channel1', '⚡ 작업 중...');
+    expect(discord.sendToChannel).not.toHaveBeenCalled();
   });
 
   it('sends "completed" notification when content stabilizes after working', async () => {
@@ -170,9 +170,7 @@ describe('CapturePoller', () => {
     // First poll - working
     tmux.capturePaneFromWindow.mockReturnValue('output v1');
     await (poller as any).pollAll();
-    expect(discord.sendToChannel).toHaveBeenCalledWith('channel1', '⚡ 작업 중...');
-
-    discord.sendToChannel.mockClear();
+    expect(discord.sendToChannel).not.toHaveBeenCalled();
 
     // Second poll - still working (different content)
     tmux.capturePaneFromWindow.mockReturnValue('output v2');
@@ -200,9 +198,7 @@ describe('CapturePoller', () => {
     // First poll - working
     tmux.capturePaneFromWindow.mockReturnValue('output v1');
     await (poller as any).pollAll();
-    expect(discord.sendToChannel).toHaveBeenCalledWith('channel1', '⚡ 작업 중...');
-
-    discord.sendToChannel.mockClear();
+    expect(discord.sendToChannel).not.toHaveBeenCalled();
 
     // Second poll - session gone
     tmux.capturePaneFromWindow.mockImplementation(() => {
@@ -213,7 +209,7 @@ describe('CapturePoller', () => {
     expect(discord.sendToChannel).toHaveBeenCalledWith('channel1', '⏹️ 세션 종료됨');
   });
 
-  it('does not send duplicate "working" notifications', async () => {
+  it('does not send any "working" notifications on repeated working polls', async () => {
     const project = makeProject('proj1', 'channel1');
     const stateManager = createMockStateManager([project]);
     const tmux = createMockTmux();
@@ -224,8 +220,7 @@ describe('CapturePoller', () => {
     // First poll - working
     tmux.capturePaneFromWindow.mockReturnValue('output v1');
     await (poller as any).pollAll();
-    expect(discord.sendToChannel).toHaveBeenCalledTimes(1);
-    expect(discord.sendToChannel).toHaveBeenCalledWith('channel1', '⚡ 작업 중...');
+    expect(discord.sendToChannel).not.toHaveBeenCalled();
 
     discord.sendToChannel.mockClear();
 
@@ -233,7 +228,7 @@ describe('CapturePoller', () => {
     tmux.capturePaneFromWindow.mockReturnValue('output v2');
     await (poller as any).pollAll();
 
-    // Should NOT send another "working" notification
+    // Should still not send a "working" notification
     expect(discord.sendToChannel).not.toHaveBeenCalled();
   });
 
@@ -274,9 +269,7 @@ describe('CapturePoller', () => {
     // First poll - working
     tmux.capturePaneFromWindow.mockReturnValue('output v1');
     await (poller as any).pollAll();
-    expect(discord.sendToChannel).toHaveBeenCalledWith('channel1', '⚡ 작업 중...');
-
-    discord.sendToChannel.mockClear();
+    expect(discord.sendToChannel).not.toHaveBeenCalled();
 
     // Second poll - still working (different content)
     tmux.capturePaneFromWindow.mockReturnValue('output v2');
@@ -295,7 +288,7 @@ describe('CapturePoller', () => {
     // Fourth poll - working again (new content)
     tmux.capturePaneFromWindow.mockReturnValue('output v3');
     await (poller as any).pollAll();
-    expect(discord.sendToChannel).toHaveBeenCalledWith('channel1', '⚡ 작업 중...');
+    expect(discord.sendToChannel).not.toHaveBeenCalled();
 
     discord.sendToChannel.mockClear();
 

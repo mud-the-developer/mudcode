@@ -108,7 +108,6 @@ export class CapturePoller {
       state.previousCapture = capture;
 
       if (!state.notifiedWorking) {
-        await this.send(channelId, '⚡ 작업 중...');
         state.notifiedWorking = true;
       }
       return;
