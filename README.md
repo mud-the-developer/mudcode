@@ -97,6 +97,18 @@ bun run build
 bun link
 ```
 
+## Uninstall
+
+```bash
+discode uninstall
+```
+
+Full cleanup (remove config/state/logs and installed bridge plugins too):
+
+```bash
+discode uninstall --purge --yes
+```
+
 ## Quick Start
 
 ### 1. Setup Discord Bot
