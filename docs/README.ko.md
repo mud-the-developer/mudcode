@@ -383,8 +383,7 @@ discode config --port 18470          # 훅 서버 포트 설정
 | `DISCORD_GUILD_ID` | **필수** (config.json에 없는 경우) | Discord 서버 ID | - |
 | `DISCORD_CHANNEL_ID` | 선택 | 기본 채널 덮어쓰기 | 프로젝트별 자동 생성 |
 | `TMUX_SESSION_PREFIX` | 선택 | tmux 세션 이름 접두사 | `` |
-| `TMUX_SESSION_MODE` | 선택 | tmux 세션 모드: `shared`(기본) 또는 `per-project` | `shared` |
-| `TMUX_SHARED_SESSION_NAME` | 선택 | 공유 tmux 세션 이름(접두사 제외), `TMUX_SESSION_MODE=shared`일 때 사용 | `bridge` |
+| `TMUX_SHARED_SESSION_NAME` | 선택 | 공유 tmux 세션 이름(접두사 제외) | `bridge` |
 | `DISCODE_DEFAULT_AGENT_CLI` | 선택 | `discode new`에서 에이전트 미지정 시 사용할 기본 AI CLI | 첫 설치 CLI |
 | `HOOK_SERVER_PORT` | 선택 | 훅 서버 포트 | `18470` |
 
@@ -393,12 +392,12 @@ DISCORD_BOT_TOKEN=token discode daemon start
 DISCORD_GUILD_ID=server_id discode new
 ```
 
-### tmux 세션 모드 (CLI)
+### tmux 세션 이름 (CLI)
 
-환경변수 없이 실행 인자로도 tmux 세션 동작을 오버라이드할 수 있습니다:
+실행 인자로 공유 tmux 세션 이름을 오버라이드할 수 있습니다:
 
 ```bash
-discode new --tmux-session-mode shared --tmux-shared-session-name bridge
+discode new --tmux-shared-session-name bridge
 ```
 
 ## 개발

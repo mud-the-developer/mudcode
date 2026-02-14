@@ -380,17 +380,10 @@ export class AgentBridge {
       throw new Error('No agent specified');
     }
 
-    // Create tmux session (default: shared, optional: per-project session)
-    const sessionMode = this.bridgeConfig.tmux.sessionMode || 'shared';
+    // Create tmux session (shared mode)
     const sharedSessionName = this.bridgeConfig.tmux.sharedSessionName || 'bridge';
-    const windowName =
-      sessionMode === 'shared'
-        ? this.toSharedWindowName(projectName, adapter.config.name)
-        : adapter.config.name;
-    const tmuxSession =
-      sessionMode === 'shared'
-        ? this.tmux.getOrCreateSession(sharedSessionName, windowName)
-        : this.tmux.getOrCreateSession(projectName, windowName);
+    const windowName = this.toSharedWindowName(projectName, adapter.config.name);
+    const tmuxSession = this.tmux.getOrCreateSession(sharedSessionName, windowName);
 
     // Create Discord channel with custom name or default
     const channelName = channelDisplayName || `${projectName}-${adapter.config.channelSuffix}`;
@@ -404,11 +397,7 @@ export class AgentBridge {
     const channelId = channels[adapter.config.name];
 
     const port = overridePort || this.bridgeConfig.hookServerPort || 18470;
-    // Legacy behavior: set env on per-project sessions so new windows inherit it.
-    // For shared sessions, avoid setting AGENT_DISCORD_PROJECT on the session (ambiguous across windows).
-    if (sessionMode !== 'shared') {
-      this.tmux.setSessionEnv(tmuxSession, 'AGENT_DISCORD_PROJECT', projectName);
-    }
+    // Avoid setting AGENT_DISCORD_PROJECT on shared session env (ambiguous across windows).
     this.tmux.setSessionEnv(tmuxSession, 'AGENT_DISCORD_PORT', String(port));
 
     // Start agent in tmux window

@@ -50,12 +50,6 @@ export class ConfigManager {
       const defaultAgentCli = storedConfig.defaultAgentCli || this.env.get('DISCODE_DEFAULT_AGENT_CLI');
 
       // Merge: stored config > environment variables > defaults
-      const sessionModeRaw = this.env.get('TMUX_SESSION_MODE');
-      const sessionMode =
-        sessionModeRaw === 'shared' || sessionModeRaw === 'per-project'
-          ? sessionModeRaw
-          : 'shared';
-
       this._config = {
         discord: {
           token: storedConfig.token || this.env.get('DISCORD_BOT_TOKEN') || '',
@@ -64,7 +58,6 @@ export class ConfigManager {
         },
         tmux: {
           sessionPrefix: this.env.get('TMUX_SESSION_PREFIX') || '',
-          sessionMode: sessionMode,
           sharedSessionName: this.env.get('TMUX_SHARED_SESSION_NAME') || 'bridge',
         },
         hookServerPort: storedConfig.hookServerPort ||

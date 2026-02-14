@@ -318,8 +318,7 @@ Config values can be overridden with environment variables:
 | `DISCORD_GUILD_ID` | **Yes** (if not in config.json) | Discord server ID | - |
 | `DISCORD_CHANNEL_ID` | No | Override default channel | Auto-created per project |
 | `TMUX_SESSION_PREFIX` | No | Prefix for tmux session names | `` |
-| `TMUX_SESSION_MODE` | No | tmux session mode: `shared` (default) or `per-project` | `shared` |
-| `TMUX_SHARED_SESSION_NAME` | No | Shared tmux session name (without prefix), used when `TMUX_SESSION_MODE=shared` | `bridge` |
+| `TMUX_SHARED_SESSION_NAME` | No | Shared tmux session name (without prefix) | `bridge` |
 | `DISCODE_DEFAULT_AGENT_CLI` | No | Default AI CLI used by `discode new` when agent is omitted | First installed CLI |
 | `HOOK_SERVER_PORT` | No | Port for the hook server | `18470` |
 

@@ -28,7 +28,6 @@ import { installGeminiHook, removeGeminiHook } from '../src/gemini/hook-installe
 declare const DISCODE_VERSION: string | undefined;
 
 type TmuxCliOptions = {
-  tmuxSessionMode?: string;
   tmuxSharedSessionName?: string;
 };
 
@@ -277,19 +276,7 @@ function applyTmuxCliOverrides(base: BridgeConfig, options: TmuxCliOptions): Bri
   const baseDefaultAgentCli = base.defaultAgentCli;
   const baseOpencode = base.opencode;
 
-  const modeRaw = options?.tmuxSessionMode as string | undefined;
   const sharedNameRaw = options?.tmuxSharedSessionName as string | undefined;
-
-  let mode: BridgeConfig['tmux']['sessionMode'] | undefined = undefined;
-  if (modeRaw !== undefined) {
-    if (modeRaw === 'per-project' || modeRaw === 'shared') {
-      mode = modeRaw;
-    } else {
-      console.error(chalk.red(`Invalid --tmux-session-mode: ${modeRaw}`));
-      console.error(chalk.gray(`Valid values: per-project, shared`));
-      process.exit(1);
-    }
-  }
 
   return {
     discord: baseDiscord,
@@ -298,7 +285,6 @@ function applyTmuxCliOverrides(base: BridgeConfig, options: TmuxCliOptions): Bri
     opencode: baseOpencode,
     tmux: {
       ...baseTmux,
-      ...(mode !== undefined ? { sessionMode: mode } : {}),
       ...(sharedNameRaw !== undefined ? { sharedSessionName: sharedNameRaw } : {}),
     },
   };
@@ -316,8 +302,14 @@ function toSharedWindowName(projectName: string, agentType: string): string {
 }
 
 function getEnabledAgentName(project?: ProjectState): string | undefined {
-  if (!project) return undefined;
-  return Object.entries(project.agents).find(([_, enabled]) => enabled)?.[0];
+  return getEnabledAgentNames(project)[0];
+}
+
+function getEnabledAgentNames(project?: ProjectState): string[] {
+  if (!project) return [];
+  return Object.entries(project.agents)
+    .filter(([_, enabled]) => enabled)
+    .map(([agentName]) => agentName);
 }
 
 function resolveProjectWindowName(project: ProjectState, agentName: string, tmuxConfig: BridgeConfig['tmux']): string {
@@ -334,17 +326,19 @@ function resolveProjectWindowName(project: ProjectState, agentName: string, tmux
 function pruneStaleProjects(tmux: TmuxManager, tmuxConfig: BridgeConfig['tmux']): string[] {
   const removed: string[] = [];
   for (const project of stateManager.listProjects()) {
-    const agentName = getEnabledAgentName(project);
-    if (!agentName) {
+    const agentNames = getEnabledAgentNames(project);
+    if (agentNames.length === 0) {
       stateManager.removeProject(project.projectName);
       removed.push(project.projectName);
       continue;
     }
 
-    const windowName = resolveProjectWindowName(project, agentName, tmuxConfig);
     const sessionUp = tmux.sessionExistsFull(project.tmuxSession);
-    const windowUp = sessionUp && tmux.windowExists(project.tmuxSession, windowName);
-    if (windowUp) continue;
+    const hasLiveWindow = sessionUp && agentNames.some((agentName) => {
+      const windowName = resolveProjectWindowName(project, agentName, tmuxConfig);
+      return tmux.windowExists(project.tmuxSession, windowName);
+    });
+    if (hasLiveWindow) continue;
 
     stateManager.removeProject(project.projectName);
     removed.push(project.projectName);
@@ -360,9 +354,6 @@ function ensureProjectTuiPane(
 ): void {
   const discodeRunner = resolve(import.meta.dirname, './discode.js');
   const commandParts = ['bun', discodeRunner, 'tui'];
-  if (options.tmuxSessionMode) {
-    commandParts.push('--tmux-session-mode', options.tmuxSessionMode);
-  }
   if (options.tmuxSharedSessionName) {
     commandParts.push('--tmux-shared-session-name', options.tmuxSharedSessionName);
   }
@@ -663,8 +654,9 @@ async function tuiCommand(options: TmuxCliOptions): Promise<void> {
         return false;
       }
       projects.forEach((project) => {
-        const agentName = Object.entries(project.agents).find(([_, enabled]) => enabled)?.[0] || 'none';
-        append(`[project] ${project.projectName} (${agentName})`);
+        const agentNames = getEnabledAgentNames(project);
+        const label = agentNames.length > 0 ? agentNames.join(', ') : 'none';
+        append(`[project] ${project.projectName} (${label})`);
       });
       return false;
     }
@@ -681,7 +673,6 @@ async function tuiCommand(options: TmuxCliOptions): Promise<void> {
         return false;
       }
       await stopCommand(projectName, {
-        tmuxSessionMode: options.tmuxSessionMode,
         tmuxSharedSessionName: options.tmuxSharedSessionName,
       });
       append(`✅ Stopped project: ${projectName}`);
@@ -721,7 +712,6 @@ async function tuiCommand(options: TmuxCliOptions): Promise<void> {
         await newCommand(selected.config.name, {
           name: projectName,
           attach: parsed.attach,
-          tmuxSessionMode: options.tmuxSessionMode,
           tmuxSharedSessionName: options.tmuxSharedSessionName,
         });
         append(`✅ Session created: ${projectName}`);
@@ -801,30 +791,34 @@ async function tuiCommand(options: TmuxCliOptions): Promise<void> {
       onCommand: handler,
       onAttachProject: async (project: string) => {
         attachCommand(project, {
-          tmuxSessionMode: options.tmuxSessionMode,
           tmuxSharedSessionName: options.tmuxSharedSessionName,
         });
       },
       onStopProject: async (project: string) => {
         await stopCommand(project, {
-          tmuxSessionMode: options.tmuxSessionMode,
           tmuxSharedSessionName: options.tmuxSharedSessionName,
         });
       },
       getProjects: () =>
         stateManager.listProjects().map((project) => {
-          const agentName = getEnabledAgentName(project) || 'none';
-          const adapter = agentRegistry.get(agentName);
-          const window = resolveProjectWindowName(project, agentName, effectiveConfig.tmux);
-          const channelId = project.discordChannels[agentName];
-          const channelBase = channelId ? `discord#${agentName}-${project.projectName}` : 'not connected';
+          const agentNames = getEnabledAgentNames(project);
+          const labels = agentNames.map((agentName) => agentRegistry.get(agentName)?.config.displayName || agentName);
+          const primaryAgent = agentNames[0];
+          const window = primaryAgent
+            ? resolveProjectWindowName(project, primaryAgent, effectiveConfig.tmux)
+            : '(none)';
+          const channelCount = agentNames.filter((agentName) => !!project.discordChannels[agentName]).length;
+          const channelBase = channelCount > 0 ? `${channelCount} channel(s)` : 'not connected';
           const sessionUp = tmux.sessionExistsFull(project.tmuxSession);
-          const windowUp = sessionUp ? tmux.windowExists(project.tmuxSession, window) : false;
+          const windowUp = sessionUp && agentNames.some((agentName) => {
+            const name = resolveProjectWindowName(project, agentName, effectiveConfig.tmux);
+            return tmux.windowExists(project.tmuxSession, name);
+          });
           return {
             project: project.projectName,
             session: project.tmuxSession,
             window,
-            ai: adapter?.config.displayName || agentName,
+            ai: labels.length > 0 ? labels.join(', ') : 'none',
             channel: channelBase,
             open: windowUp,
           };
@@ -1049,7 +1043,7 @@ async function newCommand(
 
       // Determine agent
     let agentName: string;
-    const existingProject = stateManager.getProject(projectName);
+    let existingProject = stateManager.getProject(projectName);
 
     if (agentArg) {
         // Explicitly specified
@@ -1108,14 +1102,7 @@ async function newCommand(
         }
       }
 
-    const existingAgentName = getEnabledAgentName(existingProject);
-    if (existingProject && existingAgentName && existingAgentName !== agentName) {
-      console.error(chalk.red(`Project '${projectName}' is already configured with '${existingAgentName}'.`));
-      console.log(chalk.gray(`To switch agent to '${agentName}', run:`));
-      console.log(chalk.gray(`  discode stop ${projectName} --keep-channel`));
-      console.log(chalk.gray(`  discode new ${agentName}`));
-      process.exit(1);
-    }
+    const isAgentAlreadyConfigured = !!existingProject?.agents?.[agentName];
 
     await ensureOpencodePermissionChoice({ shouldPrompt: agentName === 'opencode' });
 
@@ -1166,6 +1153,66 @@ async function newCommand(
       } catch {
         // daemon will pick up on next restart
       }
+    } else if (!isAgentAlreadyConfigured) {
+        // Existing project + new agent: append agent setup and merge state
+        console.log(chalk.gray(`   Adding agent '${agentName}' to existing project...`));
+        const bridge = new AgentBridge({ config: effectiveConfig });
+        await bridge.connect();
+
+        const adapter = agentRegistry.get(agentName)!;
+        const channelDisplayName = `${adapter.config.displayName} - ${projectName}`;
+        const agents = { [agentName]: true };
+        const result = await bridge.setupProject(projectName, existingProject.projectPath, agents, channelDisplayName, port);
+
+        await bridge.stop();
+
+        const setupProjectState = stateManager.getProject(projectName);
+        if (setupProjectState) {
+          const mergedProject: ProjectState = {
+            ...existingProject,
+            projectName,
+            projectPath: existingProject.projectPath,
+            tmuxSession: existingProject.tmuxSession || setupProjectState.tmuxSession,
+            tmuxWindows: {
+              ...(existingProject.tmuxWindows || {}),
+              ...(setupProjectState.tmuxWindows || {}),
+            },
+            eventHooks: {
+              ...(existingProject.eventHooks || {}),
+              ...(setupProjectState.eventHooks || {}),
+            },
+            discordChannels: {
+              ...(existingProject.discordChannels || {}),
+              ...(setupProjectState.discordChannels || {}),
+            },
+            agents: {
+              ...(existingProject.agents || {}),
+              [agentName]: true,
+            },
+            createdAt: existingProject.createdAt,
+            lastActive: new Date(),
+          };
+          stateManager.setProject(mergedProject);
+          existingProject = mergedProject;
+        }
+
+        console.log(chalk.green('✅ Agent added to existing project'));
+        console.log(chalk.cyan(`   Channel: #${result.channelName}`));
+
+      try {
+        const http = await import('http');
+        await new Promise<void>((resolve) => {
+          const req = http.request(`http://127.0.0.1:${port}/reload`, { method: 'POST' }, () => resolve());
+          req.on('error', () => resolve());
+          req.setTimeout(2000, () => {
+            req.destroy();
+            resolve();
+          });
+          req.end();
+        });
+      } catch {
+        // daemon will pick up on next restart
+      }
     } else {
         // Existing project: ensure tmux session exists (use stored full session name)
         const fullSessionName = existingProject.tmuxSession;
@@ -1173,7 +1220,7 @@ async function newCommand(
         if (fullSessionName.startsWith(prefix)) {
           tmux.getOrCreateSession(fullSessionName.slice(prefix.length));
         }
-        // Keep legacy port env on per-project sessions; avoid setting per-project env on shared sessions.
+        // Avoid setting AGENT_DISCORD_PROJECT on shared session env (ambiguous across windows).
         const sharedFull = `${prefix}${effectiveConfig.tmux.sharedSessionName || 'bridge'}`;
         const isSharedSession = fullSessionName === sharedFull;
         if (!isSharedSession) {
@@ -1258,7 +1305,7 @@ async function newCommand(
     const sessionName = projectState?.tmuxSession || `${effectiveConfig.tmux.sessionPrefix}${projectName}`;
     const statusWindowName = projectState
       ? resolveProjectWindowName(projectState, agentName, effectiveConfig.tmux)
-      : (effectiveConfig.tmux.sessionMode === 'shared' ? toSharedWindowName(projectName, agentName) : agentName);
+      : toSharedWindowName(projectName, agentName);
     const isInteractive = process.stdin.isTTY && process.stdout.isTTY;
     if (isInteractive) {
       try {
@@ -1398,11 +1445,9 @@ function statusCommand(options: TmuxCliOptions) {
         console.log(chalk.white(`   ${project.projectName}`), status);
         console.log(chalk.gray(`     Path: ${project.projectPath}`));
 
-        // Show the single agent
-        const agentName = Object.entries(project.agents)
-          .find(([_, enabled]) => enabled)?.[0];
-        const adapter = agentName ? agentRegistry.get(agentName) : null;
-        console.log(chalk.gray(`     Agent: ${adapter?.config.displayName || agentName || 'none'}`));
+        const agentNames = getEnabledAgentNames(project);
+        const labels = agentNames.map((agentName) => agentRegistry.get(agentName)?.config.displayName || agentName);
+        console.log(chalk.gray(`     Agents: ${labels.length > 0 ? labels.join(', ') : 'none'}`));
         console.log('');
       }
     }
@@ -1431,12 +1476,17 @@ function listCommand(options?: { prune?: boolean }) {
     const pruned: string[] = [];
     console.log(chalk.cyan('\n📂 Configured Projects:\n'));
     for (const project of projects) {
-      const agentName = getEnabledAgentName(project);
-      const adapter = agentName ? agentRegistry.get(agentName) : null;
-      const windowName = agentName ? resolveProjectWindowName(project, agentName, config.tmux) : undefined;
+      const agentNames = getEnabledAgentNames(project);
+      const labels = agentNames.map((agentName) => agentRegistry.get(agentName)?.config.displayName || agentName);
       const sessionUp = tmux.sessionExistsFull(project.tmuxSession);
-      const windowUp = sessionUp && !!windowName ? tmux.windowExists(project.tmuxSession, windowName) : false;
-      const status = windowUp ? 'running' : sessionUp ? 'session only' : 'stale';
+      const windows = agentNames.map((agentName) => ({
+        agentName,
+        windowName: resolveProjectWindowName(project, agentName, config.tmux),
+      }));
+      const runningWindows = sessionUp
+        ? windows.filter((window) => tmux.windowExists(project.tmuxSession, window.windowName))
+        : [];
+      const status = runningWindows.length > 0 ? 'running' : sessionUp ? 'session only' : 'stale';
 
       if (prune && status !== 'running') {
         stateManager.removeProject(project.projectName);
@@ -1445,11 +1495,13 @@ function listCommand(options?: { prune?: boolean }) {
       }
 
       console.log(chalk.white(`  • ${project.projectName}`));
-      console.log(chalk.gray(`    Agent: ${adapter?.config.displayName || agentName || 'none'}`));
+      console.log(chalk.gray(`    Agents: ${labels.length > 0 ? labels.join(', ') : 'none'}`));
       console.log(chalk.gray(`    Path: ${project.projectPath}`));
       console.log(chalk.gray(`    Status: ${status}`));
-      if (windowName) {
-        console.log(chalk.gray(`    tmux: ${project.tmuxSession}:${windowName}`));
+      if (windows.length > 0) {
+        for (const window of windows) {
+          console.log(chalk.gray(`    tmux(${window.agentName}): ${project.tmuxSession}:${window.windowName}`));
+        }
       }
     }
 
@@ -1516,15 +1568,12 @@ async function stopCommand(
     const project = stateManager.getProject(projectName);
     const effectiveConfig = applyTmuxCliOverrides(config, options);
 
-    // 1. Kill tmux (session in per-project mode, windows in shared/non-dedicated mode)
+    // 1. Kill tmux windows in shared session (legacy dedicated sessions are killed whole)
     const prefix = effectiveConfig.tmux.sessionPrefix;
-    const expectedDedicatedSession = `${prefix}${projectName}`;
-    const sessionName = project?.tmuxSession || expectedDedicatedSession;
-    const killWindows =
-      !!project && (
-        effectiveConfig.tmux.sessionMode === 'shared' ||
-        sessionName !== expectedDedicatedSession
-      );
+    const sharedSession = `${prefix}${effectiveConfig.tmux.sharedSessionName || 'bridge'}`;
+    const legacySession = `${prefix}${projectName}`;
+    const sessionName = project?.tmuxSession || legacySession;
+    const killWindows = !!project && sessionName === sharedSession;
 
     if (!killWindows) {
       const forcedKillCount = await terminateTmuxPaneProcesses(sessionName);
@@ -1751,13 +1800,9 @@ async function daemonCommand(action: string) {
 
 function addTmuxOptions<T>(y: Argv<T>) {
   return y
-    .option('tmux-session-mode', {
-      type: 'string',
-      describe: 'tmux session mode: shared (default) or per-project',
-    })
     .option('tmux-shared-session-name', {
       type: 'string',
-      describe: 'shared tmux session name (without prefix) when using shared mode',
+      describe: 'shared tmux session name (without prefix)',
     });
 }
 
@@ -1776,7 +1821,6 @@ await yargs(rawArgs)
     (y: Argv) => addTmuxOptions(y),
     async (argv: any) =>
       tuiCommand({
-        tmuxSessionMode: argv.tmuxSessionMode,
         tmuxSharedSessionName: argv.tmuxSharedSessionName,
       })
   )
@@ -1805,7 +1849,6 @@ await yargs(rawArgs)
       startCommand({
         project: argv.project,
         attach: argv.attach,
-        tmuxSessionMode: argv.tmuxSessionMode,
         tmuxSharedSessionName: argv.tmuxSharedSessionName,
       })
   )
@@ -1820,7 +1863,6 @@ await yargs(rawArgs)
       newCommand(argv.agent, {
         name: argv.name,
         attach: argv.attach,
-        tmuxSessionMode: argv.tmuxSessionMode,
         tmuxSharedSessionName: argv.tmuxSharedSessionName,
       })
   )
@@ -1854,7 +1896,6 @@ await yargs(rawArgs)
     (y: Argv) => addTmuxOptions(y),
     (argv: any) =>
       statusCommand({
-        tmuxSessionMode: argv.tmuxSessionMode,
         tmuxSharedSessionName: argv.tmuxSharedSessionName,
       })
   )
@@ -1877,7 +1918,6 @@ await yargs(rawArgs)
     (y: Argv) => addTmuxOptions(y).positional('project', { type: 'string' }),
     (argv: any) =>
       attachCommand(argv.project, {
-        tmuxSessionMode: argv.tmuxSessionMode,
         tmuxSharedSessionName: argv.tmuxSharedSessionName,
       })
   )
@@ -1890,7 +1930,6 @@ await yargs(rawArgs)
     async (argv: any) =>
       stopCommand(argv.project, {
         keepChannel: argv.keepChannel,
-        tmuxSessionMode: argv.tmuxSessionMode,
         tmuxSharedSessionName: argv.tmuxSharedSessionName,
       })
   )
