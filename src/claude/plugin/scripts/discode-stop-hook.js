@@ -6,81 +6,44 @@ function asObject(node) {
   return node;
 }
 
-function textFromNode(node, depth = 0) {
-  if (depth > 12 || node === undefined || node === null) return "";
-  if (typeof node === "string") return node;
-  if (typeof node === "number" || typeof node === "boolean") return String(node);
+function extractTextBlocks(node, depth = 0) {
+  if (depth > 10 || node === undefined || node === null) return [];
+
+  if (typeof node === "string") {
+    return node.trim().length > 0 ? [node] : [];
+  }
 
   if (Array.isArray(node)) {
-    return node
-      .map((item) => textFromNode(item, depth + 1))
-      .filter(Boolean)
-      .join("\n");
+    return node.flatMap((item) => extractTextBlocks(item, depth + 1));
   }
 
   const obj = asObject(node);
-  if (!obj) return "";
+  if (!obj) return [];
 
-  if (obj.type === "text" && typeof obj.text === "string") {
-    return obj.text;
+  if (obj.type === "text" && typeof obj.text === "string" && obj.text.trim().length > 0) {
+    return [obj.text];
   }
 
-  return Object.values(obj)
-    .map((value) => textFromNode(value, depth + 1))
-    .filter(Boolean)
-    .join("\n");
+  if (Array.isArray(obj.content) || typeof obj.content === "string") {
+    return extractTextBlocks(obj.content, depth + 1);
+  }
+
+  if ((obj.type === undefined || obj.type === "text") && typeof obj.text === "string" && obj.text.trim().length > 0) {
+    return [obj.text];
+  }
+
+  return [];
 }
 
-function findAssistantText(node, depth = 0) {
-  if (depth > 12 || node === undefined || node === null) return "";
+function readAssistantEntry(entry) {
+  const obj = asObject(entry);
+  if (!obj || obj.type !== "assistant") return null;
 
-  if (Array.isArray(node)) {
-    for (const item of node) {
-      const text = findAssistantText(item, depth + 1);
-      if (text) return text;
-    }
-    return "";
-  }
-
-  const obj = asObject(node);
-  if (!obj) return "";
-
-  const role = typeof obj.role === "string" ? obj.role : "";
-  const type = typeof obj.type === "string" ? obj.type : "";
-  if (role === "assistant" || type === "assistant") {
-    // Extract only text content blocks – skip tool_use-only messages
-    if (Array.isArray(obj.content)) {
-      const texts = obj.content
-        .filter((b) => b && b.type === "text" && typeof b.text === "string")
-        .map((b) => b.text);
-      if (texts.length > 0) return texts.join("\n").trim();
-      // content is an array but has no text blocks (e.g. tool_use only) –
-      // return "" so the caller keeps searching earlier messages
-      return "";
-    }
-    const source = obj.content ?? obj.message;
-    if (source !== undefined && source !== null) {
-      const text = textFromNode(source);
-      if (text.trim().length > 0) return text.trim();
-    }
-  }
-
-  const priorityKeys = ["message", "messages", "content", "response", "result", "output", "event", "data"];
-  for (const key of priorityKeys) {
-    if (!(key in obj)) continue;
-    const text = findAssistantText(obj[key], depth + 1);
-    if (text) return text;
-  }
-
-  for (const [key, value] of Object.entries(obj)) {
-    if (priorityKeys.includes(key)) continue;
-    // Only recurse into objects/arrays — skip scalar fields (model, id, etc.)
-    if (typeof value !== "object" || value === null) continue;
-    const text = findAssistantText(value, depth + 1);
-    if (text) return text;
-  }
-
-  return "";
+  const message = asObject(obj.message) || obj;
+  const messageId = typeof message.id === "string" ? message.id : "";
+  const textParts = extractTextBlocks(message.content);
+  const text = textParts.join("\n").trim();
+  return { messageId, text };
 }
 
 function parseLineJson(line) {
@@ -102,15 +65,27 @@ function readLastAssistantText(transcriptPath) {
   }
 
   const lines = raw.split("\n");
+  let latestMessageId = "";
+
   for (let i = lines.length - 1; i >= 0; i -= 1) {
     const line = lines[i].trim();
     if (!line) continue;
     const entry = parseLineJson(line);
     if (!entry) continue;
 
-    const text = findAssistantText(entry).trim();
-    if (text.length > 0) {
-      return text;
+    const assistant = readAssistantEntry(entry);
+    if (!assistant) continue;
+
+    if (!latestMessageId && assistant.messageId) {
+      latestMessageId = assistant.messageId;
+    }
+
+    if (latestMessageId && assistant.messageId && assistant.messageId !== latestMessageId) {
+      break;
+    }
+
+    if (assistant.text.length > 0) {
+      return assistant.text;
     }
   }
 
