@@ -621,13 +621,36 @@ function parseSessionNew(raw: string): {
   projectName?: string;
   agentName?: string;
   attach: boolean;
+  instanceId?: string;
 } {
   const parts = raw.split(/\s+/).filter(Boolean);
-  const attach = parts.includes('--attach');
-  const values = parts.filter((item) => !item.startsWith('--'));
-  const projectName = values[1];
-  const agentName = values[2];
-  return { projectName, agentName, attach };
+  let attach = false;
+  let instanceId: string | undefined;
+  const values: string[] = [];
+
+  for (let i = 1; i < parts.length; i += 1) {
+    const part = parts[i];
+    if (part === '--attach') {
+      attach = true;
+      continue;
+    }
+    if (part === '--instance' && parts[i + 1]) {
+      instanceId = parts[i + 1];
+      i += 1;
+      continue;
+    }
+    if (part.startsWith('--instance=')) {
+      const value = part.slice('--instance='.length).trim();
+      if (value) instanceId = value;
+      continue;
+    }
+    if (part.startsWith('--')) continue;
+    values.push(part);
+  }
+
+  const projectName = values[0];
+  const agentName = values[1];
+  return { projectName, agentName, attach, instanceId };
 }
 
 async function tuiCommand(options: TmuxCliOptions): Promise<void> {
@@ -639,7 +662,7 @@ async function tuiCommand(options: TmuxCliOptions): Promise<void> {
     }
 
     if (command === '/help') {
-      append('Commands: /session_new [name] [agent] [--attach], /list, /projects, /help, /exit');
+      append('Commands: /session_new [name] [agent] [--instance id] [--attach], /list, /projects, /help, /exit');
       return false;
     }
 
@@ -682,15 +705,33 @@ async function tuiCommand(options: TmuxCliOptions): Promise<void> {
     }
 
     if (command.startsWith('stop ') || command.startsWith('/stop ')) {
-      const projectName = command.replace(/^\/?stop\s+/, '').trim();
+      const args = command.replace(/^\/?stop\s+/, '').trim().split(/\s+/).filter(Boolean);
+      let projectName = '';
+      let instanceId: string | undefined;
+      for (let i = 0; i < args.length; i += 1) {
+        const arg = args[i];
+        if (arg === '--instance' && args[i + 1]) {
+          instanceId = args[i + 1];
+          i += 1;
+          continue;
+        }
+        if (arg.startsWith('--instance=')) {
+          const value = arg.slice('--instance='.length).trim();
+          if (value) instanceId = value;
+          continue;
+        }
+        if (arg.startsWith('--')) continue;
+        if (!projectName) projectName = arg;
+      }
       if (!projectName) {
-        append('⚠️ Project name is required. Example: stop my-project');
+        append('⚠️ Project name is required. Example: stop my-project --instance gemini-2');
         return false;
       }
       await stopCommand(projectName, {
+        instance: instanceId,
         tmuxSharedSessionName: options.tmuxSharedSessionName,
       });
-      append(`✅ Stopped project: ${projectName}`);
+      append(`✅ Stopped ${instanceId ? `instance ${instanceId}` : 'project'}: ${projectName}`);
       return false;
     }
 
@@ -726,6 +767,7 @@ async function tuiCommand(options: TmuxCliOptions): Promise<void> {
         append(`Creating session '${projectName}' with ${selected.config.displayName}...`);
         await newCommand(selected.config.name, {
           name: projectName,
+          instance: parsed.instanceId,
           attach: parsed.attach,
           tmuxSharedSessionName: options.tmuxSharedSessionName,
         });
@@ -1561,7 +1603,7 @@ function agentsCommand() {
   }
 }
 
-function attachCommand(projectName: string | undefined, options: TmuxCliOptions) {
+function attachCommand(projectName: string | undefined, options: TmuxCliOptions & { instance?: string }) {
   ensureTmuxInstalled();
   const effectiveConfig = applyTmuxCliOverrides(config, options);
     const tmux = new TmuxManager(effectiveConfig.tmux.sessionPrefix);
@@ -1573,7 +1615,26 @@ function attachCommand(projectName: string | undefined, options: TmuxCliOptions)
 
     const project = stateManager.getProject(projectName);
     const sessionName = project?.tmuxSession || `${effectiveConfig.tmux.sessionPrefix}${projectName}`;
-    const firstInstance = project ? listProjectInstances(project)[0] : undefined;
+    const requestedInstanceId = options.instance?.trim();
+    const instances = project ? listProjectInstances(project) : [];
+    const firstInstance = project
+      ? (
+        (requestedInstanceId ? getProjectInstance(project, requestedInstanceId) : undefined) ||
+        instances[0]
+      )
+      : undefined;
+    if (project && requestedInstanceId && !firstInstance) {
+      console.error(chalk.red(`Instance '${requestedInstanceId}' not found in project '${projectName}'.`));
+      const hints = instances.map((instance) => instance.instanceId).join(', ');
+      if (hints) {
+        console.log(chalk.gray(`Available instances: ${hints}`));
+      }
+      process.exit(1);
+    }
+    if (project && !requestedInstanceId && instances.length > 1) {
+      console.log(chalk.yellow(`⚠️ Multiple instances found. Attaching first instance '${firstInstance?.instanceId}'.`));
+      console.log(chalk.gray('   Use --instance <id> to select a specific instance.'));
+    }
     const windowName =
       project && firstInstance
         ? resolveProjectWindowName(project, firstInstance.agentType, effectiveConfig.tmux, firstInstance.instanceId)
@@ -1596,7 +1657,7 @@ function attachCommand(projectName: string | undefined, options: TmuxCliOptions)
 
 async function stopCommand(
   projectName: string | undefined,
-  options: TmuxCliOptions & { keepChannel?: boolean }
+  options: TmuxCliOptions & { keepChannel?: boolean; instance?: string }
 ) {
   if (!projectName) {
       projectName = basename(process.cwd());
@@ -1606,6 +1667,88 @@ async function stopCommand(
 
     const project = stateManager.getProject(projectName);
     const effectiveConfig = applyTmuxCliOverrides(config, options);
+    const requestedInstanceId = options.instance?.trim();
+
+    if (project && requestedInstanceId) {
+      const instance = getProjectInstance(project, requestedInstanceId);
+      if (!instance) {
+        const known = listProjectInstances(project).map((item) => item.instanceId).join(', ');
+        console.error(chalk.red(`Instance '${requestedInstanceId}' not found in project '${projectName}'.`));
+        if (known) {
+          console.log(chalk.gray(`Available instances: ${known}`));
+        }
+        process.exit(1);
+      }
+
+      const prefix = effectiveConfig.tmux.sessionPrefix;
+      const sharedSession = `${prefix}${effectiveConfig.tmux.sharedSessionName || 'bridge'}`;
+      const sessionName = project.tmuxSession;
+      const windowName = resolveProjectWindowName(project, instance.agentType, effectiveConfig.tmux, instance.instanceId);
+      const target = `${sessionName}:${windowName}`;
+
+      if (sessionName === sharedSession) {
+        const forcedKillCount = await terminateTmuxPaneProcesses(target);
+        if (forcedKillCount > 0) {
+          console.log(chalk.yellow(`⚠️ Forced SIGKILL on ${forcedKillCount} pane process(es) in ${target}.`));
+        }
+        try {
+          execSync(`tmux kill-window -t ${escapeShellArg(target)}`, { stdio: 'ignore' });
+          console.log(chalk.green(`✅ tmux window killed: ${target}`));
+        } catch {
+          console.log(chalk.gray(`   tmux window ${target} not running`));
+        }
+      } else {
+        const forcedKillCount = await terminateTmuxPaneProcesses(sessionName);
+        if (forcedKillCount > 0) {
+          console.log(chalk.yellow(`⚠️ Forced SIGKILL on ${forcedKillCount} pane process(es) in session ${sessionName}.`));
+        }
+        try {
+          execSync(`tmux kill-session -t ${escapeShellArg(sessionName)}`, { stdio: 'ignore' });
+          console.log(chalk.green(`✅ tmux session killed: ${sessionName}`));
+        } catch {
+          console.log(chalk.gray(`   tmux session ${sessionName} not running`));
+        }
+      }
+
+      if (!options.keepChannel && instance.discordChannelId) {
+        try {
+          validateConfig();
+          const client = new DiscordClient(config.discord.token);
+          await client.connect();
+          const deleted = await client.deleteChannel(instance.discordChannelId);
+          if (deleted) {
+            console.log(chalk.green(`✅ Discord channel deleted: ${instance.discordChannelId}`));
+          }
+          await client.disconnect();
+        } catch (error) {
+          console.log(chalk.yellow(`⚠️  Could not delete Discord channel: ${error instanceof Error ? error.message : String(error)}`));
+        }
+      }
+
+      const normalized = normalizeProjectState(project);
+      const nextInstances = { ...(normalized.instances || {}) };
+      delete nextInstances[instance.instanceId];
+
+      if (Object.keys(nextInstances).length === 0) {
+        stateManager.removeProject(projectName);
+        console.log(chalk.green('✅ Project removed from state (last instance stopped)'));
+      } else {
+        stateManager.setProject({
+          ...normalized,
+          instances: nextInstances,
+          lastActive: new Date(),
+        });
+        console.log(chalk.green(`✅ Instance removed from state: ${instance.instanceId}`));
+      }
+
+      const staleTuiCount = cleanupStaleDiscodeTuiProcesses();
+      if (staleTuiCount > 0) {
+        console.log(chalk.yellow(`⚠️ Cleaned ${staleTuiCount} stale discode TUI process(es).`));
+      }
+
+      console.log(chalk.cyan('\n✨ Done\n'));
+      return;
+    }
 
     // 1. Kill tmux windows in shared session (legacy dedicated sessions are killed whole)
     const prefix = effectiveConfig.tmux.sessionPrefix;
@@ -1958,9 +2101,12 @@ await yargs(rawArgs)
   .command(
     'attach [project]',
     'Attach to a project tmux session',
-    (y: Argv) => addTmuxOptions(y).positional('project', { type: 'string' }),
+    (y: Argv) => addTmuxOptions(y)
+      .positional('project', { type: 'string' })
+      .option('instance', { type: 'string', describe: 'Attach specific instance ID' }),
     (argv: any) =>
       attachCommand(argv.project, {
+        instance: argv.instance,
         tmuxSharedSessionName: argv.tmuxSharedSessionName,
       })
   )
@@ -1969,10 +2115,12 @@ await yargs(rawArgs)
     'Stop a project (kills tmux session, deletes Discord channel)',
     (y: Argv) => addTmuxOptions(y)
       .positional('project', { type: 'string' })
+      .option('instance', { type: 'string', describe: 'Stop only a specific instance ID' })
       .option('keep-channel', { type: 'boolean', describe: 'Keep Discord channel (only kill tmux)' }),
     async (argv: any) =>
       stopCommand(argv.project, {
         keepChannel: argv.keepChannel,
+        instance: argv.instance,
         tmuxSharedSessionName: argv.tmuxSharedSessionName,
       })
   )
