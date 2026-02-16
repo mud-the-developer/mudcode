@@ -471,41 +471,53 @@ function TuiApp(props: { input: TuiInput; close: () => void }) {
   return (
     <box width={dims().width} height={dims().height} backgroundColor={palette.bg} flexDirection="column">
       <box flexGrow={1} backgroundColor={palette.bg} alignItems="center" justifyContent="center" paddingLeft={2} paddingRight={2}>
-        <Show when={props.input.currentSession || props.input.currentWindow}>
-          <box
-            width={Math.max(40, Math.min(90, Math.floor(dims().width * 0.7)))}
-            border
-            borderColor={palette.border}
-            backgroundColor={palette.panel}
-            flexDirection="column"
-          >
+        <box width={Math.max(40, Math.min(90, Math.floor(dims().width * 0.7)))} flexDirection="column">
+          <Show when={props.input.currentSession || props.input.currentWindow}>
+            <box border borderColor={palette.border} backgroundColor={palette.panel} flexDirection="column">
+              <box paddingLeft={1} paddingRight={1}>
+                <text fg={palette.primary} attributes={TextAttributes.BOLD}>Current window</text>
+              </box>
+              <box flexDirection="column" paddingLeft={1} paddingRight={1} paddingBottom={1}>
+                <Show when={props.input.currentSession}>
+                  <text fg={palette.text}>{`session: ${props.input.currentSession}`}</text>
+                </Show>
+                <Show when={props.input.currentWindow} fallback={<text fg={palette.muted}>window: unavailable</text>}>
+                  <text fg={palette.text}>{`window: ${props.input.currentWindow}`}</text>
+                </Show>
+                <Show
+                  when={props.input.currentWindow && currentWindowItems().length > 0}
+                  fallback={<text fg={palette.muted}>{props.input.currentWindow ? 'No running projects in this window' : 'Could not resolve current window'}</text>}
+                >
+                  <For each={currentWindowItems().slice(0, 6)}>
+                    {(item, index) => (
+                      <>
+                        <text fg={palette.text}>{`${index() === currentWindowItems().length - 1 ? '`--' : '|--'} project: ${item.project}`}</text>
+                        <text fg={palette.text}>{`${index() === currentWindowItems().length - 1 ? '    ' : '|   '}ai: ${item.ai}`}</text>
+                        <text fg={palette.text}>{`${index() === currentWindowItems().length - 1 ? '    ' : '|   '}channel: ${item.channel}`}</text>
+                      </>
+                    )}
+                  </For>
+                </Show>
+              </box>
+            </box>
+          </Show>
+
+          <box border borderColor={palette.border} backgroundColor={palette.panel} flexDirection="column" marginTop={1}>
             <box paddingLeft={1} paddingRight={1}>
-              <text fg={palette.primary} attributes={TextAttributes.BOLD}>Current window</text>
+              <text fg={palette.primary} attributes={TextAttributes.BOLD}>Current sessions</text>
             </box>
             <box flexDirection="column" paddingLeft={1} paddingRight={1} paddingBottom={1}>
-              <Show when={props.input.currentSession}>
-                <text fg={palette.text}>{`session: ${props.input.currentSession}`}</text>
-              </Show>
-              <Show when={props.input.currentWindow} fallback={<text fg={palette.muted}>window: unavailable</text>}>
-                <text fg={palette.text}>{`window: ${props.input.currentWindow}`}</text>
-              </Show>
-              <Show
-                when={props.input.currentWindow && currentWindowItems().length > 0}
-                fallback={<text fg={palette.muted}>{props.input.currentWindow ? 'No running projects in this window' : 'Could not resolve current window'}</text>}
-              >
-                <For each={currentWindowItems().slice(0, 6)}>
-                  {(item, index) => (
-                    <>
-                      <text fg={palette.text}>{`${index() === currentWindowItems().length - 1 ? '`--' : '|--'} project: ${item.project}`}</text>
-                      <text fg={palette.text}>{`${index() === currentWindowItems().length - 1 ? '    ' : '|   '}ai: ${item.ai}`}</text>
-                      <text fg={palette.text}>{`${index() === currentWindowItems().length - 1 ? '    ' : '|   '}channel: ${item.channel}`}</text>
-                    </>
+              <Show when={sessionList().length > 0} fallback={<text fg={palette.muted}>No running sessions</text>}>
+                <For each={sessionList().slice(0, 8)}>
+                  {(item) => (
+                    <text fg={palette.text}>{`- ${item.session} (${item.windows} windows)`}</text>
                   )}
                 </For>
               </Show>
+              <text fg={palette.muted}>Use /list to attach quickly</text>
             </box>
           </box>
-        </Show>
+        </box>
       </box>
 
       <Show when={matches().length > 0}>
