@@ -350,6 +350,8 @@ HOOK_SERVER_PORT=18470 discode new
 
 ## 개발
 
+아키텍처 모듈 경계: [docs/MODULE_BOUNDARIES.ko.md](docs/MODULE_BOUNDARIES.ko.md)
+
 ### 빌드
 
 ```bash

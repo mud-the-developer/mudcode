@@ -402,6 +402,8 @@ discode new --tmux-shared-session-name bridge
 
 ## 개발
 
+아키텍처 모듈 경계: [MODULE_BOUNDARIES.ko.md](MODULE_BOUNDARIES.ko.md)
+
 ### 빌드
 
 ```bash

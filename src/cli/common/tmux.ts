@@ -11,11 +11,10 @@ import {
   normalizeProjectState,
 } from '../../state/instances.js';
 import { escapeShellArg } from '../../infra/shell-escape.js';
-import { buildExportPrefix } from '../../policy/agent-launch.js';
 import { resolveProjectWindowName, toSharedWindowName } from '../../policy/window-naming.js';
 import type { TmuxCliOptions } from './types.js';
 
-export { escapeShellArg, buildExportPrefix, resolveProjectWindowName, toSharedWindowName };
+export { escapeShellArg, resolveProjectWindowName, toSharedWindowName };
 
 export function attachToTmux(sessionName: string, windowName?: string): void {
   const sessionTarget = sessionName;
