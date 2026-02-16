@@ -1,3 +1,4 @@
+import { existsSync } from 'fs';
 import { resolve } from 'path';
 import { defaultDaemonManager } from '../daemon.js';
 
@@ -22,7 +23,17 @@ export async function ensureDaemonRunning(): Promise<EnsureDaemonRunningResult> 
     };
   }
 
-  const entryPoint = resolve(import.meta.dirname, '../daemon-entry.js');
+  const entryPointCandidates = [
+    // Bundled CLI output places daemon entry under dist/src.
+    resolve(import.meta.dirname, '../src/daemon-entry.js'),
+    // Legacy build layout.
+    resolve(import.meta.dirname, '../daemon-entry.js'),
+    // Source layout for direct TS execution.
+    resolve(import.meta.dirname, '../daemon-entry.ts'),
+    resolve(import.meta.dirname, '../src/daemon-entry.ts'),
+  ];
+  const entryPoint =
+    entryPointCandidates.find((candidate) => existsSync(candidate)) ?? entryPointCandidates[0];
   defaultDaemonManager.startDaemon(entryPoint);
   const ready = await defaultDaemonManager.waitForReady();
 
