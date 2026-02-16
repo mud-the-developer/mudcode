@@ -156,7 +156,7 @@ discode agents
 
 #### `tui`
 
-인터랙티브 터미널 UI를 엽니다. TUI 내부에서 `/session_new` (또는 `/new`)를 사용해 새로운 agent session을 만들 수 있습니다.
+인터랙티브 터미널 UI를 엽니다. TUI 내부에서 `/new`를 사용해 새로운 agent session을 만들 수 있습니다.
 
 ```bash
 discode tui

@@ -50,7 +50,7 @@ function nextProjectName(baseName: string): string {
   return `${baseName}-${Date.now()}`;
 }
 
-function parseSessionNew(raw: string): {
+function parseNewCommand(raw: string): {
   projectName?: string;
   agentName?: string;
   attach: boolean;
@@ -95,7 +95,7 @@ export async function tuiCommand(options: TmuxCliOptions): Promise<void> {
     }
 
     if (command === '/help') {
-      append('Commands: /session_new [name] [agent] [--instance id] [--attach], /list, /projects, /help, /exit');
+      append('Commands: /new [name] [agent] [--instance id] [--attach], /list, /projects, /help, /exit');
       return false;
     }
 
@@ -168,7 +168,7 @@ export async function tuiCommand(options: TmuxCliOptions): Promise<void> {
       return false;
     }
 
-    if (command.startsWith('/session_new') || command.startsWith('/new')) {
+    if (command.startsWith('/new')) {
       try {
         validateConfig();
         if (!stateManager.getGuildId()) {
@@ -182,7 +182,7 @@ export async function tuiCommand(options: TmuxCliOptions): Promise<void> {
           return false;
         }
 
-        const parsed = parseSessionNew(command);
+        const parsed = parseNewCommand(command);
         const cwdName = basename(process.cwd());
         const projectName = parsed.projectName && parsed.projectName.trim().length > 0
           ? parsed.projectName.trim()

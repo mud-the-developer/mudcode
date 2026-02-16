@@ -33,8 +33,7 @@ const palette = {
 };
 
 const slashCommands = [
-  { command: '/session_new', description: 'create new session' },
-  { command: '/new', description: 'alias for /session_new' },
+  { command: '/new', description: 'create new session' },
   { command: '/list', description: 'show current session list' },
   { command: '/stop', description: 'select and stop a project' },
   { command: '/projects', description: 'list configured projects' },
@@ -44,8 +43,7 @@ const slashCommands = [
 ];
 
 const paletteCommands = [
-  { command: '/session_new', description: 'Create a new session' },
-  { command: '/new', description: 'Alias for /session_new' },
+  { command: '/new', description: 'Create a new session' },
   { command: '/list', description: 'Show current session list' },
   { command: '/stop', description: 'Select and stop a project' },
   { command: '/projects', description: 'List configured projects' },
@@ -197,7 +195,7 @@ function TuiApp(props: { input: TuiInput; close: () => void }) {
   const executePaletteSelection = async () => {
     const item = paletteMatches()[paletteSelected()];
     if (!item) return;
-    if (item.command === '/new' || item.command === '/session_new') {
+    if (item.command === '/new') {
       closeCommandPalette();
       setNewOpen(true);
       setNewSelected(0);
@@ -303,7 +301,7 @@ function TuiApp(props: { input: TuiInput; close: () => void }) {
     setValue('');
     if (!command) return;
 
-    if (command === 'new' || command === '/new' || command === '/session_new') {
+    if (command === 'new' || command === '/new') {
       setNewOpen(true);
       setNewSelected(0);
       return;

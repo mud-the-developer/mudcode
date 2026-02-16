@@ -209,7 +209,7 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
     .strict()
     .command(
       ['$0', 'tui'],
-      'Interactive terminal UI (supports /session_new)',
+      'Interactive terminal UI (supports /new)',
       (y: Argv) => addTmuxOptions(y),
       async (argv: any) =>
         tuiCommand({

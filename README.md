@@ -195,7 +195,7 @@ discode agents
 
 #### `tui`
 
-Open interactive terminal UI. Use `/session_new` (or `/new`) inside the TUI to create a new agent session.
+Open interactive terminal UI. Use `/new` inside the TUI to create a new agent session.
 
 ```bash
 discode tui
