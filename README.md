@@ -94,8 +94,9 @@ git clone https://github.com/siisee11/discode.git
 cd discode
 bun install
 bun run build
-bun link
 ```
+
+For local runtime switching and development workflows, see [`DEVELOPMENT.md`](./DEVELOPMENT.md).
 
 ## Uninstall
 

@@ -69,8 +69,9 @@ git clone https://github.com/siisee11/discode.git
 cd discode
 bun install
 bun run build
-bun link
 ```
+
+로컬 런타임 전환과 개발 워크플로우는 [`DEVELOPMENT.md`](./DEVELOPMENT.md)를 참고하세요.
 
 ## 빠른 시작
 
