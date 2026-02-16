@@ -4,60 +4,10 @@ import { stateManager, type ProjectState } from '../state/index.js';
 import type { BridgeConfig, ProjectInstanceState } from '../types/index.js';
 import { TmuxManager } from '../tmux/manager.js';
 import { agentRegistry } from '../agents/index.js';
-import { installOpencodePlugin } from '../opencode/plugin-installer.js';
-import { installClaudePlugin } from '../claude/plugin-installer.js';
-import { installGeminiHook } from '../gemini/hook-installer.js';
-import { installCodexHook } from '../codex/plugin-installer.js';
-import {
-  getPrimaryInstanceForAgent,
-  getProjectInstance,
-  normalizeProjectState,
-} from '../state/instances.js';
-
-function escapeShellArg(arg: string): string {
-  return `'${arg.replace(/'/g, "'\\''")}'`;
-}
-
-function buildExportPrefix(env: Record<string, string | undefined>): string {
-  const parts: string[] = [];
-  for (const [key, value] of Object.entries(env)) {
-    if (value === undefined) continue;
-    parts.push(`export ${key}=${escapeShellArg(value)}`);
-  }
-  return parts.length > 0 ? parts.join('; ') + '; ' : '';
-}
-
-function toSharedWindowName(projectName: string, agentType: string): string {
-  const raw = `${projectName}-${agentType}`;
-  const safe = raw
-    .replace(/[:\n\r\t]/g, '-')
-    .replace(/[^a-zA-Z0-9._-]/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 80);
-  return safe.length > 0 ? safe : agentType;
-}
-
-function resolveProjectWindowName(
-  project: ProjectState,
-  agentName: string,
-  tmuxConfig: BridgeConfig['tmux'],
-  instanceId?: string,
-): string {
-  const normalized = normalizeProjectState(project);
-  const mapped =
-    (instanceId ? getProjectInstance(normalized, instanceId)?.tmuxWindow : undefined) ||
-    getPrimaryInstanceForAgent(normalized, agentName)?.tmuxWindow ||
-    project.tmuxWindows?.[agentName];
-  if (mapped && mapped.length > 0) return mapped;
-
-  const sharedSession = `${tmuxConfig.sessionPrefix}${tmuxConfig.sharedSessionName || 'bridge'}`;
-  if (project.tmuxSession === sharedSession) {
-    const token = instanceId || agentName;
-    return toSharedWindowName(project.projectName, token);
-  }
-  return instanceId || agentName;
-}
+import { normalizeProjectState } from '../state/instances.js';
+import { buildAgentLaunchEnv, buildExportPrefix, withClaudePluginDir } from '../policy/agent-launch.js';
+import { installAgentIntegration } from '../policy/agent-integration.js';
+import { resolveProjectWindowName } from '../policy/window-naming.js';
 
 export async function setupProjectInstance(params: {
   config: BridgeConfig;
@@ -163,66 +113,27 @@ export async function resumeProjectInstance(params: {
 
   let claudePluginDir: string | undefined;
   let hookEnabled = !!params.instance.eventHook;
-
-  if (params.instance.agentType === 'opencode') {
-    try {
-      const pluginPath = installOpencodePlugin(params.project.projectPath);
-      hookEnabled = true;
-      infoMessages.push(`Reinstalled OpenCode plugin: ${pluginPath}`);
-    } catch (error) {
-      warningMessages.push(`Could not reinstall OpenCode plugin: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
-  if (params.instance.agentType === 'claude') {
-    try {
-      claudePluginDir = installClaudePlugin(params.project.projectPath);
-      hookEnabled = true;
-      infoMessages.push(`Reinstalled Claude Code plugin: ${claudePluginDir}`);
-    } catch (error) {
-      warningMessages.push(`Could not reinstall Claude Code plugin: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
-  if (params.instance.agentType === 'gemini') {
-    try {
-      const hookPath = installGeminiHook(params.project.projectPath);
-      hookEnabled = true;
-      infoMessages.push(`Reinstalled Gemini CLI hook: ${hookPath}`);
-    } catch (error) {
-      warningMessages.push(`Could not reinstall Gemini CLI hook: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
-  if (params.instance.agentType === 'codex') {
-    try {
-      const hookPath = installCodexHook();
-      hookEnabled = true;
-      infoMessages.push(`Reinstalled Codex notify hook: ${hookPath}`);
-    } catch (error) {
-      warningMessages.push(`Could not reinstall Codex notify hook: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
+  const integration = installAgentIntegration(params.instance.agentType, params.project.projectPath, 'reinstall');
+  claudePluginDir = integration.claudePluginDir;
+  hookEnabled = hookEnabled || integration.eventHookInstalled;
+  infoMessages.push(...integration.infoMessages);
+  warningMessages.push(...integration.warningMessages);
 
   const permissionAllow =
     params.instance.agentType === 'opencode' && params.config.opencode?.permissionMode === 'allow';
-  let baseCommand = adapter.getStartCommand(params.project.projectPath, permissionAllow);
-
-  if (claudePluginDir && !(/--plugin-dir\b/.test(baseCommand))) {
-    const pluginPattern = /((?:^|&&|;)\s*)claude\b/;
-    if (pluginPattern.test(baseCommand)) {
-      baseCommand = baseCommand.replace(pluginPattern, `$1claude --plugin-dir ${escapeShellArg(claudePluginDir)}`);
-    }
-  }
+  const baseCommand = withClaudePluginDir(
+    adapter.getStartCommand(params.project.projectPath, permissionAllow),
+    claudePluginDir,
+  );
 
   const startCommand =
-    buildExportPrefix({
-      AGENT_DISCORD_PROJECT: params.projectName,
-      AGENT_DISCORD_PORT: String(params.port),
-      AGENT_DISCORD_AGENT: params.instance.agentType,
-      AGENT_DISCORD_INSTANCE: params.instance.instanceId,
-      ...(permissionAllow ? { OPENCODE_PERMISSION: '{"*":"allow"}' } : {}),
-    }) + baseCommand;
+    buildExportPrefix(buildAgentLaunchEnv({
+      projectName: params.projectName,
+      port: params.port,
+      agentType: params.instance.agentType,
+      instanceId: params.instance.instanceId,
+      permissionAllow: !!permissionAllow,
+    })) + baseCommand;
 
   tmux.startAgentInWindow(fullSessionName, windowName, startCommand);
   infoMessages.push(`Restored missing tmux window: ${windowName}`);

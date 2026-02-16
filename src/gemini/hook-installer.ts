@@ -1,6 +1,7 @@
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
+import { escapeShellArg } from '../infra/shell-escape.js';
 
 export const GEMINI_HOOK_NAME = 'discode-gemini-after-agent';
 export const GEMINI_AFTER_AGENT_HOOK_FILENAME = 'discode-after-agent-hook.js';
@@ -19,10 +20,6 @@ function parseSettings(settingsPath: string): Record<string, unknown> {
   } catch {
     return {};
   }
-}
-
-function escapeShellArg(arg: string): string {
-  return `'${arg.replace(/'/g, `'\\''`)}'`;
 }
 
 function getHookCommand(hookPath: string): string {

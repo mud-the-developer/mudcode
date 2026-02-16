@@ -6,26 +6,16 @@ import type { BridgeConfig } from '../../types/index.js';
 import { TmuxManager } from '../../tmux/manager.js';
 import { stateManager, type ProjectState } from '../../state/index.js';
 import {
-  getPrimaryInstanceForAgent,
-  getProjectInstance,
   listProjectAgentTypes,
   listProjectInstances,
   normalizeProjectState,
 } from '../../state/instances.js';
+import { escapeShellArg } from '../../infra/shell-escape.js';
+import { buildExportPrefix } from '../../policy/agent-launch.js';
+import { resolveProjectWindowName, toSharedWindowName } from '../../policy/window-naming.js';
 import type { TmuxCliOptions } from './types.js';
 
-export function escapeShellArg(arg: string): string {
-  return `'${arg.replace(/'/g, "'\\''")}'`;
-}
-
-export function buildExportPrefix(env: Record<string, string | undefined>): string {
-  const parts: string[] = [];
-  for (const [key, value] of Object.entries(env)) {
-    if (value === undefined) continue;
-    parts.push(`export ${key}=${escapeShellArg(value)}`);
-  }
-  return parts.length > 0 ? parts.join('; ') + '; ' : '';
-}
+export { escapeShellArg, buildExportPrefix, resolveProjectWindowName, toSharedWindowName };
 
 export function attachToTmux(sessionName: string, windowName?: string): void {
   const sessionTarget = sessionName;
@@ -233,41 +223,9 @@ export function applyTmuxCliOverrides(base: BridgeConfig, options: TmuxCliOption
   };
 }
 
-export function toSharedWindowName(projectName: string, agentType: string): string {
-  const raw = `${projectName}-${agentType}`;
-  const safe = raw
-    .replace(/[:\n\r\t]/g, '-')
-    .replace(/[^a-zA-Z0-9._-]/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 80);
-  return safe.length > 0 ? safe : agentType;
-}
-
 export function getEnabledAgentNames(project?: ProjectState): string[] {
   if (!project) return [];
   return listProjectAgentTypes(normalizeProjectState(project));
-}
-
-export function resolveProjectWindowName(
-  project: ProjectState,
-  agentName: string,
-  tmuxConfig: BridgeConfig['tmux'],
-  instanceId?: string,
-): string {
-  const normalized = normalizeProjectState(project);
-  const mapped =
-    (instanceId ? getProjectInstance(normalized, instanceId)?.tmuxWindow : undefined) ||
-    getPrimaryInstanceForAgent(normalized, agentName)?.tmuxWindow ||
-    project.tmuxWindows?.[agentName];
-  if (mapped && mapped.length > 0) return mapped;
-
-  const sharedSession = `${tmuxConfig.sessionPrefix}${tmuxConfig.sharedSessionName || 'bridge'}`;
-  if (project.tmuxSession === sharedSession) {
-    const token = instanceId || agentName;
-    return toSharedWindowName(project.projectName, token);
-  }
-  return instanceId || agentName;
 }
 
 export function pruneStaleProjects(tmux: TmuxManager, tmuxConfig: BridgeConfig['tmux']): string[] {

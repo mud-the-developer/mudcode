@@ -9,20 +9,18 @@ import { config as defaultConfig } from './config/index.js';
 import { agentRegistry as defaultAgentRegistry, AgentRegistry } from './agents/index.js';
 import { CapturePoller } from './capture/index.js';
 import { CodexSubmitter } from './codex/submitter.js';
-import { installOpencodePlugin } from './opencode/plugin-installer.js';
-import { installClaudePlugin } from './claude/plugin-installer.js';
-import { installGeminiHook } from './gemini/hook-installer.js';
-import { installCodexHook } from './codex/plugin-installer.js';
 import type { ProjectAgents } from './types/index.js';
 import type { IStateManager } from './types/interfaces.js';
 import type { BridgeConfig } from './types/index.js';
-import { escapeShellArg } from './infra/shell-escape.js';
 import {
   buildNextInstanceId,
   getProjectInstance,
   normalizeProjectState,
 } from './state/instances.js';
 import { installFileInstruction } from './infra/file-instruction.js';
+import { buildAgentLaunchEnv, buildExportPrefix, withClaudePluginDir } from './policy/agent-launch.js';
+import { installAgentIntegration } from './policy/agent-integration.js';
+import { toProjectScopedName } from './policy/window-naming.js';
 import { PendingMessageTracker } from './bridge/pending-message-tracker.js';
 import { BridgeProjectBootstrap } from './bridge/project-bootstrap.js';
 import { BridgeMessageRouter } from './bridge/message-router.js';
@@ -159,11 +157,11 @@ export class AgentBridge {
 
     // Create tmux session (shared mode)
     const sharedSessionName = this.bridgeConfig.tmux.sharedSessionName || 'bridge';
-    const windowName = this.toProjectScopedName(projectName, adapter.config.name, instanceId);
+    const windowName = toProjectScopedName(projectName, adapter.config.name, instanceId);
     const tmuxSession = this.tmux.getOrCreateSession(sharedSessionName, windowName);
 
     // Create Discord channel with custom name or default
-    const channelName = channelDisplayName || this.toProjectScopedName(projectName, adapter.config.channelSuffix, instanceId);
+    const channelName = channelDisplayName || toProjectScopedName(projectName, adapter.config.channelSuffix, instanceId);
     const channels = await this.discord.createAgentChannels(
       guildId,
       projectName,
@@ -179,60 +177,13 @@ export class AgentBridge {
     this.tmux.setSessionEnv(tmuxSession, 'AGENT_DISCORD_PORT', String(port));
 
     // Start agent in tmux window
-    const exportPrefix = this.buildExportPrefix({
-      AGENT_DISCORD_PROJECT: projectName,
-      AGENT_DISCORD_PORT: String(port),
-      AGENT_DISCORD_AGENT: adapter.config.name,
-      AGENT_DISCORD_INSTANCE: instanceId,
-      ...(
-        adapter.config.name === 'opencode' && this.bridgeConfig.opencode?.permissionMode === 'allow'
-          ? { OPENCODE_PERMISSION: '{"*":"allow"}' }
-          : {}
-      ),
-    });
     const permissionAllow = this.bridgeConfig.opencode?.permissionMode === 'allow';
-    let claudePluginDir: string | undefined;
-    let claudeHookEnabled = false;
-    let geminiHookEnabled = false;
-
-    if (adapter.config.name === 'opencode') {
-      try {
-        const pluginPath = installOpencodePlugin(projectPath);
-        console.log(`🧩 Installed OpenCode plugin: ${pluginPath}`);
-      } catch (error) {
-        console.warn(`Failed to install OpenCode plugin: ${error instanceof Error ? error.message : String(error)}`);
-      }
+    const integration = installAgentIntegration(adapter.config.name, projectPath, 'install');
+    for (const message of integration.infoMessages) {
+      console.log(message);
     }
-
-    if (adapter.config.name === 'claude') {
-      try {
-        claudePluginDir = installClaudePlugin(projectPath);
-        claudeHookEnabled = true;
-        console.log(`🪝 Installed Claude Code plugin: ${claudePluginDir}`);
-      } catch (error) {
-        console.warn(`Failed to install Claude Code plugin: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-
-    if (adapter.config.name === 'gemini') {
-      try {
-        const hookPath = installGeminiHook(projectPath);
-        geminiHookEnabled = true;
-        console.log(`🪝 Installed Gemini CLI hook: ${hookPath}`);
-      } catch (error) {
-        console.warn(`Failed to install Gemini CLI hook: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-
-    let codexHookEnabled = false;
-    if (adapter.config.name === 'codex') {
-      try {
-        const hookPath = installCodexHook();
-        codexHookEnabled = true;
-        console.log(`🪝 Installed Codex notify hook: ${hookPath}`);
-      } catch (error) {
-        console.warn(`Failed to install Codex notify hook: ${error instanceof Error ? error.message : String(error)}`);
-      }
+    for (const message of integration.warningMessages) {
+      console.warn(message);
     }
 
     // Install file-handling instructions for the agent
@@ -243,7 +194,14 @@ export class AgentBridge {
       console.warn(`Failed to install file instructions: ${error instanceof Error ? error.message : String(error)}`);
     }
 
-    const startCommand = this.withClaudePluginDir(adapter.getStartCommand(projectPath, permissionAllow), claudePluginDir);
+    const exportPrefix = buildExportPrefix(buildAgentLaunchEnv({
+      projectName,
+      port,
+      agentType: adapter.config.name,
+      instanceId,
+      permissionAllow: adapter.config.name === 'opencode' && permissionAllow,
+    }));
+    const startCommand = withClaudePluginDir(adapter.getStartCommand(projectPath, permissionAllow), integration.claudePluginDir);
 
     this.tmux.startAgentInWindow(
       tmuxSession,
@@ -269,7 +227,7 @@ export class AgentBridge {
         agentType: adapter.config.name,
         tmuxWindow: windowName,
         discordChannelId: channelId,
-        eventHook: adapter.config.name === 'opencode' || claudeHookEnabled || geminiHookEnabled || codexHookEnabled,
+        eventHook: adapter.config.name === 'opencode' || integration.eventHookInstalled,
       },
     };
     const projectState = normalizeProjectState({
@@ -288,44 +246,6 @@ export class AgentBridge {
       agentName: adapter.config.displayName,
       tmuxSession,
     };
-  }
-
-  private toSharedWindowName(projectName: string, agentType: string): string {
-    // Target strings are interpolated into `session:window` and passed to tmux.
-    // Keep window names simple (avoid ':' which would break target parsing).
-    const raw = `${projectName}-${agentType}`;
-    const safe = raw
-      .replace(/[:\n\r\t]/g, '-')
-      .replace(/[^a-zA-Z0-9._-]/g, '-')
-      .replace(/-+/g, '-')
-      .replace(/^-|-$/g, '')
-      .slice(0, 80);
-    return safe.length > 0 ? safe : agentType;
-  }
-
-  private toProjectScopedName(projectName: string, base: string, instanceId: string): string {
-    if (instanceId === base) return this.toSharedWindowName(projectName, base);
-    if (instanceId.startsWith(`${base}-`)) return this.toSharedWindowName(projectName, instanceId);
-    return this.toSharedWindowName(projectName, `${base}-${instanceId}`);
-  }
-
-  private buildExportPrefix(env: Record<string, string | undefined>): string {
-    const parts: string[] = [];
-    for (const [key, value] of Object.entries(env)) {
-      if (value === undefined) continue;
-      parts.push(`export ${key}=${escapeShellArg(value)}`);
-    }
-    return parts.length > 0 ? parts.join('; ') + '; ' : '';
-  }
-
-  private withClaudePluginDir(command: string, pluginDir?: string): string {
-    if (!pluginDir || pluginDir.length === 0) return command;
-    if (/--plugin-dir\b/.test(command)) return command;
-    // Match `claude` only when it appears as a shell command (after && or ; or at start),
-    // not when it's part of a file path like /Users/gui/claude/...
-    const pattern = /((?:^|&&|;)\s*)claude\b/;
-    if (!pattern.test(command)) return command;
-    return command.replace(pattern, `$1claude --plugin-dir ${escapeShellArg(pluginDir)}`);
   }
 
   private async markAgentMessageCompleted(projectName: string, agentType: string, instanceId?: string): Promise<void> {
