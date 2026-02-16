@@ -9,7 +9,7 @@ import { escapeShellArg } from '../infra/shell-escape.js';
 
 const TUI_PANE_TITLE = 'discode-tui';
 const TUI_PANE_COMMAND_MARKERS = ['discode.js tui', 'discode tui'];
-const TUI_PANE_MAX_WIDTH = 60;
+const TUI_PANE_MAX_WIDTH = 80;
 const TUI_PANE_DELAY_SECONDS = 0.35;
 
 type AgentPaneHint = 'opencode' | 'claude' | 'codex' | 'gemini';
