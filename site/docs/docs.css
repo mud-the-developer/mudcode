@@ -253,6 +253,35 @@ a {
   overflow-x: auto;
 }
 
+#install .command {
+  position: relative;
+  padding-top: 2.5rem;
+}
+
+.command-copy-btn {
+  position: absolute;
+  top: 0.55rem;
+  right: 0.55rem;
+  border: 1px solid #bfc4ce;
+  background: #f8f9fc;
+  color: #252630;
+  border-radius: 0.4rem;
+  padding: 0.18rem 0.55rem;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.72rem;
+  line-height: 1.3;
+  cursor: pointer;
+}
+
+.command-copy-btn:hover {
+  background: #eef1f7;
+}
+
+.command-copy-btn:focus-visible {
+  outline: 2px solid #1f1f22;
+  outline-offset: 2px;
+}
+
 code,
 pre {
   margin: 0;
