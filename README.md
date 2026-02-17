@@ -331,7 +331,8 @@ DISCORD_GUILD_ID=server_id discode new
 
 ## Development
 
-Architecture boundaries: [docs/MODULE_BOUNDARIES.md](docs/MODULE_BOUNDARIES.md)
+Architecture overview: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+Module boundaries: [docs/MODULE_BOUNDARIES.md](docs/MODULE_BOUNDARIES.md)
 
 ### Building
 
