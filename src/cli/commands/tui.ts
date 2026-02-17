@@ -52,6 +52,10 @@ function nextProjectName(baseName: string): string {
   return `${baseName}-${Date.now()}`;
 }
 
+function reloadStateFromDisk(): void {
+  stateManager.reload();
+}
+
 function parseNewCommand(raw: string): {
   projectName?: string;
   agentName?: string;
@@ -238,6 +242,7 @@ export async function tuiCommand(options: TmuxCliOptions): Promise<void> {
     }
 
     if (command === '/list') {
+      reloadStateFromDisk();
       const sessions = new Set(
         stateManager
           .listProjects()
@@ -255,6 +260,7 @@ export async function tuiCommand(options: TmuxCliOptions): Promise<void> {
     }
 
     if (command === '/projects') {
+      reloadStateFromDisk();
       const projects = stateManager.listProjects();
       if (projects.length === 0) {
         append('No projects configured.');
@@ -309,6 +315,7 @@ export async function tuiCommand(options: TmuxCliOptions): Promise<void> {
 
     if (command.startsWith('/new')) {
       try {
+        reloadStateFromDisk();
         validateConfig();
         if (!stateManager.getGuildId()) {
           append('⚠️ Not set up yet. Run: discode onboard');
@@ -444,8 +451,9 @@ export async function tuiCommand(options: TmuxCliOptions): Promise<void> {
           tmuxSharedSessionName: options.tmuxSharedSessionName,
         });
       },
-      getProjects: () =>
-        stateManager.listProjects().map((project) => {
+      getProjects: () => {
+        reloadStateFromDisk();
+        return stateManager.listProjects().map((project) => {
           const instances = listProjectInstances(project);
           const agentNames = getEnabledAgentNames(project);
           const labels = agentNames.map((agentName) => agentRegistry.get(agentName)?.config.displayName || agentName);
@@ -468,7 +476,8 @@ export async function tuiCommand(options: TmuxCliOptions): Promise<void> {
             channel: channelBase,
             open: windowUp,
           };
-        }),
+        });
+      },
     });
   } finally {
     clearTmuxHealthTimer();
