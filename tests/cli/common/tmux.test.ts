@@ -18,7 +18,7 @@ describe('ensureProjectTuiPane', () => {
 
     expect(ensureTuiPane).toHaveBeenCalledWith(
       'agent-demo',
-      '0',
+      'demo-claude',
       [resolve(process.cwd(), 'bin/discode'), 'tui'],
     );
   });
@@ -31,7 +31,7 @@ describe('ensureProjectTuiPane', () => {
 
     expect(ensureTuiPane).toHaveBeenCalledWith(
       'agent-demo',
-      '0',
+      'demo-claude',
       ['bun', resolve(process.cwd(), 'bin/discode.ts'), 'tui'],
     );
   });
