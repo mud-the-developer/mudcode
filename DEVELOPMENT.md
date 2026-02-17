@@ -23,7 +23,7 @@ discode-local() {
 
 # Run TypeScript source directly
 discode-src() {
-  (cd "$DISCODE_REPO" && bun run tsx ./bin/discode.ts "$@")
+  bun run tsx "$DISCODE_REPO/bin/discode.ts" "$@"
 }
 
 # Default `discode` to local source runtime
@@ -36,6 +36,9 @@ Helpers:
 - `discode-local`: local compiled binary from this repo
 - `discode-rel`: global installed release runtime (ignores `DISCODE_BIN_PATH`)
 - `discode-src`: local TypeScript source runtime
+
+Note: `discode-src` intentionally preserves your current working directory.
+This keeps commands like `discode new` tied to the folder you ran them in.
 
 After updating `~/.zshrc`, reload shell config:
 
