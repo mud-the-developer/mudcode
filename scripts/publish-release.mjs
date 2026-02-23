@@ -66,6 +66,7 @@ function assertScopeIfNeeded(dir, expectedScope) {
 
 const dryRun = hasFlag('--dry-run');
 const skipBuild = hasFlag('--skip-build');
+const single = hasFlag('--single');
 const tag = argValue('--tag');
 const access = argValue('--access') || 'public';
 const publishPm = (argValue('--pm') || process.env.DISCODE_PUBLISH_PM || 'npm').trim().toLowerCase();
@@ -85,7 +86,15 @@ if (requestedScope) {
 console.log(`Publishing via: ${publishPm}`);
 
 if (!skipBuild) {
-  if (publishPm === 'bun') {
+  if (single) {
+    if (publishPm === 'bun') {
+      run('bun', ['run', 'build:release:binaries:single']);
+      run('bun', ['run', 'build:release:npm']);
+    } else {
+      run('npm', ['run', 'build:release:binaries:single']);
+      run('npm', ['run', 'build:release:npm']);
+    }
+  } else if (publishPm === 'bun') {
     run('bun', ['run', 'build:release']);
   } else {
     run('npm', ['run', 'build:release']);

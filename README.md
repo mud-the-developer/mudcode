@@ -375,6 +375,12 @@ Publish with Bun instead of npm:
 DISCODE_NPM_SCOPE=@your-npm-id npm run publish:release:bun
 ```
 
+Publish only the current host target (recommended for local machines):
+
+```bash
+DISCODE_NPM_SCOPE=@your-npm-id npm run publish:release:bun:single
+```
+
 ### Testing
 
 ```bash

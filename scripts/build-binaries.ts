@@ -96,6 +96,21 @@ function isHostCompatibleTarget(target: Target): boolean {
   return target.os === currentOs && target.arch === currentArch && !target.baseline && !target.abi;
 }
 
+function nodeOsForTarget(target: Target): 'darwin' | 'linux' | 'win32' {
+  return target.os === 'windows' ? 'win32' : target.os;
+}
+
+function resolveOpenTuiRuntimeModule(target: Target): { moduleName: string; modulePath: string } {
+  const nodeOs = nodeOsForTarget(target);
+  const moduleName = `@opentui/core-${nodeOs}-${target.arch}`;
+  const modulePath = join(root, 'node_modules', moduleName, 'index.ts');
+  return { moduleName, modulePath };
+}
+
+function isLocalArchOsTarget(target: Target): boolean {
+  return target.os === currentOs && target.arch === currentArch;
+}
+
 function ensureLocalRustReleaseBuilt(): boolean {
   if (localRustBuildAttempted) return localRustBuildSucceeded;
   localRustBuildAttempted = true;
@@ -201,6 +216,26 @@ for (const target of targets) {
   const outfile = join(binDir, binaryName);
 
   console.log(`Building ${packageName} (${compileTarget})`);
+
+  // OpenTUI loads a platform package by runtime OS/arch during bundling.
+  // On a single host, foreign OS/arch target packages are typically not installed.
+  // Skip those foreign targets unless the matching package is present locally.
+  const openTuiRuntime = resolveOpenTuiRuntimeModule(target);
+  if (!existsSync(openTuiRuntime.modulePath)) {
+    if (isLocalArchOsTarget(target)) {
+      throw new Error(
+        `Missing required module ${openTuiRuntime.moduleName} for local target ${suffix}. ` +
+        `Run 'bun install' first.`,
+      );
+    }
+
+    console.log(
+      `  - Skipping ${packageName}: missing ${openTuiRuntime.moduleName}. ` +
+      `Build this target on a matching runner or install that optional package explicitly.`,
+    );
+    continue;
+  }
+
   mkdirSync(binDir, { recursive: true });
 
   const result = await Bun.build({

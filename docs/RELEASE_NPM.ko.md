@@ -94,6 +94,12 @@ Bun으로 publish 하려면:
 DISCODE_NPM_SCOPE=@your-npm-id npm run publish:release:bun
 ```
 
+로컬 머신에서 현재 OS/아키텍처만 배포하려면:
+
+```bash
+DISCODE_NPM_SCOPE=@your-npm-id npm run publish:release:bun:single
+```
+
 ## 7) 플랫폼 패키지 수동 배포
 
 ```bash
