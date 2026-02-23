@@ -200,8 +200,15 @@ export class BridgeCapturePoller {
       if (trimmed.length === 0) return false;
       if (/^export AGENT_DISCORD_[A-Z_]+=/.test(trimmed)) return false;
       if (/^\$?\s*cd\s+".*"\s*&&\s*codex\b/.test(trimmed)) return false;
+      if (this.isCodexUiStatusNoiseLine(trimmed)) return false;
       return true;
     });
     return filtered.join('\n');
+  }
+
+  private isCodexUiStatusNoiseLine(line: string): boolean {
+    // Codex TUI footer: "? for shortcuts ... 100% context left"
+    const compact = line.replace(/\s+/g, ' ');
+    return /^\?\s+for shortcuts\b.*\b\d{1,3}%\s+context left$/i.test(compact);
   }
 }
