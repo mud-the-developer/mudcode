@@ -1,5 +1,5 @@
 import { existsSync } from 'fs';
-import { dirname, resolve } from 'path';
+import { basename, dirname, resolve } from 'path';
 import { defaultDaemonManager } from '../daemon.js';
 import type { DaemonLaunchSpec } from '../daemon.js';
 
@@ -22,6 +22,19 @@ function resolveTsDaemonEntryPoint(): string {
   ];
 
   return entryPointCandidates.find((candidate) => existsSync(candidate)) ?? entryPointCandidates[0];
+}
+
+function resolveTsDaemonLaunch(): string | DaemonLaunchSpec {
+  const executableName = basename(process.execPath).toLowerCase();
+  if (executableName === 'discode' || executableName === 'discode.exe') {
+    return {
+      command: process.execPath,
+      args: ['daemon-runner'],
+      keepAwakeOnMac: false,
+    };
+  }
+
+  return resolveTsDaemonEntryPoint();
 }
 
 function resolveRustDaemonLaunch(): DaemonLaunchSpec {
@@ -93,7 +106,7 @@ export async function ensureDaemonRunning(): Promise<EnsureDaemonRunningResult> 
   if (runtime === 'rust') {
     defaultDaemonManager.startDaemon(resolveRustDaemonLaunch());
   } else {
-    defaultDaemonManager.startDaemon(resolveTsDaemonEntryPoint());
+    defaultDaemonManager.startDaemon(resolveTsDaemonLaunch());
   }
   const ready = await defaultDaemonManager.waitForReady();
 

@@ -24,6 +24,7 @@ import { agentsCommand } from '../src/cli/commands/agents.js';
 import { daemonCommand } from '../src/cli/commands/daemon.js';
 import { uninstallCommand } from '../src/cli/commands/uninstall.js';
 import { getDaemonStatus, restartDaemonIfRunning } from '../src/app/daemon-service.js';
+import { main as daemonMain } from '../src/index.js';
 import { addTmuxOptions } from '../src/cli/common/options.js';
 import { confirmYesNo, isInteractiveShell } from '../src/cli/common/interactive.js';
 
@@ -162,7 +163,7 @@ function shouldCheckForUpdate(rawArgs: string[]): boolean {
   const command = commandNameFromArgs(rawArgs);
   if (!command) return false;
 
-  if (command === 'tui' || command === 'daemon') return false;
+  if (command === 'tui' || command === 'daemon' || command === 'daemon-runner') return false;
   return true;
 }
 
@@ -354,6 +355,14 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
       'Manage the global bridge daemon (start|stop|status)',
       (y: Argv) => y.positional('action', { type: 'string', demandOption: true }),
       async (argv: any) => daemonCommand(argv.action)
+    )
+    .command(
+      'daemon-runner',
+      false,
+      () => {},
+      async () => {
+        await daemonMain();
+      }
     )
     .command(
       'uninstall',

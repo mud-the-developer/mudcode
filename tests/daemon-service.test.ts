@@ -28,10 +28,12 @@ vi.mock('../src/daemon.js', () => ({
 
 describe('daemon-service runtime selection', () => {
   const originalEnv = { ...process.env };
+  const originalExecPath = process.execPath;
 
   beforeEach(() => {
     vi.clearAllMocks();
     process.env = { ...originalEnv };
+    Object.defineProperty(process, 'execPath', { value: originalExecPath, configurable: true });
     delete process.env.DISCODE_DAEMON_RUNTIME;
     delete process.env.DISCODE_RS_BIN;
     delete process.env.DISCODE_RS_MANIFEST;
@@ -49,6 +51,19 @@ describe('daemon-service runtime selection', () => {
     await mod.ensureDaemonRunning();
 
     expect(hoisted.defaultDaemonManager.startDaemon).toHaveBeenCalledWith(expect.any(String));
+  });
+
+  it('uses daemon-runner command when running from packaged discode executable', async () => {
+    Object.defineProperty(process, 'execPath', { value: '/tmp/discode', configurable: true });
+    const mod = await import('../src/app/daemon-service.js');
+
+    await mod.ensureDaemonRunning();
+
+    expect(hoisted.defaultDaemonManager.startDaemon).toHaveBeenCalledWith({
+      command: '/tmp/discode',
+      args: ['daemon-runner'],
+      keepAwakeOnMac: false,
+    });
   });
 
   it('uses explicit Rust binary when DISCODE_DAEMON_RUNTIME=rust and DISCODE_RS_BIN is set', async () => {
