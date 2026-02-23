@@ -369,6 +369,12 @@ One-shot publish under your own npm scope:
 DISCODE_NPM_SCOPE=@your-npm-id npm run publish:release
 ```
 
+Publish with Bun instead of npm:
+
+```bash
+DISCODE_NPM_SCOPE=@your-npm-id npm run publish:release:bun
+```
+
 ### Testing
 
 ```bash

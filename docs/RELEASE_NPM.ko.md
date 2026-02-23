@@ -88,6 +88,12 @@ DISCODE_NPM_SCOPE=@your-npm-id npm run publish:release
 DISCODE_NPM_SCOPE=@your-npm-id npm run publish:release:dry-run
 ```
 
+Bun으로 publish 하려면:
+
+```bash
+DISCODE_NPM_SCOPE=@your-npm-id npm run publish:release:bun
+```
+
 ## 7) 플랫폼 패키지 수동 배포
 
 ```bash

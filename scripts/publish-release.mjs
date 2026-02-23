@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'child_process';
-import { readdirSync, readFileSync, statSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'fs';
 import { basename, join, resolve } from 'path';
 
 const root = resolve(new URL('..', import.meta.url).pathname);
@@ -49,6 +49,10 @@ function readPackageName(dir) {
   return typeof pkg.name === 'string' ? pkg.name : '';
 }
 
+function hasPackageJson(dir) {
+  return existsSync(join(dir, 'package.json'));
+}
+
 function assertScopeIfNeeded(dir, expectedScope) {
   if (!expectedScope) return;
   const pkgName = readPackageName(dir);
@@ -64,35 +68,67 @@ const dryRun = hasFlag('--dry-run');
 const skipBuild = hasFlag('--skip-build');
 const tag = argValue('--tag');
 const access = argValue('--access') || 'public';
+const publishPm = (argValue('--pm') || process.env.DISCODE_PUBLISH_PM || 'npm').trim().toLowerCase();
 const requestedScope = normalizeScope(argValue('--scope') || process.env.DISCODE_NPM_SCOPE || '');
+
+if (publishPm !== 'npm' && publishPm !== 'bun') {
+  console.error(`Unsupported publish package manager: ${publishPm}`);
+  console.error('Use --pm npm or --pm bun');
+  process.exit(1);
+}
 
 if (requestedScope) {
   process.env.DISCODE_NPM_SCOPE = requestedScope;
   console.log(`Using npm scope: ${requestedScope}`);
 }
 
+console.log(`Publishing via: ${publishPm}`);
+
 if (!skipBuild) {
-  run('npm', ['run', 'build:release']);
+  if (publishPm === 'bun') {
+    run('bun', ['run', 'build:release']);
+  } else {
+    run('npm', ['run', 'build:release']);
+  }
 }
 
 const platformDirs = readdirSync(releaseRoot)
   .map((name) => join(releaseRoot, name))
   .filter((dir) => statSync(dir).isDirectory())
   .filter((dir) => basename(dir) !== 'npm')
+  .filter((dir) => {
+    if (hasPackageJson(dir)) return true;
+    console.log(`Skipping non-package directory: ${dir}`);
+    return false;
+  })
   .sort((a, b) => basename(a).localeCompare(basename(b)));
 
 const npmMetaDir = join(releaseRoot, 'npm', 'discode');
-const publishDirs = [...platformDirs, npmMetaDir];
+const publishDirs = [...platformDirs];
+
+if (hasPackageJson(npmMetaDir)) {
+  publishDirs.push(npmMetaDir);
+} else {
+  console.log(`Skipping meta package (missing package.json): ${npmMetaDir}`);
+}
+
+if (publishDirs.length === 0) {
+  console.error('No releasable package directories found. Run build:release first.');
+  process.exit(1);
+}
 
 for (const dir of publishDirs) {
   assertScopeIfNeeded(dir, requestedScope);
 }
 
 for (const dir of publishDirs) {
-  const args = ['publish', '--access', access, '--workspaces=false'];
+  const args = ['publish', '--access', access];
+  if (publishPm === 'npm') {
+    args.push('--workspaces=false');
+  }
   if (tag) args.push('--tag', tag);
   if (dryRun) args.push('--dry-run');
-  run('npm', args, { cwd: dir });
+  run(publishPm, args, { cwd: dir });
 }
 
 console.log('Release publish flow completed.');

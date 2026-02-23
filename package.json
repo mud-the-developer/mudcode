@@ -27,6 +27,8 @@
     "pack:release": "node scripts/pack-release.mjs",
     "publish:release": "node scripts/publish-release.mjs",
     "publish:release:dry-run": "node scripts/publish-release.mjs --dry-run",
+    "publish:release:bun": "node scripts/publish-release.mjs --pm bun",
+    "publish:release:bun:dry-run": "node scripts/publish-release.mjs --pm bun --dry-run",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
