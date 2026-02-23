@@ -100,7 +100,24 @@ DISCODE_NPM_SCOPE=@your-npm-id npm run publish:release:bun
 DISCODE_NPM_SCOPE=@your-npm-id npm run publish:release:bun:single
 ```
 
-## 7) 플랫폼 패키지 수동 배포
+## 7) 멀티 플랫폼 전체 배포 (GitHub Actions 권장)
+
+로컬 한 대에서 모든 OS 타깃을 완전하게 만들기 어렵기 때문에, 워크플로우로 OS 매트릭스 빌드 후 한 번에 publish 하는 방식을 권장합니다.
+
+- 워크플로우 파일: `.github/workflows/release-publish.yml`
+- 빌드 대상: Linux x64/arm64, macOS x64/arm64, Windows x64
+- 필수 시크릿: `NPM_TOKEN`
+
+실행 방법:
+
+1. GitHub 저장소 Settings -> Secrets and variables -> Actions 에 `NPM_TOKEN` 등록
+2. Actions 탭 -> `Release Publish` 선택
+3. 입력값:
+   - `scope`: `@your-npm-id`
+   - `tag`: `latest` (또는 `next`)
+   - `dry_run`: 먼저 `true`로 검증, 이후 `false`로 실제 배포
+
+## 8) 플랫폼 패키지 수동 배포
 
 ```bash
 npm publish --access public --workspaces=false dist/release/discode-darwin-arm64
@@ -116,13 +133,13 @@ npm publish --access public --workspaces=false dist/release/discode-windows-x64
 npm publish --access public --workspaces=false dist/release/discode-windows-x64-baseline
 ```
 
-## 8) 메타 패키지 수동 배포
+## 9) 메타 패키지 수동 배포
 
 ```bash
 npm publish --access public --workspaces=false dist/release/npm/discode
 ```
 
-## 9) 배포 확인
+## 10) 배포 확인
 
 ```bash
 npm view @your-npm-id/discode version

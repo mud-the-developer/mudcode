@@ -56,7 +56,28 @@ const allTargets: Target[] = [
   { os: 'windows', arch: 'x64', baseline: true },
 ];
 
+function argValue(name: string): string | undefined {
+  const exact = process.argv.find((arg) => arg.startsWith(`${name}=`));
+  if (exact) return exact.slice(name.length + 1);
+
+  const index = process.argv.indexOf(name);
+  if (index >= 0) {
+    const next = process.argv[index + 1];
+    if (next && !next.startsWith('--')) return next;
+  }
+
+  return undefined;
+}
+
+function suffixForTarget(target: Target): string {
+  return [target.os, target.arch, target.baseline ? 'baseline' : undefined, target.abi]
+    .filter(Boolean)
+    .join('-');
+}
+
 const single = process.argv.includes('--single');
+const hostOnly = process.argv.includes('--host-only');
+const targetsArg = argValue('--targets');
 const platformMap: Record<NodeJS.Platform, Target['os'] | undefined> = {
   darwin: 'darwin',
   linux: 'linux',
@@ -72,10 +93,38 @@ const platformMap: Record<NodeJS.Platform, Target['os'] | undefined> = {
 };
 const currentOs = platformMap[process.platform];
 const currentArch = process.arch === 'arm64' || process.arch === 'x64' ? process.arch : undefined;
-const targets =
-  single && currentOs && currentArch
-    ? allTargets.filter((t) => t.os === currentOs && t.arch === currentArch && !t.baseline && !t.abi)
-    : allTargets;
+
+if (single && hostOnly) {
+  throw new Error('--single and --host-only cannot be used together.');
+}
+
+if (targetsArg && (single || hostOnly)) {
+  throw new Error('--targets cannot be combined with --single/--host-only.');
+}
+
+let targets: Target[];
+if (targetsArg) {
+  const requested = targetsArg
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const bySuffix = new Map(allTargets.map((target) => [suffixForTarget(target), target] as const));
+  targets = requested.map((suffix) => {
+    const target = bySuffix.get(suffix);
+    if (!target) {
+      throw new Error(`Unknown target suffix: ${suffix}`);
+    }
+    return target;
+  });
+} else if (single && currentOs && currentArch) {
+  targets = allTargets.filter((t) => t.os === currentOs && t.arch === currentArch && !t.baseline && !t.abi);
+} else if (hostOnly && currentOs && currentArch) {
+  targets = allTargets.filter((t) => t.os === currentOs && t.arch === currentArch);
+} else if (hostOnly) {
+  throw new Error('Unable to resolve host target for --host-only.');
+} else {
+  targets = allTargets;
+}
 
 if (targets.length === 0) {
   throw new Error('No matching build targets found.');
@@ -204,9 +253,7 @@ mkdirSync(outRoot, { recursive: true });
 const binaries: Record<string, string> = {};
 
 for (const target of targets) {
-  const suffix = [target.os, target.arch, target.baseline ? 'baseline' : undefined, target.abi]
-    .filter(Boolean)
-    .join('-');
+  const suffix = suffixForTarget(target);
   const packageName = `${packageScope}/discode-${suffix}`;
   const compileTarget = `bun-${suffix}`;
   const packageDirName = packageName.split('/')[1] || packageName;
@@ -284,6 +331,10 @@ for (const target of targets) {
   );
 
   binaries[packageName] = pkgJson.version;
+}
+
+if (Object.keys(binaries).length === 0) {
+  throw new Error('No binaries were built for the requested targets.');
 }
 
 const manifestPath = join(outRoot, 'manifest.json');

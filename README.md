@@ -381,6 +381,11 @@ Publish only the current host target (recommended for local machines):
 DISCODE_NPM_SCOPE=@your-npm-id npm run publish:release:bun:single
 ```
 
+Full multi-platform release (Linux/macOS/Windows matrix) is provided via GitHub Actions:
+
+- Workflow: `.github/workflows/release-publish.yml`
+- Required secret: `NPM_TOKEN`
+
 ### Testing
 
 ```bash

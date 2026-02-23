@@ -22,6 +22,8 @@
     "setup:opencode-plugin": "tsx scripts/setup-opencode-plugin.ts",
     "build:release:binaries": "bun run scripts/build-binaries.ts",
     "build:release:binaries:single": "bun run scripts/build-binaries.ts --single",
+    "build:release:binaries:host": "bun run scripts/build-binaries.ts --host-only",
+    "build:release:manifest": "node scripts/rebuild-release-manifest.mjs",
     "build:release:npm": "node scripts/build-npm-package.mjs",
     "build:release": "npm run build:release:binaries && npm run build:release:npm",
     "pack:release": "node scripts/pack-release.mjs",
