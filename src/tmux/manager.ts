@@ -12,12 +12,13 @@ const TUI_PANE_COMMAND_MARKERS = ['discode.js tui', 'discode tui'];
 const TUI_PANE_MAX_WIDTH = 80;
 const TUI_PANE_DELAY_SECONDS = 0.35;
 
-type AgentPaneHint = 'opencode' | 'claude' | 'gemini';
+type AgentPaneHint = 'opencode' | 'claude' | 'gemini' | 'codex';
 
 const AGENT_PANE_MARKERS: Record<AgentPaneHint, string[]> = {
   opencode: ['opencode'],
   claude: ['claude'],
   gemini: ['gemini'],
+  codex: ['codex'],
 };
 
 type PaneMetadata = {
@@ -300,6 +301,7 @@ export class TmuxManager {
     if (/\bopencode\b/.test(normalized)) return 'opencode';
     if (/\bclaude\b/.test(normalized)) return 'claude';
     if (/\bgemini\b/.test(normalized)) return 'gemini';
+    if (/\bcodex\b/.test(normalized)) return 'codex';
     return null;
   }
 

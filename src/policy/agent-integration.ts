@@ -82,5 +82,10 @@ export function installAgentIntegration(
     }
   }
 
+  if (agentType === 'codex') {
+    ok('ℹ️ Codex integration uses tmux capture fallback (no native hook available yet)');
+    return { agentType, eventHookInstalled: false, infoMessages, warningMessages };
+  }
+
   return { agentType, eventHookInstalled: false, infoMessages, warningMessages };
 }

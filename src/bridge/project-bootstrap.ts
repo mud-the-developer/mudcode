@@ -44,7 +44,12 @@ export class BridgeProjectBootstrap {
     const projects = this.stateManager.listProjects().map((rawProject) => {
       const project = normalizeProjectState(rawProject);
       const agentTypes = new Set(listProjectAgentTypes(project));
-      if (!agentTypes.has('opencode') && !agentTypes.has('claude') && !agentTypes.has('gemini')) {
+      if (
+        !agentTypes.has('opencode') &&
+        !agentTypes.has('claude') &&
+        !agentTypes.has('gemini') &&
+        !agentTypes.has('codex')
+      ) {
         return project;
       }
 

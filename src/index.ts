@@ -26,6 +26,7 @@ import { PendingMessageTracker } from './bridge/pending-message-tracker.js';
 import { BridgeProjectBootstrap } from './bridge/project-bootstrap.js';
 import { BridgeMessageRouter } from './bridge/message-router.js';
 import { BridgeHookServer } from './bridge/hook-server.js';
+import { BridgeCapturePoller } from './bridge/capture-poller.js';
 
 export interface AgentBridgeDeps {
   messaging?: MessagingClient;
@@ -42,6 +43,7 @@ export class AgentBridge {
   private projectBootstrap: BridgeProjectBootstrap;
   private messageRouter: BridgeMessageRouter;
   private hookServer: BridgeHookServer;
+  private capturePoller: BridgeCapturePoller;
   private stateManager: IStateManager;
   private registry: AgentRegistry;
   private bridgeConfig: BridgeConfig;
@@ -67,6 +69,12 @@ export class AgentBridge {
       stateManager: this.stateManager,
       pendingTracker: this.pendingTracker,
       reloadChannelMappings: () => this.projectBootstrap.reloadChannelMappings(),
+    });
+    this.capturePoller = new BridgeCapturePoller({
+      messaging: this.messaging,
+      tmux: this.tmux,
+      stateManager: this.stateManager,
+      pendingTracker: this.pendingTracker,
     });
   }
 
@@ -116,6 +124,7 @@ export class AgentBridge {
     this.projectBootstrap.bootstrapProjects();
     this.messageRouter.register();
     this.hookServer.start();
+    this.capturePoller.start();
 
     console.log('✅ Discode is running');
     console.log(`📡 Server listening on port ${this.bridgeConfig.hookServerPort || 18470}`);
@@ -253,6 +262,7 @@ export class AgentBridge {
 
   async stop(): Promise<void> {
     this.hookServer.stop();
+    this.capturePoller.stop();
     await this.messaging.disconnect();
   }
 }

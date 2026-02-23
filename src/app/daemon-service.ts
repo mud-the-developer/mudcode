@@ -1,6 +1,7 @@
 import { existsSync } from 'fs';
-import { resolve } from 'path';
+import { dirname, resolve } from 'path';
 import { defaultDaemonManager } from '../daemon.js';
+import type { DaemonLaunchSpec } from '../daemon.js';
 
 export type EnsureDaemonRunningResult = {
   alreadyRunning: boolean;
@@ -8,6 +9,71 @@ export type EnsureDaemonRunningResult = {
   port: number;
   logFile: string;
 };
+
+function resolveTsDaemonEntryPoint(): string {
+  const entryPointCandidates = [
+    // Bundled CLI output places daemon entry under dist/src.
+    resolve(import.meta.dirname, '../src/daemon-entry.js'),
+    // Legacy build layout.
+    resolve(import.meta.dirname, '../daemon-entry.js'),
+    // Source layout for direct TS execution.
+    resolve(import.meta.dirname, '../daemon-entry.ts'),
+    resolve(import.meta.dirname, '../src/daemon-entry.ts'),
+  ];
+
+  return entryPointCandidates.find((candidate) => existsSync(candidate)) ?? entryPointCandidates[0];
+}
+
+function resolveRustDaemonLaunch(): DaemonLaunchSpec {
+  const binaryFromEnv = process.env.DISCODE_RS_BIN?.trim();
+  if (binaryFromEnv) {
+    return {
+      command: binaryFromEnv,
+      args: [],
+    };
+  }
+
+  const binName = process.platform === 'win32' ? 'discode-rs.exe' : 'discode-rs';
+  const execDir = dirname(process.execPath);
+  const binaryCandidates = [
+    resolve(execDir, binName),
+    resolve(execDir, 'bin', binName),
+    resolve(import.meta.dirname, '../../discode-rs/target/release', binName),
+    resolve(import.meta.dirname, '../../discode-rs/target/debug', binName),
+    resolve(import.meta.dirname, '../../../discode-rs/target/release', binName),
+    resolve(import.meta.dirname, '../../../discode-rs/target/debug', binName),
+    resolve(process.cwd(), 'discode-rs/target/release', binName),
+    resolve(process.cwd(), 'discode-rs/target/debug', binName),
+  ];
+
+  const binary = binaryCandidates.find((candidate) => existsSync(candidate));
+  if (binary) {
+    return {
+      command: binary,
+      args: [],
+    };
+  }
+
+  const manifestFromEnv = process.env.DISCODE_RS_MANIFEST?.trim();
+  const manifestCandidates = [
+    manifestFromEnv,
+    resolve(import.meta.dirname, '../../discode-rs/Cargo.toml'),
+    resolve(import.meta.dirname, '../../../discode-rs/Cargo.toml'),
+    resolve(process.cwd(), 'discode-rs/Cargo.toml'),
+  ].filter((candidate): candidate is string => !!candidate && candidate.length > 0);
+
+  const manifest = manifestCandidates.find((candidate) => existsSync(candidate));
+  if (!manifest) {
+    throw new Error(
+      'Rust daemon runtime selected, but discode-rs was not found. Build discode-rs or set DISCODE_RS_BIN / DISCODE_RS_MANIFEST.',
+    );
+  }
+
+  return {
+    command: 'cargo',
+    args: ['run', '--manifest-path', manifest, '--quiet'],
+  };
+}
 
 export async function ensureDaemonRunning(): Promise<EnsureDaemonRunningResult> {
   const port = defaultDaemonManager.getPort();
@@ -23,18 +89,12 @@ export async function ensureDaemonRunning(): Promise<EnsureDaemonRunningResult> 
     };
   }
 
-  const entryPointCandidates = [
-    // Bundled CLI output places daemon entry under dist/src.
-    resolve(import.meta.dirname, '../src/daemon-entry.js'),
-    // Legacy build layout.
-    resolve(import.meta.dirname, '../daemon-entry.js'),
-    // Source layout for direct TS execution.
-    resolve(import.meta.dirname, '../daemon-entry.ts'),
-    resolve(import.meta.dirname, '../src/daemon-entry.ts'),
-  ];
-  const entryPoint =
-    entryPointCandidates.find((candidate) => existsSync(candidate)) ?? entryPointCandidates[0];
-  defaultDaemonManager.startDaemon(entryPoint);
+  const runtime = (process.env.DISCODE_DAEMON_RUNTIME || '').trim().toLowerCase();
+  if (runtime === 'rust') {
+    defaultDaemonManager.startDaemon(resolveRustDaemonLaunch());
+  } else {
+    defaultDaemonManager.startDaemon(resolveTsDaemonEntryPoint());
+  }
   const ready = await defaultDaemonManager.waitForReady();
 
   return {

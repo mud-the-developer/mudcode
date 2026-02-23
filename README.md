@@ -13,7 +13,7 @@ Bridge AI agent CLIs to Discord for remote monitoring and control.
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg)](https://www.typescriptlang.org/)
 [![Bun](https://img.shields.io/badge/Bun-1.3+-green.svg)](https://bun.sh/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests](https://img.shields.io/badge/Tests-129%20passing-brightgreen.svg)](./tests)
+[![Tests](https://img.shields.io/badge/Tests-322%20passing-brightgreen.svg)](./tests)
 
 ## Overview
 
@@ -34,7 +34,7 @@ Discode runs your AI agent in tmux and simply relays output to Discord - no wrap
 
 ## Features
 
-- **Multi-Agent Support**: Works with Claude Code, Gemini CLI, and OpenCode
+- **Multi-Agent Support**: Works with Claude Code, Gemini CLI, OpenCode, and OpenAI Codex CLI
 - **Auto-Discovery**: Automatically detects installed AI agents on your system
 - **Real-Time Streaming**: Sends agent outputs to Discord/Slack through event hooks
 - **Project Isolation**: Each project gets a dedicated Discord channel
@@ -42,7 +42,7 @@ Discode runs your AI agent in tmux and simply relays output to Discord - no wrap
 - **Session Management**: Persistent tmux sessions survive disconnections
 - **Rich CLI**: Intuitive commands for setup, control, and monitoring
 - **Type-Safe**: Written in TypeScript with dependency injection pattern
-- **Well-Tested**: 129 unit tests with Vitest
+- **Well-Tested**: 322 unit tests with Vitest
 
 ## Supported Platforms
 
@@ -66,6 +66,7 @@ Discode runs your AI agent in tmux and simply relays output to Discord - no wrap
   - [Claude Code](https://code.claude.com/docs/en/overview)
   - [Gemini CLI](https://github.com/google-gemini/gemini-cli)
   - [OpenCode](https://github.com/OpenCodeAI/opencode)
+  - [OpenAI Codex CLI](https://github.com/openai/codex)
 
 ## Installation
 
@@ -273,8 +274,7 @@ discode new --no-attach  # Start without attaching to tmux
 | **Claude Code** | `claude` | Yes | Official Anthropic CLI |
 | **Gemini CLI** | `gemini` | Yes | Google Gemini CLI |
 | **OpenCode** | `opencode` | Yes | Open-source alternative |
-
-> Note: Codex support is temporarily removed and will be restored once Codex provides hook support. Tracking discussion: https://github.com/openai/codex/discussions/2150
+| **OpenAI Codex CLI** | `codex` | Yes | Uses tmux capture fallback (no native hook) |
 
 ### Agent Detection
 
@@ -325,6 +325,7 @@ Config values can be overridden with environment variables:
 | `TMUX_SHARED_SESSION_NAME` | No | Shared tmux session name (without prefix) | `bridge` |
 | `DISCODE_DEFAULT_AGENT_CLI` | No | Default AI CLI used by `discode new` when agent is omitted | First installed CLI |
 | `HOOK_SERVER_PORT` | No | Port for the hook server | `18470` |
+| `AGENT_DISCORD_CAPTURE_POLL_MS` | No | Poll interval (ms) for non-hook agents like Codex | `3000` |
 
 ```bash
 DISCORD_BOT_TOKEN=token discode daemon start
@@ -352,6 +353,14 @@ npm run build:release:binaries:single  # Build only current OS/arch binary
 npm run pack:release               # Create npm tarballs in dist/release
 ```
 
+Rust daemon sidecar (optional, for `DISCODE_DAEMON_RUNTIME=rust`) can be bundled into each platform package:
+
+- `DISCODE_RS_BIN` - one binary path used for all targets
+- `DISCODE_RS_BIN_<SUFFIX>` - per-target binary path (example: `DISCODE_RS_BIN_LINUX_X64`)
+- `DISCODE_RS_PREBUILT_DIR` - directory containing prebuilt `discode-rs-*` binaries
+- If no path is provided for the host target, `build-binaries` auto-attempts `cargo build --release` from `discode-rs/`
+- `DISCODE_RS_SKIP_LOCAL_BUILD=1` - disable that auto-build fallback
+
 ### Testing
 
 ```bash
@@ -360,7 +369,7 @@ bun run test:watch    # Watch mode
 bun run test:coverage # Coverage report
 ```
 
-Test suite includes 129 tests covering:
+Test suite includes 322 tests covering:
 - Agent adapters
 - State management
 - Discord client
@@ -374,7 +383,7 @@ Test suite includes 129 tests covering:
 discode/
 ├── bin/                  # CLI entry point (discode)
 ├── src/
-│   ├── agents/           # Agent adapters (Claude, Gemini, OpenCode)
+│   ├── agents/           # Agent adapters (Claude, Gemini, OpenCode, Codex)
 │   ├── capture/          # shared message parsing utilities
 │   ├── config/           # Configuration management
 │   ├── discord/          # Discord client and message handlers
@@ -414,7 +423,7 @@ const daemon = new DaemonManager(mockStorage);
 
 - TypeScript strict mode enabled
 - ESM modules with `.js` extensions in imports
-- Vitest with 129 passing tests
+- Vitest with 322 passing tests
 - No unused locals/parameters (enforced by `tsconfig.json`)
 
 ## Troubleshooting

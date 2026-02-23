@@ -146,6 +146,47 @@ describe('DaemonManager', () => {
     expect(storage.readFile('/test/daemon.pid', 'utf-8')).toBe('12345');
   });
 
+  it('startDaemon() with entrypoint keeps Bun default runtime', () => {
+    const storage = new MockStorage();
+    const pm = createMockProcessManager();
+    const dm = new DaemonManager(storage, pm as any, '/test', 9999);
+
+    dm.startDaemon('/path/to/entry.js');
+
+    expect(pm.spawn).toHaveBeenCalledWith(
+      'bun',
+      ['/path/to/entry.js'],
+      expect.objectContaining({
+        detached: true,
+        env: expect.objectContaining({
+          HOOK_SERVER_PORT: '9999',
+        }),
+      }),
+    );
+  });
+
+  it('startDaemon() accepts explicit launch spec', () => {
+    const storage = new MockStorage();
+    const pm = createMockProcessManager();
+    const dm = new DaemonManager(storage, pm as any, '/test', 9999);
+
+    dm.startDaemon({
+      command: 'cargo',
+      args: ['run', '--manifest-path', '/repo/discode-rs/Cargo.toml', '--quiet'],
+    });
+
+    expect(pm.spawn).toHaveBeenCalledWith(
+      'cargo',
+      ['run', '--manifest-path', '/repo/discode-rs/Cargo.toml', '--quiet'],
+      expect.objectContaining({
+        detached: true,
+        env: expect.objectContaining({
+          HOOK_SERVER_PORT: '9999',
+        }),
+      }),
+    );
+  });
+
   it('startDaemon() throws when no PID assigned', () => {
     const storage = new MockStorage();
     const pm = createMockProcessManager();

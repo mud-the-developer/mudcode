@@ -9,17 +9,17 @@ AI 에이전트 CLI를 Discord에 연결하여 원격 모니터링 및 협업을
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg)](https://www.typescriptlang.org/)
 [![Bun](https://img.shields.io/badge/Bun-1.3+-green.svg)](https://bun.sh/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests](https://img.shields.io/badge/Tests-129%20passing-brightgreen.svg)](./tests)
+[![Tests](https://img.shields.io/badge/Tests-322%20passing-brightgreen.svg)](./tests)
 
 ## 개요
 
-Discode는 AI 코딩 어시스턴트(Claude Code, OpenCode)를 Discord에 연결하여 원격 모니터링과 협업을 가능하게 합니다. Discord 채널을 통해 AI 에이전트의 작업을 실시간으로 관찰하고, 팀과 진행 상황을 공유하며, 여러 프로젝트를 동시에 추적할 수 있습니다.
+Discode는 AI 코딩 어시스턴트(Claude Code, Gemini CLI, OpenCode, OpenAI Codex CLI)를 Discord에 연결하여 원격 모니터링과 협업을 가능하게 합니다. Discord 채널을 통해 AI 에이전트의 작업을 실시간으로 관찰하고, 팀과 진행 상황을 공유하며, 여러 프로젝트를 동시에 추적할 수 있습니다.
 
 이 브리지는 이벤트 훅 기반 아키텍처를 사용하여 에이전트 결과를 Discord/Slack 채널로 즉시 전달합니다. 각 프로젝트는 고유한 채널을 가지며, 단일 글로벌 데몬이 모든 연결을 효율적으로 관리합니다.
 
 ## 기능
 
-- **다중 에이전트 지원**: Claude Code와 OpenCode 지원
+- **다중 에이전트 지원**: Claude Code, Gemini CLI, OpenCode, OpenAI Codex CLI 지원
 - **자동 검색**: 시스템에 설치된 AI 에이전트 자동 감지
 - **실시간 스트리밍**: 에이전트 이벤트 훅으로 Discord/Slack에 즉시 전달
 - **프로젝트 격리**: 각 프로젝트가 전용 Discord 채널 보유
@@ -28,7 +28,7 @@ Discode는 AI 코딩 어시스턴트(Claude Code, OpenCode)를 Discord에 연결
 - **YOLO 모드**: 에이전트 자율성을 위한 `--dangerously-skip-permissions` 플래그 옵션
 - **풍부한 CLI**: 설정, 제어, 모니터링을 위한 직관적인 명령어
 - **타입 안전성**: 의존성 주입 패턴을 사용한 TypeScript 작성
-- **충분한 테스트**: Vitest를 사용한 129개의 단위 테스트
+- **충분한 테스트**: Vitest를 사용한 322개의 단위 테스트
 
 ## 사전 요구사항
 
@@ -40,7 +40,9 @@ Discode는 AI 코딩 어시스턴트(Claude Code, OpenCode)를 Discord에 연결
 - **Slack (선택)**: Discord 대신 Slack을 사용하려면 [Slack 설정 가이드](docs/SLACK_SETUP.ko.md)를 참고하세요.
 - **AI 에이전트**: 다음 중 하나 이상:
   - [Claude Code](https://code.claude.com/docs/en/overview)
+  - [Gemini CLI](https://github.com/google-gemini/gemini-cli)
   - [OpenCode](https://github.com/OpenCodeAI/opencode)
+  - [OpenAI Codex CLI](https://github.com/openai/codex)
 
 ## 설치
 
@@ -266,7 +268,7 @@ discode new --no-attach  # tmux에 연결하지 않고 시작
 
 - **Daemon Manager**: Discord 연결을 관리하는 단일 글로벌 프로세스
 - **Hook Server**: 에이전트 훅 이벤트를 받아 Discord/Slack으로 중계
-- **Agent Registry**: 다중 에이전트 지원을 위한 팩토리 패턴 (Claude, OpenCode)
+- **Agent Registry**: 다중 에이전트 지원을 위한 팩토리 패턴 (Claude, Gemini, OpenCode, Codex)
 - **State Manager**: 프로젝트 상태, 세션, 채널 추적
 - **Dependency Injection**: 스토리지, 실행, 환경을 위한 인터페이스 (테스트 가능, 모킹 가능)
 
@@ -294,8 +296,7 @@ discode new --no-attach  # tmux에 연결하지 않고 시작
 | **Claude Code** | `claude` | 예 | 예 | 공식 Anthropic CLI |
 | **Gemini CLI** | `gemini` | 예 | 아니오 | Google Gemini CLI |
 | **OpenCode** | `opencode` | 예 | 예 | 오픈소스 대안 |
-
-> 참고: Codex 지원은 현재 일시적으로 제거되었으며, Codex에 hook 지원이 추가되면 다시 지원할 예정입니다. 관련 논의: https://github.com/openai/codex/discussions/2150
+| **OpenAI Codex CLI** | `codex` | 예 | 아니오 | 네이티브 훅 미지원, tmux capture fallback 사용 |
 
 ### 에이전트 감지
 
@@ -348,7 +349,10 @@ discode config --server SERVER_ID    # 서버 ID 수동 설정
 DISCORD_BOT_TOKEN=token discode daemon start
 DISCORD_GUILD_ID=server_id discode new
 HOOK_SERVER_PORT=18470 discode new
+AGENT_DISCORD_CAPTURE_POLL_MS=3000 discode daemon start
 ```
+
+`AGENT_DISCORD_CAPTURE_POLL_MS`는 Codex처럼 네이티브 훅이 없는 에이전트의 tmux 출력 폴링 주기(ms)를 제어합니다.
 
 ## 개발
 
@@ -370,7 +374,7 @@ bun run test:watch    # 워치 모드
 bun run test:coverage # 커버리지 리포트
 ```
 
-테스트 스위트는 다음을 포함하는 129개의 테스트로 구성:
+테스트 스위트는 다음을 포함하는 322개의 테스트로 구성:
 - 에이전트 어댑터
 - 상태 관리
 - Discord 클라이언트
@@ -383,7 +387,7 @@ bun run test:coverage # 커버리지 리포트
 ```
 discode/
 ├── src/
-│   ├── agents/           # 에이전트 어댑터 (Claude, Gemini, OpenCode)
+│   ├── agents/           # 에이전트 어댑터 (Claude, Gemini, OpenCode, Codex)
 │   ├── core/             # 핵심 로직 (데몬, 훅 처리, 상태)
 │   ├── infra/            # 인프라 (스토리지, 셸, 환경)
 │   ├── types/            # TypeScript 인터페이스
@@ -421,7 +425,7 @@ const daemon = new DaemonManager(mockStorage);
 
 - TypeScript strict 모드 활성화
 - `.js` 확장자를 사용하는 ESM 모듈
-- 129개의 통과 테스트를 가진 Vitest
+- 322개의 통과 테스트를 가진 Vitest
 - 사용하지 않는 지역 변수/매개변수 없음 (`tsconfig.json`으로 강제)
 
 ## 문제 해결

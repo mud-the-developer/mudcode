@@ -15,4 +15,9 @@ describe('createAgentRegistry', () => {
     const registry = createAgentRegistry();
     expect(registry.get('gemini')).toBeDefined();
   });
+
+  it('registers codex adapter', () => {
+    const registry = createAgentRegistry();
+    expect(registry.get('codex')).toBeDefined();
+  });
 });

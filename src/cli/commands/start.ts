@@ -4,6 +4,7 @@ import { stateManager } from '../../state/index.js';
 import { config, getConfigPath, validateConfig } from '../../config/index.js';
 import { agentRegistry } from '../../agents/index.js';
 import { listProjectInstances } from '../../state/instances.js';
+import { ensureDaemonRunning } from '../../app/daemon-service.js';
 import type { TmuxCliOptions } from '../common/types.js';
 import {
   applyTmuxCliOverrides,
@@ -41,6 +42,8 @@ export async function startCommand(options: TmuxCliOptions & { project?: string;
       process.exit(1);
     }
 
+    const runtime = (process.env.DISCODE_DAEMON_RUNTIME || '').trim().toLowerCase();
+
     console.log(chalk.cyan('\n🚀 Starting Discode\n'));
     console.log(chalk.white('Configuration:'));
     console.log(chalk.gray(`   Config file: ${getConfigPath()}`));
@@ -61,6 +64,31 @@ export async function startCommand(options: TmuxCliOptions & { project?: string;
       console.log(chalk.gray(`     Path: ${project.projectPath}`));
     }
     console.log('');
+
+    if (runtime === 'rust') {
+      const daemon = await ensureDaemonRunning();
+      if (daemon.alreadyRunning) {
+        console.log(chalk.green(`✅ Rust daemon already running (port ${daemon.port})`));
+      } else if (daemon.ready) {
+        console.log(chalk.green(`✅ Rust daemon started (port ${daemon.port})`));
+      } else {
+        console.log(chalk.yellow(`⚠️  Rust daemon may not be ready yet. Check logs: ${daemon.logFile}`));
+      }
+
+      if (options.attach) {
+        const project = activeProjects[0];
+        const sessionName = project.tmuxSession;
+        const firstInstance = listProjectInstances(project)[0];
+        const windowName = firstInstance
+          ? resolveProjectWindowName(project, firstInstance.agentType, effectiveConfig.tmux, firstInstance.instanceId)
+          : undefined;
+        const attachTarget = windowName ? `${sessionName}:${windowName}` : sessionName;
+        console.log(chalk.cyan(`\n📺 Attaching to ${attachTarget}...\n`));
+        attachToTmux(sessionName, windowName);
+      }
+
+      return;
+    }
 
     const bridge = new AgentBridge({ config: effectiveConfig });
 

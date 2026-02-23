@@ -13,6 +13,13 @@ import { FileStorage } from './infra/storage.js';
 
 const DEFAULT_PORT = 18470;
 
+export interface DaemonLaunchSpec {
+  command: string;
+  args: string[];
+  /** Wrap command with `caffeinate -ims` on macOS to prevent sleep. Defaults to true. */
+  keepAwakeOnMac?: boolean;
+}
+
 class SystemProcessManager implements IProcessManager {
   spawn(command: string, args: string[], options: any) {
     return cpSpawn(command, args, options);
@@ -72,7 +79,7 @@ export class DaemonManager {
   /**
    * Start the global bridge daemon
    */
-  startDaemon(entryPoint: string): number {
+  startDaemon(entryPointOrSpec: string | DaemonLaunchSpec): number {
     if (!existsSync(this.daemonDir)) {
       mkdirSync(this.daemonDir, { recursive: true });
     }
@@ -83,11 +90,26 @@ export class DaemonManager {
     const out = openSync(logFile, 'a');
     const err = openSync(logFile, 'a');
 
-    // Use caffeinate on macOS to prevent sleep while daemon is running.
-    // Runtime is Bun to match CLI/TUI execution.
     const isMac = process.platform === 'darwin';
-    const command = isMac ? 'caffeinate' : 'bun';
-    const args = isMac ? ['-ims', 'bun', entryPoint] : [entryPoint];
+    let command: string;
+    let args: string[];
+    let keepAwakeOnMac = true;
+
+    if (typeof entryPointOrSpec === 'string') {
+      // Backward-compatible default: run daemon entry with Bun runtime.
+      command = 'bun';
+      args = [entryPointOrSpec];
+    } else {
+      command = entryPointOrSpec.command;
+      args = [...entryPointOrSpec.args];
+      keepAwakeOnMac = entryPointOrSpec.keepAwakeOnMac !== false;
+    }
+
+    // Use caffeinate on macOS to prevent sleep while daemon is running.
+    if (isMac && keepAwakeOnMac) {
+      args = ['-ims', command, ...args];
+      command = 'caffeinate';
+    }
 
     const child = this.processManager.spawn(command, args, {
       detached: true,

@@ -12,7 +12,25 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 function spawnAndExit(command, args) {
-  const result = childProcess.spawnSync(command, args, { stdio: 'inherit' });
+  const result = childProcess.spawnSync(command, args, {
+    stdio: 'inherit',
+    env: process.env,
+  });
+  if (result.error) {
+    console.error(result.error.message);
+    process.exit(1);
+  }
+  process.exit(typeof result.status === 'number' ? result.status : 0);
+}
+
+function spawnAndExitWithEnv(command, args, envPatch) {
+  const result = childProcess.spawnSync(command, args, {
+    stdio: 'inherit',
+    env: {
+      ...process.env,
+      ...envPatch,
+    },
+  });
   if (result.error) {
     console.error(result.error.message);
     process.exit(1);
@@ -83,12 +101,20 @@ function findPlatformBinary() {
       const packageJsonPath = require.resolve(`${pkg}/package.json`);
       const packageDir = path.dirname(packageJsonPath);
       const binaryPath = path.join(packageDir, 'bin', binaryName);
-      if (fs.existsSync(binaryPath)) return binaryPath;
+      if (fs.existsSync(binaryPath)) {
+        return { binaryPath, packageDir };
+      }
     } catch {
       // try next package candidate
     }
   }
   return null;
+}
+
+function resolveRustSidecarFromDir(dir) {
+  const sidecarName = os.platform() === 'win32' ? 'discode-rs.exe' : 'discode-rs';
+  const sidecarPath = path.join(dir, sidecarName);
+  return fs.existsSync(sidecarPath) ? sidecarPath : null;
 }
 
 function findLocalDevEntrypoint() {
@@ -102,12 +128,20 @@ function findLocalDevEntrypoint() {
 
 const explicitBinary = process.env.DISCODE_BIN_PATH;
 if (explicitBinary) {
+  const rustSidecar = resolveRustSidecarFromDir(path.dirname(explicitBinary));
+  if (rustSidecar && !process.env.DISCODE_RS_BIN) {
+    spawnAndExitWithEnv(explicitBinary, process.argv.slice(2), { DISCODE_RS_BIN: rustSidecar });
+  }
   spawnAndExit(explicitBinary, process.argv.slice(2));
 }
 
-const binary = findPlatformBinary();
-if (binary) {
-  spawnAndExit(binary, process.argv.slice(2));
+const platformBinary = findPlatformBinary();
+if (platformBinary) {
+  const rustSidecar = resolveRustSidecarFromDir(path.join(platformBinary.packageDir, 'bin'));
+  if (rustSidecar && !process.env.DISCODE_RS_BIN) {
+    spawnAndExitWithEnv(platformBinary.binaryPath, process.argv.slice(2), { DISCODE_RS_BIN: rustSidecar });
+  }
+  spawnAndExit(platformBinary.binaryPath, process.argv.slice(2));
 }
 
 const devEntrypoint = findLocalDevEntrypoint();
