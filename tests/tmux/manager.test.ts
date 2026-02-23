@@ -307,6 +307,28 @@ describe('TmuxManager', () => {
     });
   });
 
+  describe('getPaneCurrentCommand', () => {
+    it('returns pane_current_command from resolved target pane', () => {
+      const originalExec = executor.exec.bind(executor);
+      executor.exec = (command: string): string => {
+        executor.calls.push({ method: 'exec', command });
+        if (command.includes('tmux list-panes')) {
+          return '1\tcodex\tcodex\n';
+        }
+        if (command.includes('pane_current_command')) {
+          return 'codex\n';
+        }
+        return '';
+      };
+
+      const command = tmux.getPaneCurrentCommand('agent-session', 'demo-codex', 'codex');
+      expect(command).toBe('codex');
+      expect(executor.calls[1].command).toContain('pane_current_command');
+
+      executor.exec = originalExec;
+    });
+  });
+
   describe('capturePaneFromWindow', () => {
     it('returns captured pane content', () => {
       executor.nextResult = '0\n';

@@ -519,6 +519,22 @@ export class TmuxManager {
   }
 
   /**
+   * Return the current foreground command of the resolved pane.
+   * Useful to detect whether an agent TUI is running or the pane is at shell prompt.
+   */
+  getPaneCurrentCommand(sessionName: string, windowName: string, paneHint?: string): string {
+    const target = this.resolveWindowTarget(sessionName, windowName, paneHint);
+    const escapedTarget = escapeShellArg(target);
+    try {
+      return this.executor.exec(`tmux display-message -p -t ${escapedTarget} "#{pane_current_command}"`).trim();
+    } catch (error) {
+      throw new Error(
+        `Failed to read current command for window '${windowName}' in session '${sessionName}': ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /**
    * Capture pane output from a specific window
    * @param sessionName Full session name (already includes prefix)
    */

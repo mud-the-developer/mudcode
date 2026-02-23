@@ -77,6 +77,16 @@ export class BridgeMessageRouter {
       try {
         if (resolvedAgentType === 'opencode') {
           await this.submitToOpencode(normalizedProject.tmuxSession, windowName, sanitized);
+        } else if (resolvedAgentType === 'codex') {
+          const codexResult = await this.submitToCodex(normalizedProject.tmuxSession, windowName, sanitized);
+          if (codexResult === 'restarted') {
+            await this.deps.pendingTracker.markError(projectName, resolvedAgentType, instanceKey);
+            await messaging.sendToChannel(
+              channelId,
+              '⚠️ Codex pane was not active, so I relaunched `codex` in tmux. Send your message again in a few seconds.',
+            );
+            return;
+          }
         } else {
           this.deps.tmux.sendKeysToWindow(normalizedProject.tmuxSession, windowName, sanitized, resolvedAgentType);
         }
@@ -107,6 +117,39 @@ export class BridgeMessageRouter {
     const delayMs = this.getEnvInt('AGENT_DISCORD_OPENCODE_SUBMIT_DELAY_MS', 75);
     await this.sleep(delayMs);
     this.deps.tmux.sendEnterToWindow(tmuxSession, windowName, 'opencode');
+  }
+
+  private isShellForegroundCommand(command: string): boolean {
+    const normalized = command.trim().toLowerCase().replace(/\.exe$/, '');
+    return new Set([
+      'bash',
+      'zsh',
+      'sh',
+      'fish',
+      'dash',
+      'ksh',
+      'tcsh',
+      'csh',
+      'cmd',
+      'powershell',
+      'pwsh',
+      'nu',
+    ]).has(normalized);
+  }
+
+  private async submitToCodex(tmuxSession: string, windowName: string, prompt: string): Promise<'sent' | 'restarted'> {
+    const foregroundCommand = this.deps.tmux.getPaneCurrentCommand(tmuxSession, windowName, 'codex');
+    if (this.isShellForegroundCommand(foregroundCommand)) {
+      this.deps.tmux.typeKeysToWindow(tmuxSession, windowName, 'codex', 'codex');
+      this.deps.tmux.sendEnterToWindow(tmuxSession, windowName, 'codex');
+      return 'restarted';
+    }
+
+    this.deps.tmux.typeKeysToWindow(tmuxSession, windowName, prompt.trimEnd(), 'codex');
+    const delayMs = this.getEnvInt('AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS', 75);
+    await this.sleep(delayMs);
+    this.deps.tmux.sendEnterToWindow(tmuxSession, windowName, 'codex');
+    return 'sent';
   }
 
   private buildDeliveryFailureGuidance(projectName: string, error: unknown): string {

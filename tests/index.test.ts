@@ -80,6 +80,7 @@ function createMockTmux() {
     sendKeysToWindow: vi.fn(),
     typeKeysToWindow: vi.fn(),
     sendEnterToWindow: vi.fn(),
+    getPaneCurrentCommand: vi.fn().mockReturnValue('claude'),
     capturePaneFromWindow: vi.fn(),
     startAgentInWindow: vi.fn(),
     setSessionEnv: vi.fn(),

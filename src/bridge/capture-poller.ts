@@ -94,7 +94,12 @@ export class BridgeCapturePoller {
           if (previous === undefined) continue;
           if (previous === current) continue;
 
-          const delta = this.extractDelta(previous, current).trim();
+          const delta = this.normalizeDeltaForAgent(
+            instance.agentType,
+            this.extractDelta(previous, current),
+            previous,
+            current,
+          ).trim();
           if (delta.length === 0) continue;
 
           // For non-hook agents, any fresh output is our completion signal.
@@ -130,7 +135,7 @@ export class BridgeCapturePoller {
       return current.slice(overlap);
     }
 
-    return current;
+    return this.extractDeltaByLineAnchor(previous, current);
   }
 
   private longestSuffixPrefix(left: string, right: string): number {
@@ -143,5 +148,60 @@ export class BridgeCapturePoller {
     }
 
     return 0;
+  }
+
+  private extractDeltaByLineAnchor(previous: string, current: string): string {
+    const prevLines = previous.split('\n');
+    const currLines = current.split('\n');
+    if (currLines.length === 0) return '';
+
+    // Use the most recent stable line from previous snapshot as an anchor.
+    for (let i = prevLines.length - 1; i >= 0; i -= 1) {
+      const line = prevLines[i];
+      if (line.trim().length === 0) continue;
+      const anchor = currLines.lastIndexOf(line);
+      if (anchor >= 0 && anchor < currLines.length - 1) {
+        return currLines.slice(anchor + 1).join('\n');
+      }
+      if (anchor === currLines.length - 1) {
+        return '';
+      }
+    }
+
+    // As a last resort for full-screen redraws, send only the tail.
+    return currLines.slice(Math.max(0, currLines.length - 20)).join('\n');
+  }
+
+  private normalizeDeltaForAgent(
+    agentType: string,
+    delta: string,
+    previous: string,
+    current: string,
+  ): string {
+    let normalized = delta;
+
+    if (agentType === 'codex') {
+      normalized = this.stripCodexBootstrapNoise(normalized);
+
+      // Full-screen redraws can still look like huge deltas; reduce to tail.
+      if (normalized.length > 4000 && !current.startsWith(previous)) {
+        const lines = normalized.split('\n');
+        normalized = lines.slice(Math.max(0, lines.length - 24)).join('\n');
+      }
+    }
+
+    return normalized;
+  }
+
+  private stripCodexBootstrapNoise(text: string): string {
+    const lines = text.split('\n');
+    const filtered = lines.filter((line) => {
+      const trimmed = line.trim();
+      if (trimmed.length === 0) return false;
+      if (/^export AGENT_DISCORD_[A-Z_]+=/.test(trimmed)) return false;
+      if (/^\$?\s*cd\s+".*"\s*&&\s*codex\b/.test(trimmed)) return false;
+      return true;
+    });
+    return filtered.join('\n');
   }
 }
