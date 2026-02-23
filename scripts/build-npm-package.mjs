@@ -12,6 +12,20 @@ const rootPkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
 const manifest = JSON.parse(readFileSync(join(releaseRoot, 'manifest.json'), 'utf-8'));
 const optionalDependencies = manifest.binaries || {};
 
+function normalizeScope(raw) {
+  const trimmed = (raw || '').trim();
+  if (!trimmed) return '';
+  return trimmed.startsWith('@') ? trimmed : `@${trimmed}`;
+}
+
+function resolvePublishName(pkgName) {
+  const envScope = normalizeScope(process.env.DISCODE_NPM_SCOPE);
+  if (envScope) return `${envScope}/discode`;
+
+  if (typeof pkgName === 'string' && pkgName.length > 0) return pkgName;
+  return '@siisee11/discode';
+}
+
 rmSync(metaDir, { recursive: true, force: true });
 mkdirSync(join(metaDir, 'bin'), { recursive: true });
 
@@ -22,12 +36,12 @@ copyFileSync(join(root, 'README.md'), join(metaDir, 'README.md'));
 chmodSync(join(metaDir, 'bin', 'discode'), 0o755);
 
 const publishPkg = {
-  name: rootPkg.name,
+  name: resolvePublishName(rootPkg.name),
   version: rootPkg.version,
   description: rootPkg.description,
   license: rootPkg.license,
   bin: {
-    discode: './bin/discode',
+    discode: 'bin/discode',
   },
   scripts: {
     postinstall: 'node ./postinstall.mjs',

@@ -351,6 +351,7 @@ bun run dev            # Dev mode
 npm run build:release              # Build platform binaries + npm meta package
 npm run build:release:binaries:single  # Build only current OS/arch binary
 npm run pack:release               # Create npm tarballs in dist/release
+npm run publish:release:dry-run    # Build + validate npm publish flow without uploading
 ```
 
 Rust daemon sidecar (optional, for `DISCODE_DAEMON_RUNTIME=rust`) can be bundled into each platform package:
@@ -360,6 +361,13 @@ Rust daemon sidecar (optional, for `DISCODE_DAEMON_RUNTIME=rust`) can be bundled
 - `DISCODE_RS_PREBUILT_DIR` - directory containing prebuilt `discode-rs-*` binaries
 - If no path is provided for the host target, `build-binaries` auto-attempts `cargo build --release` from `discode-rs/`
 - `DISCODE_RS_SKIP_LOCAL_BUILD=1` - disable that auto-build fallback
+- `DISCODE_NPM_SCOPE=@your-npm-id` - override publish scope for release packages (meta + platform binaries)
+
+One-shot publish under your own npm scope:
+
+```bash
+DISCODE_NPM_SCOPE=@your-npm-id npm run publish:release
+```
 
 ### Testing
 

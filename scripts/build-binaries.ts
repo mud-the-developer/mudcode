@@ -17,8 +17,30 @@ type Target = {
 const root = resolve(import.meta.dirname, '..');
 const outRoot = join(root, 'dist', 'release');
 const pkgJson = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8')) as {
+  name: string;
   version: string;
 };
+
+function normalizeScope(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  return trimmed.startsWith('@') ? trimmed : `@${trimmed}`;
+}
+
+function resolvePackageScope(packageName: string): string {
+  const envScope = process.env.DISCODE_NPM_SCOPE;
+  if (envScope) {
+    const normalized = normalizeScope(envScope);
+    if (normalized) return normalized;
+  }
+
+  const match = packageName.match(/^(@[^/]+)\//);
+  if (match) return match[1];
+
+  return '@siisee11';
+}
+
+const packageScope = resolvePackageScope(pkgJson.name);
 
 const allTargets: Target[] = [
   { os: 'darwin', arch: 'arm64' },
@@ -170,9 +192,10 @@ for (const target of targets) {
   const suffix = [target.os, target.arch, target.baseline ? 'baseline' : undefined, target.abi]
     .filter(Boolean)
     .join('-');
-  const packageName = `@siisee11/discode-${suffix}`;
+  const packageName = `${packageScope}/discode-${suffix}`;
   const compileTarget = `bun-${suffix}`;
-  const packageDir = join(outRoot, packageName.replace('@siisee11/', ''));
+  const packageDirName = packageName.split('/')[1] || packageName;
+  const packageDir = join(outRoot, packageDirName);
   const binDir = join(packageDir, 'bin');
   const binaryName = target.os === 'windows' ? 'discode.exe' : 'discode';
   const outfile = join(binDir, binaryName);

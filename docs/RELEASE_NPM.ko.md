@@ -1,6 +1,6 @@
 # Discode npm 배포 가이드
 
-`discode`는 플랫폼별 바이너리 패키지 + 메타 패키지(`@siisee11/discode`)로 배포합니다.
+`discode`는 플랫폼별 바이너리 패키지 + 메타 패키지(`@<scope>/discode`)로 배포합니다.
 
 ## 1) 사전 준비
 
@@ -26,7 +26,7 @@ npm whoami
 `package.json`의 아래 값을 동일 버전으로 올립니다.
 
 - `version`
-- `optionalDependencies`의 `@siisee11/discode-*`
+- `optionalDependencies`의 `@<scope>/discode-*` (루트 패키지를 직접 배포할 경우)
 
 예: `0.6.2` -> `0.6.3`
 
@@ -37,6 +37,7 @@ npm run typecheck
 npm run build
 npm run build:release
 npm run pack:release
+npm run publish:release:dry-run
 ```
 
 단일 플랫폼만 빠르게 확인할 때:
@@ -61,6 +62,12 @@ npm run build:release:binaries:single
 DISCODE_RS_PREBUILT_DIR=/path/to/prebuilt npm run build:release:binaries
 ```
 
+배포 스코프를 내 npm 계정으로 바꾸려면:
+
+```bash
+DISCODE_NPM_SCOPE=@your-npm-id npm run build:release
+```
+
 ## 5) 산출물 확인
 
 - 플랫폼 패키지: `dist/release/discode-*`
@@ -68,7 +75,20 @@ DISCODE_RS_PREBUILT_DIR=/path/to/prebuilt npm run build:release:binaries
 - 바이너리: `dist/release/discode-*/bin/discode`
 - Rust sidecar 포함 시: `dist/release/discode-*/bin/discode-rs`
 
-## 6) 플랫폼 패키지 배포
+## 6) 한 번에 배포 (권장)
+
+```bash
+DISCODE_NPM_SCOPE=@your-npm-id npm run publish:release
+```
+
+- 내부적으로 `build:release`를 실행한 뒤 플랫폼 패키지 + 메타 패키지를 순차 publish 합니다.
+- 업로드 전에 검증만 하려면:
+
+```bash
+DISCODE_NPM_SCOPE=@your-npm-id npm run publish:release:dry-run
+```
+
+## 7) 플랫폼 패키지 수동 배포
 
 ```bash
 npm publish --access public --workspaces=false dist/release/discode-darwin-arm64
@@ -84,24 +104,24 @@ npm publish --access public --workspaces=false dist/release/discode-windows-x64
 npm publish --access public --workspaces=false dist/release/discode-windows-x64-baseline
 ```
 
-## 7) 메타 패키지 배포
+## 8) 메타 패키지 수동 배포
 
 ```bash
 npm publish --access public --workspaces=false dist/release/npm/discode
 ```
 
-## 8) 배포 확인
+## 9) 배포 확인
 
 ```bash
-npm view @siisee11/discode version
-npm view @siisee11/discode-darwin-arm64 version
-npm view @siisee11/discode-linux-x64 version
+npm view @your-npm-id/discode version
+npm view @your-npm-id/discode-darwin-arm64 version
+npm view @your-npm-id/discode-linux-x64 version
 ```
 
 설치 확인:
 
 ```bash
-npm i -g @siisee11/discode@latest
+npm i -g @your-npm-id/discode@latest
 discode --version
 ```
 

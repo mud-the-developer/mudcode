@@ -11,6 +11,45 @@ const require = createRequire(import.meta.url);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+function normalizeScope(raw) {
+  const trimmed = (raw || '').trim();
+  if (!trimmed) return '';
+  return trimmed.startsWith('@') ? trimmed : `@${trimmed}`;
+}
+
+function readSelfPackageName() {
+  const candidates = [
+    path.join(__dirname, '..', 'package.json'),
+    path.join(__dirname, '..', '..', 'package.json'),
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(candidate, 'utf-8'));
+      if (typeof parsed?.name === 'string' && parsed.name.length > 0) {
+        return parsed.name;
+      }
+    } catch {
+      // continue
+    }
+  }
+
+  return '';
+}
+
+function resolvePackageScope() {
+  const envScope = normalizeScope(process.env.DISCODE_NPM_SCOPE);
+  if (envScope) return envScope;
+
+  const packageName = readSelfPackageName();
+  const match = packageName.match(/^(@[^/]+)\//);
+  if (match) return match[1];
+
+  return '@siisee11';
+}
+
+const packageScope = resolvePackageScope();
+
 function spawnAndExit(command, args) {
   const result = childProcess.spawnSync(command, args, {
     stdio: 'inherit',
@@ -82,7 +121,7 @@ function packageCandidates() {
   };
   const platform = platformMap[os.platform()] || os.platform();
   const arch = archMap[os.arch()] || os.arch();
-  const scopedBase = `@siisee11/discode-${platform}-${arch}`;
+  const scopedBase = `${packageScope}/discode-${platform}-${arch}`;
 
   const candidates = [];
   if (platform === 'linux' && isMuslLinux()) {
@@ -150,5 +189,5 @@ if (devEntrypoint) {
 }
 
 console.error('No runnable discode binary found for this platform.');
-console.error('Try reinstalling with: npm i -g @siisee11/discode');
+console.error(`Try reinstalling with: npm i -g ${packageScope}/discode`);
 process.exit(1);

@@ -5,7 +5,7 @@
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
-    "discode": "./bin/discode"
+    "discode": "bin/discode"
   },
   "scripts": {
     "dev": "tsx src/index.ts",
@@ -25,6 +25,8 @@
     "build:release:npm": "node scripts/build-npm-package.mjs",
     "build:release": "npm run build:release:binaries && npm run build:release:npm",
     "pack:release": "node scripts/pack-release.mjs",
+    "publish:release": "node scripts/publish-release.mjs",
+    "publish:release:dry-run": "node scripts/publish-release.mjs --dry-run",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
