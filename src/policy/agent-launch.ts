@@ -24,11 +24,15 @@ export function buildAgentLaunchEnv(params: {
   instanceId: string;
   permissionAllow: boolean;
 }): Record<string, string> {
+  const codexSandboxNetworkDisabled =
+    params.agentType === 'codex' ? process.env.MUDCODE_CODEX_SANDBOX_NETWORK_DISABLED?.trim() : undefined;
+
   return {
     AGENT_DISCORD_PROJECT: params.projectName,
     AGENT_DISCORD_PORT: String(params.port),
     AGENT_DISCORD_AGENT: params.agentType,
     AGENT_DISCORD_INSTANCE: params.instanceId,
+    ...(codexSandboxNetworkDisabled !== undefined ? { CODEX_SANDBOX_NETWORK_DISABLED: codexSandboxNetworkDisabled } : {}),
     ...(params.permissionAllow ? { OPENCODE_PERMISSION: '{"*":"allow"}' } : {}),
   };
 }

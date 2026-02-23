@@ -28,6 +28,7 @@ describe('agent launch policy', () => {
       permissionAllow: false,
     });
     expect(withoutPermission.OPENCODE_PERMISSION).toBeUndefined();
+    expect(withoutPermission.CODEX_SANDBOX_NETWORK_DISABLED).toBeUndefined();
 
     const withPermission = buildAgentLaunchEnv({
       projectName: 'my-project',
@@ -37,5 +38,32 @@ describe('agent launch policy', () => {
       permissionAllow: true,
     });
     expect(withPermission.OPENCODE_PERMISSION).toBe('{"*":"allow"}');
+
+    const codexEnv = buildAgentLaunchEnv({
+      projectName: 'my-project',
+      port: 18470,
+      agentType: 'codex',
+      instanceId: 'codex',
+      permissionAllow: false,
+    });
+    expect(codexEnv.CODEX_SANDBOX_NETWORK_DISABLED).toBeUndefined();
+  });
+
+  it('allows overriding codex sandbox network flag via environment variable', () => {
+    const previous = process.env.MUDCODE_CODEX_SANDBOX_NETWORK_DISABLED;
+    try {
+      process.env.MUDCODE_CODEX_SANDBOX_NETWORK_DISABLED = '1';
+      const codexEnv = buildAgentLaunchEnv({
+        projectName: 'my-project',
+        port: 18470,
+        agentType: 'codex',
+        instanceId: 'codex',
+        permissionAllow: false,
+      });
+
+      expect(codexEnv.CODEX_SANDBOX_NETWORK_DISABLED).toBe('1');
+    } finally {
+      process.env.MUDCODE_CODEX_SANDBOX_NETWORK_DISABLED = previous;
+    }
   });
 });
