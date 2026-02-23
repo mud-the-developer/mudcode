@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 /**
- * CLI entry point for discode
+ * CLI entry point for mudcode
  */
 
 import yargs from 'yargs';
@@ -31,6 +31,28 @@ import { confirmYesNo, isInteractiveShell } from '../src/cli/common/interactive.
 export { newCommand, attachCommand, stopCommand };
 
 declare const DISCODE_VERSION: string | undefined;
+const CLI_COMMAND_NAME = 'mudcode';
+
+function resolveCliPackageName(): string {
+  const fromEnv = process.env.DISCODE_NPM_PACKAGE?.trim();
+  if (fromEnv) return fromEnv;
+
+  const candidates = [
+    resolve(import.meta.dirname, '../package.json'),
+    resolve(import.meta.dirname, '../../package.json'),
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(readFileSync(candidate, 'utf-8')) as { name?: string };
+      if (parsed.name) return parsed.name;
+    } catch {
+      // Try next candidate.
+    }
+  }
+
+  return process.env.npm_package_name || '@mudramo/mudcode';
+}
 
 function resolveCliVersion(): string {
   if (typeof DISCODE_VERSION !== 'undefined' && DISCODE_VERSION) {
@@ -55,6 +77,7 @@ function resolveCliVersion(): string {
 }
 
 const CLI_VERSION = resolveCliVersion();
+const CLI_PACKAGE_NAME = resolveCliPackageName();
 
 function parseSemver(version: string): [number, number, number] | null {
   const match = version.trim().match(/^v?(\d+)\.(\d+)\.(\d+)/);
@@ -105,7 +128,7 @@ async function fetchLatestCliVersion(timeoutMs: number = 2500): Promise<string |
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch('https://registry.npmjs.org/@siisee11/discode/latest', {
+    const response = await fetch(`https://registry.npmjs.org/${encodeURIComponent(CLI_PACKAGE_NAME)}/latest`, {
       headers: { accept: 'application/json' },
       signal: controller.signal,
     });
@@ -126,10 +149,10 @@ type UpgradeInstallPlan = {
 
 function detectUpgradeInstallPlan(): UpgradeInstallPlan | null {
   if (hasCommand('npm')) {
-    return { label: 'npm', command: 'npm install -g @siisee11/discode@latest' };
+    return { label: 'npm', command: `npm install -g ${CLI_PACKAGE_NAME}@latest` };
   }
   if (hasCommand('bun')) {
-    return { label: 'bun', command: 'bun add -g @siisee11/discode@latest' };
+    return { label: 'bun', command: `bun add -g ${CLI_PACKAGE_NAME}@latest` };
   }
   return null;
 }
@@ -143,7 +166,11 @@ async function restartDaemonIfRunningForUpgrade(): Promise<void> {
 
   const restart = await restartDaemonIfRunning();
   if (!restart.restarted) {
-    console.log(chalk.yellow('⚠️ Could not restart daemon automatically. Restart manually with: discode daemon stop && discode daemon start'));
+    console.log(
+      chalk.yellow(
+        `⚠️ Could not restart daemon automatically. Restart manually with: ${CLI_COMMAND_NAME} daemon stop && ${CLI_COMMAND_NAME} daemon start`,
+      ),
+    );
     return;
   }
 
@@ -174,7 +201,7 @@ async function maybePromptForUpgrade(rawArgs: string[]): Promise<void> {
   if (!latestVersion) return;
   if (compareSemver(latestVersion, CLI_VERSION) <= 0) return;
 
-  console.log(chalk.cyan(`\n⬆️  A new Discode version is available: ${CLI_VERSION} → ${latestVersion}`));
+  console.log(chalk.cyan(`\n⬆️  A new Mudcode version is available: ${CLI_VERSION} → ${latestVersion}`));
   const shouldUpgrade = await confirmYesNo(chalk.white('Upgrade now? [Y/n]: '), true);
   if (!shouldUpgrade) {
     console.log(chalk.gray('   Skipping update for now.'));
@@ -184,7 +211,7 @@ async function maybePromptForUpgrade(rawArgs: string[]): Promise<void> {
   const plan = detectUpgradeInstallPlan();
   if (!plan) {
     console.log(chalk.yellow('⚠️ No supported package manager found for auto-upgrade.'));
-    console.log(chalk.gray('   Install manually: npm install -g @siisee11/discode@latest'));
+    console.log(chalk.gray(`   Install manually: npm install -g ${CLI_PACKAGE_NAME}@latest`));
     return;
   }
 
@@ -195,7 +222,7 @@ async function maybePromptForUpgrade(rawArgs: string[]): Promise<void> {
     await restartDaemonIfRunningForUpgrade();
   } catch (error) {
     console.log(chalk.yellow(`⚠️ Auto-upgrade failed: ${error instanceof Error ? error.message : String(error)}`));
-    console.log(chalk.gray('   You can retry manually: npm install -g @siisee11/discode@latest'));
+    console.log(chalk.gray(`   You can retry manually: npm install -g ${CLI_PACKAGE_NAME}@latest`));
   }
 }
 
@@ -203,7 +230,7 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
   await maybePromptForUpgrade(rawArgs);
 
   await yargs(rawArgs)
-    .scriptName('discode')
+    .scriptName(CLI_COMMAND_NAME)
     .usage('$0 [command]')
     .version(CLI_VERSION)
     .help()
@@ -237,7 +264,7 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
       false,
       (y: Argv) => y.positional('token', { type: 'string', describe: 'Discord bot token (deprecated)' }),
       async (argv: any) => {
-        console.log(chalk.yellow('⚠️ `setup` is deprecated. Use `discode onboard` instead.'));
+        console.log(chalk.yellow(`⚠️ \`setup\` is deprecated. Use \`${CLI_COMMAND_NAME} onboard\` instead.`));
         await onboardCommand({ token: argv.token });
       }
     )
@@ -278,7 +305,7 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
         .option('token', { alias: 't', type: 'string', describe: 'Set Discord bot token' })
         .option('channel', { alias: 'c', type: 'string', describe: 'Set default Discord channel ID override' })
         .option('port', { alias: 'p', type: 'string', describe: 'Set hook server port' })
-        .option('default-agent', { type: 'string', describe: 'Set default AI CLI for `discode new`' })
+        .option('default-agent', { type: 'string', describe: 'Set default AI CLI for `mudcode new`' })
         .option('platform', { type: 'string', choices: ['discord', 'slack'], describe: 'Set messaging platform' })
         .option('slack-bot-token', { type: 'string', describe: 'Set Slack bot token (xoxb-...)' })
         .option('slack-app-token', { type: 'string', describe: 'Set Slack app-level token (xapp-...)' })
@@ -366,7 +393,7 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
     )
     .command(
       'uninstall',
-      'Uninstall discode from this machine',
+      'Uninstall mudcode from this machine',
       (y: Argv) => y
         .option('purge', { type: 'boolean', default: false, describe: 'Also remove ~/.discode and installed bridge plugins' })
         .option('yes', { alias: 'y', type: 'boolean', default: false, describe: 'Skip confirmation prompt' })

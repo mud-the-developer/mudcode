@@ -26,7 +26,7 @@ function resolveTsDaemonEntryPoint(): string {
 
 function resolveTsDaemonLaunch(): string | DaemonLaunchSpec {
   const executableName = basename(process.execPath).toLowerCase();
-  if (executableName === 'discode' || executableName === 'discode.exe') {
+  if (executableName === 'discode' || executableName === 'discode.exe' || executableName === 'mudcode' || executableName === 'mudcode.exe') {
     return {
       command: process.execPath,
       args: ['daemon-runner'],

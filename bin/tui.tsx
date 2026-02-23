@@ -767,7 +767,7 @@ function TuiApp(props: { input: TuiInput; close: () => void }) {
       <box backgroundColor={palette.bg} paddingLeft={2} paddingRight={2} paddingBottom={1}>
         <box border borderColor={palette.border} backgroundColor={palette.panel} flexDirection="column">
           <box paddingLeft={1} paddingRight={1}>
-            <text fg={palette.primary} attributes={TextAttributes.BOLD}>{'discode> '}</text>
+            <text fg={palette.primary} attributes={TextAttributes.BOLD}>{'mudcode> '}</text>
           </box>
           <box paddingLeft={1} paddingRight={1}>
             <textarea

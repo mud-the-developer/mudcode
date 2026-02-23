@@ -47,7 +47,7 @@ export interface BridgeConfig {
   };
   hookServerPort?: number;
   /**
-   * Preferred AI CLI for `discode new` when agent is not explicitly specified.
+   * Preferred AI CLI for `mudcode new` when agent is not explicitly specified.
    */
   defaultAgentCli?: string;
   opencode?: {

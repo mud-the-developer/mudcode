@@ -1,5 +1,5 @@
 /**
- * Main entry point for discode
+ * Main entry point for mudcode
  */
 
 import { DiscordClient } from './discord/client.js';
@@ -81,7 +81,7 @@ export class AgentBridge {
   private createMessagingClient(): MessagingClient {
     if (this.bridgeConfig.messagingPlatform === 'slack') {
       if (!this.bridgeConfig.slack) {
-        throw new Error('Slack is configured as messaging platform but Slack tokens are missing. Run: discode onboard --platform slack');
+        throw new Error('Slack is configured as messaging platform but Slack tokens are missing. Run: mudcode onboard --platform slack');
       }
       return new SlackClient(this.bridgeConfig.slack.botToken, this.bridgeConfig.slack.appToken);
     }
@@ -142,7 +142,7 @@ export class AgentBridge {
     const isSlack = this.bridgeConfig.messagingPlatform === 'slack';
     const guildId = isSlack ? this.stateManager.getWorkspaceId() : this.stateManager.getGuildId();
     if (!guildId) {
-      throw new Error('Server ID not configured. Run: discode config --server <id>');
+      throw new Error('Server ID not configured. Run: mudcode config --server <id>');
     }
 
     // Collect enabled agents (should be only one)

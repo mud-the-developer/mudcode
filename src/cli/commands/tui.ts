@@ -95,7 +95,7 @@ function parseNewCommand(raw: string): {
 function handoffToBunRuntime(): never {
   const scriptPath = process.argv[1];
   if (!scriptPath) {
-    throw new Error('TUI requires Bun runtime. Run with: bun dist/bin/discode.js');
+    throw new Error('TUI requires Bun runtime. Run with: mudcode tui');
   }
 
   const result = spawnSync('bun', [scriptPath, ...process.argv.slice(2)], {
@@ -318,7 +318,7 @@ export async function tuiCommand(options: TmuxCliOptions): Promise<void> {
         reloadStateFromDisk();
         validateConfig();
         if (!stateManager.getGuildId()) {
-          append('⚠️ Not set up yet. Run: discode onboard');
+          append('⚠️ Not set up yet. Run: mudcode onboard');
           return false;
         }
 
@@ -367,7 +367,7 @@ export async function tuiCommand(options: TmuxCliOptions): Promise<void> {
   const isBunRuntime = Boolean((process as { versions?: { bun?: string } }).versions?.bun);
   if (!isBunRuntime) {
     if (process.env.DISCODE_TUI_BUN_HANDOFF === '1') {
-      throw new Error('TUI requires Bun runtime. Run with: bun dist/bin/discode.js');
+      throw new Error('TUI requires Bun runtime. Run with: mudcode tui');
     }
     handoffToBunRuntime();
   }

@@ -90,7 +90,7 @@ async function onboardDiscord(token?: string): Promise<void> {
 
     if (!token && !isInteractiveShell()) {
       console.error(chalk.red('Token is required in non-interactive mode.'));
-      console.log(chalk.gray('Run: discode onboard --token YOUR_DISCORD_BOT_TOKEN'));
+      console.log(chalk.gray('Run: mudcode onboard --token YOUR_DISCORD_BOT_TOKEN'));
       process.exit(1);
     }
 
@@ -180,7 +180,7 @@ async function onboardSlack(options?: { botToken?: string; appToken?: string }):
   if (!botToken) {
     if (!isInteractiveShell()) {
       console.error(chalk.red('Slack tokens are required in non-interactive mode.'));
-      console.log(chalk.gray('Run: discode config --slack-bot-token TOKEN --slack-app-token TOKEN --platform slack'));
+      console.log(chalk.gray('Run: mudcode config --slack-bot-token TOKEN --slack-app-token TOKEN --platform slack'));
       process.exit(1);
     }
     botToken = await prompt(chalk.white('Slack Bot Token (xoxb-...): '));
@@ -251,7 +251,7 @@ export async function onboardCommand(options: {
     console.log(chalk.cyan('\n✨ Onboarding complete!\n'));
     console.log(chalk.white('Next step:'));
     console.log(chalk.gray('   cd <your-project>'));
-    console.log(chalk.gray('   discode new\n'));
+    console.log(chalk.gray('   mudcode new\n'));
   } catch (error) {
     console.error(chalk.red('Onboarding failed:'), error);
     process.exit(1);

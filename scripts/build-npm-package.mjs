@@ -20,20 +20,27 @@ function normalizeScope(raw) {
 
 function resolvePublishName(pkgName) {
   const envScope = normalizeScope(process.env.DISCODE_NPM_SCOPE);
-  if (envScope) return `${envScope}/discode`;
+  const explicitName = (process.env.DISCODE_NPM_NAME || '').trim();
+  if (explicitName) {
+    if (explicitName.startsWith('@')) return explicitName;
+    if (envScope) return `${envScope}/${explicitName}`;
+  }
+  if (envScope) return `${envScope}/mudcode`;
 
   if (typeof pkgName === 'string' && pkgName.length > 0) return pkgName;
-  return '@siisee11/discode';
+  return '@mudramo/mudcode';
 }
 
 rmSync(metaDir, { recursive: true, force: true });
 mkdirSync(join(metaDir, 'bin'), { recursive: true });
 
 copyFileSync(join(root, 'bin', 'discode'), join(metaDir, 'bin', 'discode'));
+copyFileSync(join(root, 'bin', 'mudcode'), join(metaDir, 'bin', 'mudcode'));
 copyFileSync(join(root, 'scripts', 'postinstall.mjs'), join(metaDir, 'postinstall.mjs'));
 copyFileSync(join(root, 'LICENSE'), join(metaDir, 'LICENSE'));
 copyFileSync(join(root, 'README.md'), join(metaDir, 'README.md'));
 chmodSync(join(metaDir, 'bin', 'discode'), 0o755);
+chmodSync(join(metaDir, 'bin', 'mudcode'), 0o755);
 
 const publishPkg = {
   name: resolvePublishName(rootPkg.name),
@@ -41,6 +48,7 @@ const publishPkg = {
   description: rootPkg.description,
   license: rootPkg.license,
   bin: {
+    mudcode: 'bin/mudcode',
     discode: 'bin/discode',
   },
   scripts: {

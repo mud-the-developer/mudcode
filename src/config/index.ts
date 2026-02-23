@@ -131,7 +131,7 @@ export class ConfigManager {
       if (!this.config.slack?.botToken || !this.config.slack?.appToken) {
         throw new Error(
           'Slack tokens not configured.\n' +
-          'Run: discode onboard --platform slack\n' +
+          'Run: mudcode onboard --platform slack\n' +
           'Or set SLACK_BOT_TOKEN and SLACK_APP_TOKEN environment variables'
         );
       }
@@ -139,7 +139,7 @@ export class ConfigManager {
       if (!this.config.discord.token) {
         throw new Error(
           'Discord bot token not configured.\n' +
-          'Run: discode config --token <your-token>\n' +
+          'Run: mudcode config --token <your-token>\n' +
           'Or set DISCORD_BOT_TOKEN environment variable'
         );
       }

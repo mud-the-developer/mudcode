@@ -412,8 +412,8 @@ describe('AgentBridge', () => {
 
       const lastNotice = String(mockMessaging.sendToChannel.mock.calls.at(-1)?.[1] ?? '');
       expect(lastNotice).toContain('agent tmux window is not running');
-      expect(lastNotice).toContain('discode new --name discode');
-      expect(lastNotice).toContain('discode attach discode');
+      expect(lastNotice).toContain('mudcode new --name discode');
+      expect(lastNotice).toContain('mudcode attach discode');
       expect(lastNotice).not.toContain("can't find window");
     });
   });

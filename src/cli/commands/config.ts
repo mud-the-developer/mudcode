@@ -118,14 +118,14 @@ export async function configCommand(options: {
   if (!updated) {
     console.log(chalk.yellow('No options provided. Use --help to see available options.'));
     console.log(chalk.gray('\nExample:'));
-    console.log(chalk.gray('  discode config --token YOUR_BOT_TOKEN'));
-    console.log(chalk.gray('  discode config --server YOUR_SERVER_ID'));
-    console.log(chalk.gray('  discode config --channel 123456789012345678'));
-    console.log(chalk.gray('  discode config --default-agent claude'));
-    console.log(chalk.gray('  discode config --platform slack'));
-    console.log(chalk.gray('  discode config --slack-bot-token xoxb-...'));
-    console.log(chalk.gray('  discode config --slack-app-token xapp-...'));
-    console.log(chalk.gray('  discode config --opencode-permission allow'));
-    console.log(chalk.gray('  discode config --show'));
+    console.log(chalk.gray('  mudcode config --token YOUR_BOT_TOKEN'));
+    console.log(chalk.gray('  mudcode config --server YOUR_SERVER_ID'));
+    console.log(chalk.gray('  mudcode config --channel 123456789012345678'));
+    console.log(chalk.gray('  mudcode config --default-agent claude'));
+    console.log(chalk.gray('  mudcode config --platform slack'));
+    console.log(chalk.gray('  mudcode config --slack-bot-token xoxb-...'));
+    console.log(chalk.gray('  mudcode config --slack-app-token xapp-...'));
+    console.log(chalk.gray('  mudcode config --opencode-permission allow'));
+    console.log(chalk.gray('  mudcode config --show'));
   }
 }

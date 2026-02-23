@@ -6,7 +6,7 @@ import type { MessagingClient } from '../messaging/interface.js';
 function createMessagingClient(): MessagingClient {
   if (config.messagingPlatform === 'slack') {
     if (!config.slack) {
-      throw new Error('Slack is configured as messaging platform but Slack tokens are missing. Run: discode onboard --platform slack');
+      throw new Error('Slack is configured as messaging platform but Slack tokens are missing. Run: mudcode onboard --platform slack');
     }
     return new SlackClient(config.slack.botToken, config.slack.appToken);
   }

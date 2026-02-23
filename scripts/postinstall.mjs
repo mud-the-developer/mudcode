@@ -16,6 +16,6 @@ const platform = platformMap[os.platform()] || os.platform();
 const arch = archMap[os.arch()] || os.arch();
 
 if ((platform !== 'darwin' && platform !== 'linux' && platform !== 'windows') || (arch !== 'x64' && arch !== 'arm64')) {
-  console.warn(`[discode] No prebuilt binary available for ${platform}/${arch}.`);
-  console.warn('[discode] You can still run from source with Node + Bun installed.');
+  console.warn(`[mudcode] No prebuilt binary available for ${platform}/${arch}.`);
+  console.warn('[mudcode] You can still run from source with Node + Bun installed.');
 }

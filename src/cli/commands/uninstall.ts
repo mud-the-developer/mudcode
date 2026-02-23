@@ -1,6 +1,6 @@
 import chalk from 'chalk';
-import { existsSync, rmSync } from 'fs';
-import { join } from 'path';
+import { existsSync, readFileSync, rmSync } from 'fs';
+import { join, resolve } from 'path';
 import { homedir } from 'os';
 import { spawnSync, execSync } from 'child_process';
 import { defaultDaemonManager } from '../../daemon.js';
@@ -24,10 +24,31 @@ function removePathIfExists(path: string): boolean {
 
 type PackageManager = 'npm' | 'bun';
 
-function uninstallViaPackageManager(manager: PackageManager): boolean {
+function resolveCliPackageName(): string {
+  const fromEnv = process.env.DISCODE_NPM_PACKAGE?.trim();
+  if (fromEnv) return fromEnv;
+
+  const candidates = [
+    resolve(import.meta.dirname, '../../../package.json'),
+    resolve(import.meta.dirname, '../../../../package.json'),
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(readFileSync(candidate, 'utf-8')) as { name?: string };
+      if (parsed.name) return parsed.name;
+    } catch {
+      // Try next candidate.
+    }
+  }
+
+  return '@mudramo/mudcode';
+}
+
+function uninstallViaPackageManager(manager: PackageManager, packageName: string): boolean {
   const command = manager === 'npm'
-    ? ['uninstall', '-g', '@siisee11/discode']
-    : ['remove', '-g', '@siisee11/discode'];
+    ? ['uninstall', '-g', packageName]
+    : ['remove', '-g', packageName];
 
   const result = spawnSync(manager, command, { stdio: 'inherit' });
   return !result.error && result.status === 0;
@@ -41,10 +62,11 @@ export async function uninstallCommand(options: {
   const shouldPurge = !!options.purge;
   const skipPackageUninstall = !!options.skipPackageUninstall;
   const isInteractive = isInteractiveShell();
+  const packageName = resolveCliPackageName();
 
   if (!options.yes && isInteractive) {
     const confirmed = await confirmYesNo(
-      chalk.white('Uninstall Discode from this machine? [y/N]: '),
+      chalk.white('Uninstall Mudcode from this machine? [y/N]: '),
       false
     );
     if (!confirmed) {
@@ -53,7 +75,7 @@ export async function uninstallCommand(options: {
     }
   }
 
-  console.log(chalk.cyan('\n🧹 Uninstalling Discode\n'));
+  console.log(chalk.cyan('\n🧹 Uninstalling Mudcode\n'));
 
   const running = await defaultDaemonManager.isRunning();
   if (running) {
@@ -95,10 +117,10 @@ export async function uninstallCommand(options: {
     let packageUninstalled = false;
 
     if (hasCommand('npm')) {
-      packageUninstalled = uninstallViaPackageManager('npm') || packageUninstalled;
+      packageUninstalled = uninstallViaPackageManager('npm', packageName) || packageUninstalled;
     }
     if (hasCommand('bun')) {
-      packageUninstalled = uninstallViaPackageManager('bun') || packageUninstalled;
+      packageUninstalled = uninstallViaPackageManager('bun', packageName) || packageUninstalled;
     }
 
     if (packageUninstalled) {
@@ -106,13 +128,13 @@ export async function uninstallCommand(options: {
     } else {
       console.log(chalk.yellow('⚠️ Could not run global package uninstall automatically.'));
       console.log(chalk.gray('   Try one of:'));
-      console.log(chalk.gray('   npm uninstall -g @siisee11/discode'));
-      console.log(chalk.gray('   bun remove -g @siisee11/discode'));
+      console.log(chalk.gray(`   npm uninstall -g ${packageName}`));
+      console.log(chalk.gray(`   bun remove -g ${packageName}`));
     }
   }
 
   if (!shouldPurge) {
-    console.log(chalk.gray('\nTip: use `discode uninstall --purge --yes` to remove config/state/plugins too.'));
+    console.log(chalk.gray('\nTip: use `mudcode uninstall --purge --yes` to remove config/state/plugins too.'));
   }
 
   console.log(chalk.cyan('\n✨ Uninstall complete\n'));

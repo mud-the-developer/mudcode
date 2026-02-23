@@ -160,15 +160,15 @@ export class BridgeMessageRouter {
       return (
         `⚠️ I couldn't deliver your message because the agent tmux window is not running.\n` +
         `Please restart the agent session, then send your message again:\n` +
-        `1) \`discode new --name ${projectName}\`\n` +
-        `2) \`discode attach ${projectName}\``
+        `1) \`mudcode new --name ${projectName}\`\n` +
+        `2) \`mudcode attach ${projectName}\``
       );
     }
 
     return (
       `⚠️ I couldn't deliver your message to the tmux agent session.\n` +
       `Please confirm the agent is running, then try again.\n` +
-      `If needed, restart with \`discode new --name ${projectName}\`.`
+      `If needed, restart with \`mudcode new --name ${projectName}\`.`
     );
   }
 }

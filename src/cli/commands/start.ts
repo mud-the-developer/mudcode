@@ -23,7 +23,7 @@ export async function startCommand(options: TmuxCliOptions & { project?: string;
 
     if (projects.length === 0) {
       console.log(chalk.yellow('⚠️  No projects configured.'));
-      console.log(chalk.gray('   Run `discode new` in a project directory first.'));
+      console.log(chalk.gray('   Run `mudcode new` in a project directory first.'));
       process.exit(1);
     }
 
@@ -38,7 +38,7 @@ export async function startCommand(options: TmuxCliOptions & { project?: string;
 
     if (options.attach && !options.project) {
       console.log(chalk.red('--attach requires --project option'));
-      console.log(chalk.gray('Example: discode start -p myproject --attach'));
+      console.log(chalk.gray('Example: mudcode start -p myproject --attach'));
       process.exit(1);
     }
 

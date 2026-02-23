@@ -5,6 +5,7 @@
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
+    "mudcode": "bin/mudcode",
     "discode": "bin/discode"
   },
   "scripts": {

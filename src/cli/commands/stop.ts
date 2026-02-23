@@ -90,7 +90,7 @@ export async function stopCommand(
 
     const staleTuiCount = cleanupStaleDiscodeTuiProcesses();
     if (staleTuiCount > 0) {
-      console.log(chalk.yellow(`⚠️ Cleaned ${staleTuiCount} stale discode TUI process(es).`));
+      console.log(chalk.yellow(`⚠️ Cleaned ${staleTuiCount} stale mudcode TUI process(es).`));
     }
 
     console.log(chalk.cyan('\n✨ Done\n'));
@@ -159,7 +159,7 @@ export async function stopCommand(
 
   const staleTuiCount = cleanupStaleDiscodeTuiProcesses();
   if (staleTuiCount > 0) {
-    console.log(chalk.yellow(`⚠️ Cleaned ${staleTuiCount} stale discode TUI process(es).`));
+    console.log(chalk.yellow(`⚠️ Cleaned ${staleTuiCount} stale mudcode TUI process(es).`));
   }
 
   console.log(chalk.cyan('\n✨ Done\n'));

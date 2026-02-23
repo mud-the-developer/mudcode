@@ -29,7 +29,7 @@ export function statusCommand(options: TmuxCliOptions) {
   console.log(chalk.cyan('\n📂 Projects:\n'));
 
   if (projects.length === 0) {
-    console.log(chalk.gray('   No projects configured. Run `discode new` in a project directory.'));
+    console.log(chalk.gray('   No projects configured. Run `mudcode new` in a project directory.'));
   } else {
     for (const project of projects) {
       const sessionActive = sessions.some((s) => s.name === project.tmuxSession);

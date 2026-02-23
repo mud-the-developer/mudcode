@@ -37,7 +37,7 @@ export async function newCommand(
 
     const isSlack = effectiveConfig.messagingPlatform === 'slack';
     if (!(isSlack ? stateManager.getWorkspaceId() : stateManager.getGuildId())) {
-      console.error(chalk.red('Not set up yet. Run: discode onboard'));
+      console.error(chalk.red('Not set up yet. Run: mudcode onboard'));
       process.exit(1);
     }
 
@@ -47,10 +47,10 @@ export async function newCommand(
 
     const staleTuiCount = cleanupStaleDiscodeTuiProcesses();
     if (staleTuiCount > 0) {
-      console.log(chalk.yellow(`⚠️ Cleaned ${staleTuiCount} stale discode TUI process(es).`));
+      console.log(chalk.yellow(`⚠️ Cleaned ${staleTuiCount} stale mudcode TUI process(es).`));
     }
 
-    console.log(chalk.cyan(`\n🚀 discode new — ${projectName}\n`));
+    console.log(chalk.cyan(`\n🚀 mudcode new — ${projectName}\n`));
 
     const tmux = new TmuxManager(effectiveConfig.tmux.sessionPrefix);
     const prunedProjects = pruneStaleProjects(tmux, effectiveConfig.tmux);
@@ -220,10 +220,10 @@ export async function newCommand(
       try {
         ensureProjectTuiPane(tmux, sessionName, statusWindowName, options);
       } catch (error) {
-        console.log(chalk.yellow(`⚠️ Could not start discode TUI pane: ${error instanceof Error ? error.message : String(error)}`));
+        console.log(chalk.yellow(`⚠️ Could not start mudcode TUI pane: ${error instanceof Error ? error.message : String(error)}`));
       }
     } else {
-      console.log(chalk.gray('   Non-interactive shell detected; skipping automatic discode TUI pane startup.'));
+      console.log(chalk.gray('   Non-interactive shell detected; skipping automatic mudcode TUI pane startup.'));
     }
     console.log(chalk.cyan('\n✨ Ready!\n'));
     console.log(chalk.gray(`   Project:  ${projectName}`));
@@ -240,7 +240,7 @@ export async function newCommand(
       return;
     }
 
-    console.log(chalk.gray(`\n   To attach later: discode attach ${projectName}\n`));
+    console.log(chalk.gray(`\n   To attach later: mudcode attach ${projectName}\n`));
   } catch (error) {
     console.error(chalk.red('Error:'), error);
     process.exit(1);

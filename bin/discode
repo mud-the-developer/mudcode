@@ -10,6 +10,7 @@ import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const selfPackageName = readSelfPackageName();
 
 function normalizeScope(raw) {
   const trimmed = (raw || '').trim();
@@ -53,7 +54,10 @@ const packageScope = resolvePackageScope();
 function spawnAndExit(command, args) {
   const result = childProcess.spawnSync(command, args, {
     stdio: 'inherit',
-    env: process.env,
+    env: {
+      ...process.env,
+      ...(selfPackageName ? { DISCODE_NPM_PACKAGE: selfPackageName } : {}),
+    },
   });
   if (result.error) {
     console.error(result.error.message);
@@ -67,6 +71,7 @@ function spawnAndExitWithEnv(command, args, envPatch) {
     stdio: 'inherit',
     env: {
       ...process.env,
+      ...(selfPackageName ? { DISCODE_NPM_PACKAGE: selfPackageName } : {}),
       ...envPatch,
     },
   });
@@ -188,6 +193,7 @@ if (devEntrypoint) {
   spawnAndExit(process.execPath, [devEntrypoint, ...process.argv.slice(2)]);
 }
 
-console.error('No runnable discode binary found for this platform.');
-console.error(`Try reinstalling with: npm i -g ${packageScope}/discode`);
+const packageName = readSelfPackageName() || `${packageScope}/mudcode`;
+console.error('No runnable mudcode binary found for this platform.');
+console.error(`Try reinstalling with: npm i -g ${packageName}`);
 process.exit(1);

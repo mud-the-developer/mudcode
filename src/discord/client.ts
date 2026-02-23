@@ -121,7 +121,7 @@ export class DiscordClient implements MessagingClient {
   async connect(): Promise<void> {
     if (!this.token) {
       throw new Error(
-        'Discord login failed: bot token is empty. Run `discode config --token <your-token>` or `discode onboard`.'
+        'Discord login failed: bot token is empty. Run `mudcode config --token <your-token>` or `mudcode onboard`.'
       );
     }
 
@@ -141,7 +141,7 @@ export class DiscordClient implements MessagingClient {
         if (/invalid token/i.test(rawMessage)) {
           reject(
             new Error(
-              'Discord login failed: invalid bot token. Run `discode config --token <your-token>` or `discode onboard`.'
+              'Discord login failed: invalid bot token. Run `mudcode config --token <your-token>` or `mudcode onboard`.'
             )
           );
           return;

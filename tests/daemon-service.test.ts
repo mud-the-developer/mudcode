@@ -53,14 +53,14 @@ describe('daemon-service runtime selection', () => {
     expect(hoisted.defaultDaemonManager.startDaemon).toHaveBeenCalledWith(expect.any(String));
   });
 
-  it('uses daemon-runner command when running from packaged discode executable', async () => {
-    Object.defineProperty(process, 'execPath', { value: '/tmp/discode', configurable: true });
+  it('uses daemon-runner command when running from packaged mudcode executable', async () => {
+    Object.defineProperty(process, 'execPath', { value: '/tmp/mudcode', configurable: true });
     const mod = await import('../src/app/daemon-service.js');
 
     await mod.ensureDaemonRunning();
 
     expect(hoisted.defaultDaemonManager.startDaemon).toHaveBeenCalledWith({
-      command: '/tmp/discode',
+      command: '/tmp/mudcode',
       args: ['daemon-runner'],
       keepAwakeOnMac: false,
     });

@@ -34,7 +34,18 @@ export function attachToTmux(sessionName: string, windowName?: string): void {
   }
 }
 
-const TUI_PROCESS_COMMAND_MARKERS = ['/dist/bin/discode.js tui', '/bin/discode.js tui', 'discode.js tui', '/bin/discode tui', 'discode tui'];
+const TUI_PROCESS_COMMAND_MARKERS = [
+  '/dist/bin/discode.js tui',
+  '/dist/bin/mudcode.js tui',
+  '/bin/discode.js tui',
+  '/bin/mudcode.js tui',
+  'discode.js tui',
+  'mudcode.js tui',
+  '/bin/discode tui',
+  '/bin/mudcode tui',
+  'discode tui',
+  'mudcode tui',
+];
 
 function isDiscodeTuiProcess(command: string): boolean {
   return TUI_PROCESS_COMMAND_MARKERS.some((marker) => command.includes(marker));
@@ -288,11 +299,17 @@ export function ensureProjectTuiPane(
     } else {
       const runnerDir = dirname(argvRunner);
       const sourceRunner = resolve(runnerDir, 'discode.ts');
+      const sourceRunnerMudcode = resolve(runnerDir, 'mudcode.ts');
       const distRunner = resolve(runnerDir, '../dist/bin/discode.js');
+      const distRunnerMudcode = resolve(runnerDir, '../dist/bin/mudcode.js');
       if (existsSync(sourceRunner)) {
         commandParts = [bunCommand, sourceRunner, 'tui'];
+      } else if (existsSync(sourceRunnerMudcode)) {
+        commandParts = [bunCommand, sourceRunnerMudcode, 'tui'];
       } else if (existsSync(distRunner)) {
         commandParts = [bunCommand, distRunner, 'tui'];
+      } else if (existsSync(distRunnerMudcode)) {
+        commandParts = [bunCommand, distRunnerMudcode, 'tui'];
       } else {
         commandParts = [argvRunner, 'tui'];
       }
@@ -302,8 +319,11 @@ export function ensureProjectTuiPane(
   if (!commandParts) {
     const fallbackRunners = [
       resolve(import.meta.dirname, '../../../dist/bin/discode.js'),
+      resolve(import.meta.dirname, '../../../dist/bin/mudcode.js'),
       resolve(import.meta.dirname, '../../../bin/discode.ts'),
+      resolve(import.meta.dirname, '../../../bin/mudcode.ts'),
       resolve(import.meta.dirname, '../../../bin/discode.js'),
+      resolve(import.meta.dirname, '../../../bin/mudcode.js'),
     ];
     const fallbackRunner = fallbackRunners.find((runner) => existsSync(runner));
     commandParts = fallbackRunner ? [bunCommand, fallbackRunner, 'tui'] : [process.execPath, 'tui'];
