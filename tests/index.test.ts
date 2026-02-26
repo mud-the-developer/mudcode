@@ -339,7 +339,7 @@ describe('AgentBridge', () => {
       const cb = mockMessaging.onMessage.mock.calls[0][0];
       await cb('claude', 'hello', 'test-project', 'ch-123', 'msg-1');
 
-      expect(mockMessaging.addReactionToMessage).toHaveBeenCalledWith('ch-123', 'msg-1', '⏳');
+      expect(mockMessaging.addReactionToMessage).toHaveBeenCalledWith('ch-123', 'msg-1', '📥');
       const statusMessages = mockMessaging.sendToChannel.mock.calls
         .map((c: any[]) => String(c[1] ?? ''))
         .filter((msg) => msg.includes('받은 메시지') || msg.includes('✅ 작업 완료'));
@@ -384,7 +384,7 @@ describe('AgentBridge', () => {
       const mockTmux = createMockTmux();
       mockTmux.typeKeysToWindow.mockImplementation(() => {
         throw new Error(
-          "Failed to type keys to window 'discode-opencode' in session 'bridge': Command failed: tmux send-keys -t 'bridge:discode-opencode' 'hi'\ncan't find window: discode-opencode",
+          "Failed to type keys to window 'mudcode-opencode' in session 'bridge': Command failed: tmux send-keys -t 'bridge:mudcode-opencode' 'hi'\ncan't find window: mudcode-opencode",
         );
       });
       bridge = new AgentBridge({
@@ -396,10 +396,10 @@ describe('AgentBridge', () => {
       });
 
       mockStateManager.getProject.mockReturnValue({
-        projectName: 'discode',
+        projectName: 'mudcode',
         projectPath: '/test',
         tmuxSession: 'bridge',
-        tmuxWindows: { opencode: 'discode-opencode' },
+        tmuxWindows: { opencode: 'mudcode-opencode' },
         discordChannels: { opencode: 'ch-123' },
         agents: { opencode: true },
         createdAt: new Date(),
@@ -408,12 +408,12 @@ describe('AgentBridge', () => {
 
       await bridge.start();
       const cb = mockMessaging.onMessage.mock.calls[0][0];
-      await cb('opencode', 'hi', 'discode', 'ch-123');
+      await cb('opencode', 'hi', 'mudcode', 'ch-123');
 
       const lastNotice = String(mockMessaging.sendToChannel.mock.calls.at(-1)?.[1] ?? '');
       expect(lastNotice).toContain('agent tmux window is not running');
-      expect(lastNotice).toContain('mudcode new --name discode');
-      expect(lastNotice).toContain('mudcode attach discode');
+      expect(lastNotice).toContain('mudcode new --name mudcode');
+      expect(lastNotice).toContain('mudcode attach mudcode');
       expect(lastNotice).not.toContain("can't find window");
     });
   });

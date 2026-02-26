@@ -10,13 +10,13 @@
 
 관련 테스트 파일:
 
-- `tests/discode-cli.test.ts`
+- `tests/mudcode-cli.test.ts`
 
 ## 수동 확인 (권장)
 
-- [ ] `discode new claude --name demo --attach false` 실행 시 정상 생성
-- [ ] `discode attach demo --instance claude-2` 실행 시 올바른 window attach
-- [ ] `discode stop demo --instance claude-2 --keep-channel` 실행 시 해당 인스턴스만 제거
+- [ ] `mudcode new claude --name demo --attach false` 실행 시 정상 생성
+- [ ] `mudcode attach demo --instance claude-2` 실행 시 올바른 window attach
+- [ ] `mudcode stop demo --instance claude-2 --keep-channel` 실행 시 해당 인스턴스만 제거
 - [ ] 에러 케이스에서 종료 코드/메시지 확인
 
 ## 다음 단계 입력 조건

@@ -26,7 +26,7 @@ function resolveTsDaemonEntryPoint(): string {
 
 function resolveTsDaemonLaunch(): string | DaemonLaunchSpec {
   const executableName = basename(process.execPath).toLowerCase();
-  if (executableName === 'discode' || executableName === 'discode.exe' || executableName === 'mudcode' || executableName === 'mudcode.exe') {
+  if (executableName === 'mudcode' || executableName === 'mudcode.exe' || executableName === 'mudcode' || executableName === 'mudcode.exe') {
     return {
       command: process.execPath,
       args: ['daemon-runner'],
@@ -38,7 +38,7 @@ function resolveTsDaemonLaunch(): string | DaemonLaunchSpec {
 }
 
 function resolveRustDaemonLaunch(): DaemonLaunchSpec {
-  const binaryFromEnv = process.env.DISCODE_RS_BIN?.trim();
+  const binaryFromEnv = process.env.MUDCODE_RS_BIN?.trim();
   if (binaryFromEnv) {
     return {
       command: binaryFromEnv,
@@ -46,17 +46,17 @@ function resolveRustDaemonLaunch(): DaemonLaunchSpec {
     };
   }
 
-  const binName = process.platform === 'win32' ? 'discode-rs.exe' : 'discode-rs';
+  const binName = process.platform === 'win32' ? 'mudcode-rs.exe' : 'mudcode-rs';
   const execDir = dirname(process.execPath);
   const binaryCandidates = [
     resolve(execDir, binName),
     resolve(execDir, 'bin', binName),
-    resolve(import.meta.dirname, '../../discode-rs/target/release', binName),
-    resolve(import.meta.dirname, '../../discode-rs/target/debug', binName),
-    resolve(import.meta.dirname, '../../../discode-rs/target/release', binName),
-    resolve(import.meta.dirname, '../../../discode-rs/target/debug', binName),
-    resolve(process.cwd(), 'discode-rs/target/release', binName),
-    resolve(process.cwd(), 'discode-rs/target/debug', binName),
+    resolve(import.meta.dirname, '../../mudcode-rs/target/release', binName),
+    resolve(import.meta.dirname, '../../mudcode-rs/target/debug', binName),
+    resolve(import.meta.dirname, '../../../mudcode-rs/target/release', binName),
+    resolve(import.meta.dirname, '../../../mudcode-rs/target/debug', binName),
+    resolve(process.cwd(), 'mudcode-rs/target/release', binName),
+    resolve(process.cwd(), 'mudcode-rs/target/debug', binName),
   ];
 
   const binary = binaryCandidates.find((candidate) => existsSync(candidate));
@@ -67,18 +67,18 @@ function resolveRustDaemonLaunch(): DaemonLaunchSpec {
     };
   }
 
-  const manifestFromEnv = process.env.DISCODE_RS_MANIFEST?.trim();
+  const manifestFromEnv = process.env.MUDCODE_RS_MANIFEST?.trim();
   const manifestCandidates = [
     manifestFromEnv,
-    resolve(import.meta.dirname, '../../discode-rs/Cargo.toml'),
-    resolve(import.meta.dirname, '../../../discode-rs/Cargo.toml'),
-    resolve(process.cwd(), 'discode-rs/Cargo.toml'),
+    resolve(import.meta.dirname, '../../mudcode-rs/Cargo.toml'),
+    resolve(import.meta.dirname, '../../../mudcode-rs/Cargo.toml'),
+    resolve(process.cwd(), 'mudcode-rs/Cargo.toml'),
   ].filter((candidate): candidate is string => !!candidate && candidate.length > 0);
 
   const manifest = manifestCandidates.find((candidate) => existsSync(candidate));
   if (!manifest) {
     throw new Error(
-      'Rust daemon runtime selected, but discode-rs was not found. Build discode-rs or set DISCODE_RS_BIN / DISCODE_RS_MANIFEST.',
+      'Rust daemon runtime selected, but mudcode-rs was not found. Build mudcode-rs or set MUDCODE_RS_BIN / MUDCODE_RS_MANIFEST.',
     );
   }
 
@@ -102,7 +102,7 @@ export async function ensureDaemonRunning(): Promise<EnsureDaemonRunningResult> 
     };
   }
 
-  const runtime = (process.env.DISCODE_DAEMON_RUNTIME || '').trim().toLowerCase();
+  const runtime = (process.env.MUDCODE_DAEMON_RUNTIME || '').trim().toLowerCase();
   if (runtime === 'rust') {
     defaultDaemonManager.startDaemon(resolveRustDaemonLaunch());
   } else {

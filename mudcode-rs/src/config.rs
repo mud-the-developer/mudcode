@@ -19,29 +19,29 @@ struct StoredConfig {
     hook_server_port: Option<u16>,
 }
 
-fn default_discode_dir() -> anyhow::Result<PathBuf> {
+fn default_mudcode_dir() -> anyhow::Result<PathBuf> {
     let home = env::var("HOME").context("HOME is not set")?;
-    Ok(Path::new(&home).join(".discode"))
+    Ok(Path::new(&home).join(".mudcode"))
 }
 
 fn resolve_config_path() -> anyhow::Result<PathBuf> {
-    if let Ok(path) = env::var("DISCODE_CONFIG_PATH") {
+    if let Ok(path) = env::var("MUDCODE_CONFIG_PATH") {
         if !path.trim().is_empty() {
             return Ok(PathBuf::from(path));
         }
     }
 
-    Ok(default_discode_dir()?.join("config.json"))
+    Ok(default_mudcode_dir()?.join("config.json"))
 }
 
 fn resolve_state_path() -> anyhow::Result<PathBuf> {
-    if let Ok(path) = env::var("DISCODE_STATE_PATH") {
+    if let Ok(path) = env::var("MUDCODE_STATE_PATH") {
         if !path.trim().is_empty() {
             return Ok(PathBuf::from(path));
         }
     }
 
-    Ok(default_discode_dir()?.join("state.json"))
+    Ok(default_mudcode_dir()?.join("state.json"))
 }
 
 fn read_stored_config(path: &Path) -> StoredConfig {
@@ -99,7 +99,7 @@ pub fn load_runtime_config() -> anyhow::Result<RuntimeConfig> {
 
     if discord_token.is_empty() {
         return Err(anyhow!(
-            "Discord bot token not configured. Set DISCORD_BOT_TOKEN or ~/.discode/config.json token"
+            "Discord bot token not configured. Set DISCORD_BOT_TOKEN or ~/.mudcode/config.json token"
         ));
     }
 

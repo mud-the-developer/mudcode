@@ -1,7 +1,7 @@
 /**
  * Download Discord file attachments and save to project directory.
  *
- * Files are stored under `{projectPath}/.discode/files/` with a
+ * Files are stored under `{projectPath}/.mudcode/files/` with a
  * timestamp-based filename so they can be referenced by agents via
  * the `[file:/path/to/file]` marker convention.
  */
@@ -45,7 +45,7 @@ export function isSupportedFile(attachment: MessageAttachment): boolean {
  * Get the files directory for a project, creating it if needed.
  */
 export function getFilesDir(projectPath: string): string {
-  const dir = join(projectPath, '.discode', 'files');
+  const dir = join(projectPath, '.mudcode', 'files');
   mkdirSync(dir, { recursive: true });
   return dir;
 }

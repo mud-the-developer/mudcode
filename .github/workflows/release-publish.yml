@@ -6,7 +6,7 @@ on:
       scope:
         description: npm scope (example: @your-npm-id)
         required: true
-        default: "@siisee11"
+        default: "@mudramo"
       tag:
         description: npm dist-tag
         required: false
@@ -16,6 +16,14 @@ on:
         required: true
         type: boolean
         default: true
+      profile:
+        description: release target profile
+        required: true
+        type: choice
+        default: linux
+        options:
+          - linux
+          - full
 
 jobs:
   build:
@@ -27,14 +35,20 @@ jobs:
         include:
           - name: linux-x64
             runs_on: ubuntu-latest
+            full_only: false
           - name: linux-arm64
             runs_on: ubuntu-24.04-arm
+            full_only: true
           - name: macos-arm64
             runs_on: macos-14
+            full_only: true
           - name: macos-x64
             runs_on: macos-13
+            full_only: true
           - name: windows-x64
             runs_on: windows-latest
+            full_only: true
+    if: ${{ matrix.full_only != true || inputs.profile == 'full' }}
 
     steps:
       - name: Checkout
@@ -50,8 +64,8 @@ jobs:
 
       - name: Build host release binaries
         env:
-          DISCODE_NPM_SCOPE: ${{ inputs.scope }}
-          DISCODE_RS_SKIP_LOCAL_BUILD: "1"
+          MUDCODE_NPM_SCOPE: ${{ inputs.scope }}
+          MUDCODE_RS_SKIP_LOCAL_BUILD: "1"
         run: bun run build:release:binaries:host
 
       - name: Upload release fragment
@@ -114,17 +128,18 @@ jobs:
 
       - name: Rebuild manifest + npm meta package
         env:
-          DISCODE_NPM_SCOPE: ${{ inputs.scope }}
+          MUDCODE_NPM_SCOPE: ${{ inputs.scope }}
         run: |
           bun run build:release:manifest
           bun run build:release:npm
 
       - name: Publish release packages (bun)
         env:
-          DISCODE_NPM_SCOPE: ${{ inputs.scope }}
+          MUDCODE_NPM_SCOPE: ${{ inputs.scope }}
+          MUDCODE_RELEASE_PROFILE: ${{ inputs.profile }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          ARGS="--pm bun --skip-build --access public --tag ${{ inputs.tag }}"
+          ARGS="--pm bun --skip-build --access public --tag ${{ inputs.tag }} --profile ${{ inputs.profile }}"
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             ARGS="$ARGS --dry-run"
           fi

@@ -4,7 +4,7 @@
 
 현재 코드베이스는 일부 핵심 파일에 책임이 집중되어 있습니다.
 
-- `bin/discode.ts`: CLI 엔트리, 명령 파싱, 온보딩, daemon 제어, tmux 제어, 프로젝트 생명주기 로직이 혼재
+- `bin/mudcode.ts`: CLI 엔트리, 명령 파싱, 온보딩, daemon 제어, tmux 제어, 프로젝트 생명주기 로직이 혼재
 - `src/index.ts` (`AgentBridge`): Discord 라우팅, HTTP 훅 서버, 프로젝트 초기화, 플러그인/훅 설치, 반응 상태 추적까지 단일 클래스에서 처리
 
 이로 인해 변경 영향 범위가 넓고, 테스트 없이 구조 변경 시 회귀 위험이 큽니다.
@@ -20,7 +20,7 @@
 
 ### 포함
 
-- `bin/discode.ts` 명령 로직 분리
+- `bin/mudcode.ts` 명령 로직 분리
 - `src/index.ts`의 `AgentBridge` 내부 책임 분리
 - 중복 유틸(환경변수 export 문자열, 창 이름 규칙, 플러그인 설치 분기) 공통화
 - 테스트 보강
@@ -51,7 +51,7 @@
 
 ## 2단계: CLI 엔트리 분리
 
-목적: `bin/discode.ts`를 조립 전용으로 축소
+목적: `bin/mudcode.ts`를 조립 전용으로 축소
 
 - `src/cli/commands/*.ts`로 명령별 분리
   - 예: `new.ts`, `stop.ts`, `attach.ts`, `onboard.ts`, `daemon.ts`, `config.ts`
@@ -59,11 +59,11 @@
   - `src/cli/common/options.ts` (yargs 옵션 조립)
   - `src/cli/common/output.ts` (출력 포맷/공통 메시지)
   - `src/cli/common/interactive.ts` (prompt/confirm)
-- `bin/discode.ts`에는 명령 등록 + 핸들러 연결만 남김
+- `bin/mudcode.ts`에는 명령 등록 + 핸들러 연결만 남김
 
 산출물
 
-- `bin/discode.ts` 라인 수 대폭 감소
+- `bin/mudcode.ts` 라인 수 대폭 감소
 - 명령별 파일 단위 테스트 가능 구조 확보
 
 ## 3단계: 애플리케이션 서비스 계층 도입
@@ -152,7 +152,7 @@
 
 ## 완료 정의 (Definition of Done)
 
-- `bin/discode.ts`는 엔트리/등록 역할 중심으로 축소됨
+- `bin/mudcode.ts`는 엔트리/등록 역할 중심으로 축소됨
 - `src/index.ts`는 브리지 조립/수명주기 중심으로 축소됨
 - 핵심 흐름(`new`, `stop`, `attach`, bridge start/stop/event`)에 테스트가 존재함
 - 구조 변경 후 기능 회귀가 없고 운영 절차(daemon 재시작 등)와 충돌하지 않음

@@ -8,6 +8,22 @@
 import type { AgentConfig } from '../agents/index.js';
 import type { MessageAttachment } from '../types/index.js';
 
+export interface MessageContext {
+  platform: 'discord' | 'slack';
+  /** Original channel where the user message was posted. */
+  sourceChannelId: string;
+  /** Channel ID used for state lookup/routing (e.g. parent channel for Discord threads). */
+  routeChannelId?: string;
+  authorId?: string;
+  threadId?: string;
+  replyToMessageId?: string;
+  /**
+   * Stable key for conversation-local routing memory.
+   * Example: discord:thread:<threadId>, slack:thread:<channel>:<threadTs>.
+   */
+  conversationKey?: string;
+}
+
 export type MessageCallback = (
   agentType: string,
   content: string,
@@ -15,7 +31,8 @@ export type MessageCallback = (
   channelId: string,
   messageId?: string,
   instanceId?: string,
-  attachments?: MessageAttachment[]
+  attachments?: MessageAttachment[],
+  context?: MessageContext,
 ) => void | Promise<void>;
 
 export interface ChannelInfo {
@@ -37,6 +54,11 @@ export interface MessagingClient {
 
   addReactionToMessage(channelId: string, messageId: string, emoji: string): Promise<void>;
   replaceOwnReactionOnMessage(channelId: string, messageId: string, fromEmoji: string, toEmoji: string): Promise<void>;
+  /**
+   * Optional "assistant is preparing a response" indicator.
+   * Implementations should return a stop function that ends the indicator.
+   */
+  startTypingIndicator?(channelId: string): Promise<() => void>;
 
   createAgentChannels(
     guildId: string,
@@ -51,6 +73,12 @@ export interface MessagingClient {
   getGuilds(): { id: string; name: string }[];
 
   deleteChannel(channelId: string): Promise<boolean>;
+  /**
+   * Optional platform-specific channel archival/rename flow.
+   * Implementations should keep the channel and rename it to a "saved" style name.
+   * Returns the new channel name on success, or null on failure/unsupported platform.
+   */
+  archiveChannel?(channelId: string): Promise<string | null>;
 
   sendApprovalRequest(
     channelId: string,

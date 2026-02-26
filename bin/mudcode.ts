@@ -19,22 +19,29 @@ import { onboardCommand } from '../src/cli/commands/onboard.js';
 import { startCommand } from '../src/cli/commands/start.js';
 import { configCommand } from '../src/cli/commands/config.js';
 import { statusCommand } from '../src/cli/commands/status.js';
+import { healthCommand } from '../src/cli/commands/health.js';
 import { listCommand } from '../src/cli/commands/list.js';
 import { agentsCommand } from '../src/cli/commands/agents.js';
 import { daemonCommand } from '../src/cli/commands/daemon.js';
 import { uninstallCommand } from '../src/cli/commands/uninstall.js';
 import { getDaemonStatus, restartDaemonIfRunning } from '../src/app/daemon-service.js';
 import { main as daemonMain } from '../src/index.js';
+import { config } from '../src/config/index.js';
+import { stateManager } from '../src/state/index.js';
+import { agentRegistry } from '../src/agents/index.js';
+import { TmuxManager } from '../src/tmux/manager.js';
+import { listProjectInstances, normalizeProjectState } from '../src/state/instances.js';
+import { buildAgentLaunchEnv, buildExportPrefix } from '../src/policy/agent-launch.js';
 import { addTmuxOptions } from '../src/cli/common/options.js';
 import { confirmYesNo, isInteractiveShell } from '../src/cli/common/interactive.js';
 
 export { newCommand, attachCommand, stopCommand };
 
-declare const DISCODE_VERSION: string | undefined;
+declare const MUDCODE_VERSION: string | undefined;
 const CLI_COMMAND_NAME = 'mudcode';
 
 function resolveCliPackageName(): string {
-  const fromEnv = process.env.DISCODE_NPM_PACKAGE?.trim();
+  const fromEnv = process.env.MUDCODE_NPM_PACKAGE?.trim();
   if (fromEnv) return fromEnv;
 
   const candidates = [
@@ -55,8 +62,8 @@ function resolveCliPackageName(): string {
 }
 
 function resolveCliVersion(): string {
-  if (typeof DISCODE_VERSION !== 'undefined' && DISCODE_VERSION) {
-    return DISCODE_VERSION;
+  if (typeof MUDCODE_VERSION !== 'undefined' && MUDCODE_VERSION) {
+    return MUDCODE_VERSION;
   }
 
   const candidates = [
@@ -103,7 +110,7 @@ function compareSemver(a: string, b: string): number {
 
 function isSourceRuntime(): boolean {
   const argv1 = process.argv[1] || '';
-  return argv1.endsWith('.ts') || argv1.endsWith('.tsx') || argv1.includes('/bin/discode.ts');
+  return argv1.endsWith('.ts') || argv1.endsWith('.tsx') || argv1.includes('/bin/mudcode.ts');
 }
 
 function hasCommand(command: string): boolean {
@@ -157,11 +164,35 @@ function detectUpgradeInstallPlan(): UpgradeInstallPlan | null {
   return null;
 }
 
+async function performSelfUpgrade(): Promise<boolean> {
+  const plan = detectUpgradeInstallPlan();
+  if (!plan) {
+    console.log(chalk.yellow('⚠️ No supported package manager found for auto-upgrade.'));
+    console.log(chalk.gray(`   Install manually: npm install -g ${CLI_PACKAGE_NAME}@latest`));
+    return false;
+  }
+
+  try {
+    console.log(chalk.gray(`   Running: ${plan.command}`));
+    execSync(plan.command, { stdio: 'inherit' });
+    console.log(chalk.green(`✅ Updated to latest via ${plan.label}`));
+    await restartDaemonIfRunningForUpgrade();
+    return true;
+  } catch (error) {
+    console.log(chalk.yellow(`⚠️ Auto-upgrade failed: ${error instanceof Error ? error.message : String(error)}`));
+    console.log(chalk.gray(`   You can retry manually: npm install -g ${CLI_PACKAGE_NAME}@latest`));
+    return false;
+  }
+}
+
 async function restartDaemonIfRunningForUpgrade(): Promise<void> {
   const status = await getDaemonStatus();
-  if (!status.running) return;
+  const port = status.port || config.hookServerPort || 18470;
+  if (!status.running) {
+    await restartRunningCodexPanesForUpgrade(port);
+    return;
+  }
 
-  const port = status.port;
   console.log(chalk.gray('   Restarting bridge daemon to apply update...'));
 
   const restart = await restartDaemonIfRunning();
@@ -179,18 +210,90 @@ async function restartDaemonIfRunningForUpgrade(): Promise<void> {
   } else {
     console.log(chalk.yellow(`⚠️ Daemon may not be ready yet. Check logs: ${restart.logFile}`));
   }
+
+  await restartRunningCodexPanesForUpgrade(port);
+}
+
+function shouldRestartCodexPanesOnUpgrade(): boolean {
+  const raw = process.env.MUDCODE_RESTART_CODEX_ON_UPDATE?.trim().toLowerCase();
+  if (!raw) return true;
+  return raw !== '0' && raw !== 'false' && raw !== 'no';
+}
+
+async function restartRunningCodexPanesForUpgrade(port: number): Promise<void> {
+  if (!shouldRestartCodexPanesOnUpgrade()) return;
+
+  const codexAdapter = agentRegistry.get('codex');
+  if (!codexAdapter) return;
+
+  const projects = stateManager.listProjects();
+  if (projects.length === 0) return;
+
+  const tmux = new TmuxManager(config.tmux.sessionPrefix);
+  let restartedCount = 0;
+  let failedCount = 0;
+  let sawCodexInstance = false;
+
+  for (const rawProject of projects) {
+    const project = normalizeProjectState(rawProject);
+    for (const instance of listProjectInstances(project)) {
+      if (instance.agentType !== 'codex') continue;
+      sawCodexInstance = true;
+
+      const windowName = instance.tmuxWindow || instance.instanceId;
+      if (!windowName) continue;
+      if (!tmux.sessionExistsFull(project.tmuxSession)) continue;
+      if (!tmux.windowExists(project.tmuxSession, windowName)) continue;
+
+      const launchCommand =
+        buildExportPrefix(
+          buildAgentLaunchEnv({
+            projectName: project.projectName,
+            port,
+            agentType: instance.agentType,
+            instanceId: instance.instanceId,
+            permissionAllow: false,
+          }),
+        ) + codexAdapter.getStartCommand(project.projectPath);
+
+      try {
+        tmux.respawnPaneInWindow(project.tmuxSession, windowName, launchCommand, 'codex');
+        restartedCount += 1;
+      } catch (error) {
+        failedCount += 1;
+        console.log(
+          chalk.yellow(
+            `⚠️ Could not restart Codex pane ${project.tmuxSession}:${windowName}: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        );
+      }
+    }
+  }
+
+  if (!sawCodexInstance) return;
+
+  if (restartedCount > 0) {
+    console.log(chalk.green(`✅ Restarted ${restartedCount} running Codex pane(s) to apply update immediately.`));
+  }
+  if (failedCount > 0) {
+    console.log(
+      chalk.yellow(
+        `⚠️ ${failedCount} Codex pane(s) failed to restart. Re-run manually with: ${CLI_COMMAND_NAME} new codex --name <project>`,
+      ),
+    );
+  }
 }
 
 function shouldCheckForUpdate(rawArgs: string[]): boolean {
   if (!isInteractiveShell()) return false;
-  if (process.env.DISCODE_SKIP_UPDATE_CHECK === '1') return false;
+  if (process.env.MUDCODE_SKIP_UPDATE_CHECK === '1') return false;
   if (isSourceRuntime()) return false;
   if (rawArgs.some((arg) => arg === '--help' || arg === '-h' || arg === '--version' || arg === '-v')) return false;
 
   const command = commandNameFromArgs(rawArgs);
   if (!command) return false;
 
-  if (command === 'tui' || command === 'daemon' || command === 'daemon-runner') return false;
+  if (command === 'tui' || command === 'daemon' || command === 'daemon-runner' || command === 'update') return false;
   return true;
 }
 
@@ -208,22 +311,30 @@ async function maybePromptForUpgrade(rawArgs: string[]): Promise<void> {
     return;
   }
 
-  const plan = detectUpgradeInstallPlan();
-  if (!plan) {
-    console.log(chalk.yellow('⚠️ No supported package manager found for auto-upgrade.'));
-    console.log(chalk.gray(`   Install manually: npm install -g ${CLI_PACKAGE_NAME}@latest`));
+  await performSelfUpgrade();
+}
+
+async function runUpdateCommand(options: { check?: boolean }): Promise<void> {
+  const latestVersion = await fetchLatestCliVersion(4000);
+  if (!latestVersion) {
+    console.log(chalk.yellow('⚠️ Could not fetch the latest version from npm registry.'));
+    console.log(chalk.gray(`   Retry later or run: npm install -g ${CLI_PACKAGE_NAME}@latest`));
     return;
   }
 
-  try {
-    console.log(chalk.gray(`   Running: ${plan.command}`));
-    execSync(plan.command, { stdio: 'inherit' });
-    console.log(chalk.green(`✅ Updated to latest via ${plan.label}`));
-    await restartDaemonIfRunningForUpgrade();
-  } catch (error) {
-    console.log(chalk.yellow(`⚠️ Auto-upgrade failed: ${error instanceof Error ? error.message : String(error)}`));
-    console.log(chalk.gray(`   You can retry manually: npm install -g ${CLI_PACKAGE_NAME}@latest`));
+  const diff = compareSemver(latestVersion, CLI_VERSION);
+  if (diff <= 0) {
+    console.log(chalk.green(`✅ ${CLI_COMMAND_NAME} is up to date (${CLI_VERSION})`));
+    return;
   }
+
+  console.log(chalk.cyan(`⬆️  Update available: ${CLI_VERSION} → ${latestVersion}`));
+  if (options.check) {
+    console.log(chalk.gray(`   Run \`${CLI_COMMAND_NAME} update\` to install.`));
+    return;
+  }
+
+  await performSelfUpgrade();
 }
 
 export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise<void> {
@@ -339,6 +450,17 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
         })
     )
     .command(
+      'health',
+      'Run one-shot diagnostics for config, daemon, tmux, and channel mappings',
+      (y: Argv) => addTmuxOptions(y)
+        .option('json', { type: 'boolean', default: false, describe: 'Print machine-readable JSON output' }),
+      async (argv: any) =>
+        healthCommand({
+          tmuxSharedSessionName: argv.tmuxSharedSessionName,
+          json: argv.json,
+        })
+    )
+    .command(
       'list',
       'List all configured projects',
       (y: Argv) => y.option('prune', { type: 'boolean', describe: 'Remove projects whose tmux window is not running' }),
@@ -379,9 +501,21 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
     )
     .command(
       'daemon <action>',
-      'Manage the global bridge daemon (start|stop|status)',
-      (y: Argv) => y.positional('action', { type: 'string', demandOption: true }),
-      async (argv: any) => daemonCommand(argv.action)
+      'Manage the global bridge daemon (start|stop|status|restart)',
+      (y: Argv) => y
+        .positional('action', { type: 'string', demandOption: true })
+        .option('clear-session', {
+          type: 'boolean',
+          default: false,
+          describe: 'Restart only: kill managed tmux sessions before daemon start',
+        }),
+      async (argv: any) => daemonCommand(argv.action, { clearSession: argv.clearSession })
+    )
+    .command(
+      'update',
+      'Update mudcode to the latest version',
+      (y: Argv) => y.option('check', { type: 'boolean', default: false, describe: 'Only check for updates' }),
+      async (argv: any) => runUpdateCommand({ check: argv.check })
     )
     .command(
       'daemon-runner',
@@ -395,7 +529,7 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
       'uninstall',
       'Uninstall mudcode from this machine',
       (y: Argv) => y
-        .option('purge', { type: 'boolean', default: false, describe: 'Also remove ~/.discode and installed bridge plugins' })
+        .option('purge', { type: 'boolean', default: false, describe: 'Also remove ~/.mudcode and installed bridge plugins' })
         .option('yes', { alias: 'y', type: 'boolean', default: false, describe: 'Skip confirmation prompt' })
         .option('skip-package-uninstall', {
           type: 'boolean',

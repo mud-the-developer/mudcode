@@ -1,4 +1,4 @@
-# Discode - 기술 아키텍처 문서
+# Mudcode - 기술 아키텍처 문서
 
 ## 목차
 
@@ -19,7 +19,7 @@
 
 ### 1.1 프로젝트 목적
 
-discode는 AI 에이전트 CLI(Claude Code, Gemini, OpenCode)의 출력을 Discord로 실시간 브릿징하는 도구입니다. 사용자는 Discord 채널에서 에이전트에게 명령을 보내고, 에이전트의 실행 상태와 결과를 실시간으로 모니터링할 수 있습니다.
+mudcode는 AI 에이전트 CLI(Claude Code, Gemini, OpenCode)의 출력을 Discord로 실시간 브릿징하는 도구입니다. 사용자는 Discord 채널에서 에이전트에게 명령을 보내고, 에이전트의 실행 상태와 결과를 실시간으로 모니터링할 수 있습니다.
 
 ### 1.2 해결하는 문제
 
@@ -30,7 +30,7 @@ discode는 AI 에이전트 CLI(Claude Code, Gemini, OpenCode)의 출력을 Disco
 
 ### 1.3 핵심 가치 제안
 
-- **간단한 설정**: 한 명령어로 전체 세팅 완료 (`discode new`)
+- **간단한 설정**: 한 명령어로 전체 세팅 완료 (`mudcode new`)
 - **실시간 알림**: 에이전트 상태 변화를 즉시 Discord에 전송
 - **프로젝트 독립성**: 각 프로젝트가 독립적인 Discord 채널을 가짐
 - **글로벌 데몬**: 여러 프로젝트를 하나의 백그라운드 프로세스로 관리
@@ -429,7 +429,7 @@ interface ProjectState {
 #### 상태 파일 위치
 
 ```
-~/.discode/state.json
+~/.mudcode/state.json
 ```
 
 #### 상태 파일 구조
@@ -466,7 +466,7 @@ interface ProjectState {
 
 ```typescript
 function loadStoredConfig(): StoredConfig
-// ~/.discode/config.json 로드
+// ~/.mudcode/config.json 로드
 
 function saveConfig(updates: Partial<StoredConfig>): void
 // 설정을 파일에 저장
@@ -484,7 +484,7 @@ function getConfigPath(): string
 #### 설정 파일 위치
 
 ```
-~/.discode/config.json
+~/.mudcode/config.json
 ```
 
 #### 설정 파일 구조
@@ -527,8 +527,8 @@ class DaemonManager {
 #### 데몬 파일 위치
 
 ```
-~/.discode/daemon.pid    # PID 저장
-~/.discode/daemon.log    # 출력 로그
+~/.mudcode/daemon.pid    # PID 저장
+~/.mudcode/daemon.log    # 출력 로그
 ```
 
 #### 설계 결정
@@ -561,7 +561,7 @@ Pending reaction 갱신 (⏳ → ✅/❌)
 ### 4.2 파일 전송
 
 ```
-agent plugin 또는 discode-send
+agent plugin 또는 mudcode-send
   ↓
 POST /send-files
   ↓
@@ -629,7 +629,7 @@ YOLO 모드는 에이전트가 모든 권한 확인을 건너뛰도록 설정합
 **사용 예시:**
 
 ```bash
-discode new --yolo
+mudcode new --yolo
 ```
 
 **환경변수로도 설정 가능:**
@@ -649,13 +649,13 @@ Sandbox 모드는 Claude Code를 격리된 Docker 컨테이너에서 실행합�
 **사용 예시:**
 
 ```bash
-discode new --sandbox
+mudcode new --sandbox
 ```
 
 **YOLO와 Sandbox 동시 사용:**
 
 ```bash
-discode new --yolo --sandbox
+mudcode new --yolo --sandbox
 ```
 
 ### 5.4 에이전트 등록 시스템
@@ -714,7 +714,7 @@ CLI commands communicate with daemon via HTTP POST /reload
 
 ```bash
 # daemon이 없으면 자동으로 시작
-discode new
+mudcode new
   ↓
 DaemonManager.isRunning() → false
   ↓
@@ -732,7 +732,7 @@ waitForReady() - 포트 18470에 연결 시도
 #### 종료
 
 ```bash
-discode daemon stop
+mudcode daemon stop
   ↓
 DaemonManager.stopDaemon()
   ↓
@@ -777,7 +777,7 @@ unlinkSync(pidFile)
 ### 6.5 로그 관리
 
 ```
-~/.discode/daemon.log
+~/.mudcode/daemon.log
 
 모든 stdout/stderr를 파일에 append:
 spawn(command, args, {
@@ -793,7 +793,7 @@ spawn(command, args, {
 
 ```
 ┌────────────────────────────────┐
-│   ~/.discode/     │
+│   ~/.mudcode/     │
 │   config.json                  │
 │ (저장된 설정)                  │
 └────────────────┬───────────────┘
@@ -895,7 +895,7 @@ reload() {
 ### 8.1 onboard - 초기 설정
 
 ```bash
-discode onboard
+mudcode onboard
 ```
 
 **역할**: 토큰 입력, 서버 감지, 기본 AI CLI 선택, OpenCode 권한 모드 설정
@@ -910,13 +910,13 @@ discode onboard
 
 **예시:**
 ```bash
-discode onboard
+mudcode onboard
 ```
 
 ### 8.2 new - 빠른 시작
 
 ```bash
-discode new [agent] [options]
+mudcode new [agent] [options]
 ```
 
 **옵션:**
@@ -936,31 +936,31 @@ discode new [agent] [options]
 ```bash
 # 설치된 에이전트 자동 감지
 cd ~/my-project
-discode new
+mudcode new
 
 # 특정 에이전트 지정
-discode new claude
+mudcode new claude
 
 # YOLO 모드
-discode new --yolo
+mudcode new --yolo
 
 # Sandbox 모드
-discode new --sandbox
+mudcode new --sandbox
 
 # YOLO + Sandbox 모드
-discode new --yolo --sandbox
+mudcode new --yolo --sandbox
 
 # 프로젝트명 지정
-discode new -n my-awesome-project
+mudcode new -n my-awesome-project
 
 # tmux 연결 안 함
-discode new --no-attach
+mudcode new --no-attach
 ```
 
 ### 8.3 init - 프로젝트 초기화
 
 ```bash
-discode init <agent> <description> [options]
+mudcode init <agent> <description> [options]
 ```
 
 **인자:**
@@ -979,10 +979,10 @@ discode init <agent> <description> [options]
 **예시:**
 ```bash
 cd ~/my-project
-discode init claude "백엔드 API 개발"
+mudcode init claude "백엔드 API 개발"
 # → 채널명: "Claude Code - 백엔드 API 개발"
 
-discode init opencode "테스트 코드 작성" -n test-project
+mudcode init opencode "테스트 코드 작성" -n test-project
 # → 프로젝트명: test-project
 # → 채널명: "OpenCode - 테스트 코드 작성"
 ```
@@ -990,7 +990,7 @@ discode init opencode "테스트 코드 작성" -n test-project
 ### 8.4 start - 브릿지 서버 시작
 
 ```bash
-discode start [options]
+mudcode start [options]
 ```
 
 **옵션:**
@@ -1008,19 +1008,19 @@ discode start [options]
 **예시:**
 ```bash
 # 모든 프로젝트 시작
-discode start
+mudcode start
 
 # 특정 프로젝트만
-discode start -p my-project
+mudcode start -p my-project
 
 # 그리고 tmux에 연결
-discode start -p my-project --attach
+mudcode start -p my-project --attach
 ```
 
 ### 8.5 config - 설정 관리
 
 ```bash
-discode config [options]
+mudcode config [options]
 ```
 
 **옵션:**
@@ -1032,22 +1032,22 @@ discode config [options]
 **예시:**
 ```bash
 # 토큰 설정
-discode config --token YOUR_BOT_TOKEN
+mudcode config --token YOUR_BOT_TOKEN
 
 # 서버 ID 설정
-discode config --server 1162617819293263281
+mudcode config --server 1162617819293263281
 
 # 포트 설정
-discode config --port 9999
+mudcode config --port 9999
 
 # 현재 설정 보기
-discode config --show
+mudcode config --show
 ```
 
 ### 8.6 status - 상태 확인
 
 ```bash
-discode status
+mudcode status
 ```
 
 **표시 내용:**
@@ -1059,8 +1059,8 @@ discode status
 ### 8.7 list - 프로젝트 목록
 
 ```bash
-discode list
-discode ls
+mudcode list
+mudcode ls
 ```
 
 설정된 모든 프로젝트 표시
@@ -1068,7 +1068,7 @@ discode ls
 ### 8.8 attach - tmux 연결
 
 ```bash
-discode attach [project]
+mudcode attach [project]
 ```
 
 기존 tmux 세션에 연결
@@ -1076,16 +1076,16 @@ discode attach [project]
 **예시:**
 ```bash
 # 현재 디렉토리명 기반 연결
-discode attach
+mudcode attach
 
 # 특정 프로젝트명
-discode attach my-project
+mudcode attach my-project
 ```
 
 ### 8.9 stop - 프로젝트 중지
 
 ```bash
-discode stop [project] [options]
+mudcode stop [project] [options]
 ```
 
 **옵션:**
@@ -1099,7 +1099,7 @@ discode stop [project] [options]
 ### 8.10 daemon - 데몬 관리
 
 ```bash
-discode daemon <action>
+mudcode daemon <action>
 ```
 
 **action:**
@@ -1109,15 +1109,15 @@ discode daemon <action>
 
 **예시:**
 ```bash
-discode daemon start
-discode daemon status
-discode daemon stop
+mudcode daemon start
+mudcode daemon status
+mudcode daemon stop
 ```
 
 ### 8.11 agents - 에이전트 목록
 
 ```bash
-discode agents
+mudcode agents
 ```
 
 지원하는 모든 에이전트 어댑터 표시
@@ -1127,9 +1127,9 @@ discode agents
 ## 9. 디렉토리 구조
 
 ```
-discode/
+mudcode/
 ├── bin/
-│   └── discode.ts          # CLI 진입점 (commander 기반)
+│   └── mudcode.ts          # CLI 진입점 (commander 기반)
 │
 ├── src/
 │   ├── index.ts                  # AgentBridge 클래스 (메인 로직)
@@ -1177,7 +1177,7 @@ discode/
 
 | 파일 | 역할 | 라인 수 |
 |------|------|--------|
-| `bin/discode.ts` | CLI 명령어 처리 | ~690 |
+| `bin/mudcode.ts` | CLI 명령어 처리 | ~690 |
 | `src/index.ts` | AgentBridge 클래스 (메인 로직) | ~244 |
 | `src/daemon.ts` | 글로벌 데몬 관리 | ~126 |
 | `src/capture/parser.ts` | ANSI 파싱, 메시지 분할 | ~50 |
@@ -1262,7 +1262,7 @@ npm run build        # tsup으로 dist/ 생성
 npm run typecheck    # tsc --noEmit
 
 # 설치
-npm link             # 글로벌 discode 명령어 등록
+npm link             # 글로벌 mudcode 명령어 등록
 ```
 
 ### 10.6 출력 포맷
@@ -1290,7 +1290,7 @@ npm link             # 글로벌 discode 명령어 등록
 | `HOOK_SERVER_PORT` | 18470 | 훅 서버 포트 |
 | `TMUX_SESSION_PREFIX` | "" | tmux 세션 접두사 |
 | `TMUX_SHARED_SESSION_NAME` | "bridge" | 공유 tmux 세션 이름(접두사 제외) |
-| `DISCODE_DEFAULT_AGENT_CLI` | 없음 | `discode new`에서 에이전트 미지정 시 사용할 기본 AI CLI |
+| `MUDCODE_DEFAULT_AGENT_CLI` | 없음 | `mudcode new`에서 에이전트 미지정 시 사용할 기본 AI CLI |
 | `AGENT_DISCORD_PROJECT` | 없음 | 프로젝트명 (tmux에서만) |
 | `AGENT_DISCORD_PORT` | 없음 | 훅 서버 포트 (tmux에서만) |
 | `AGENT_DISCORD_YOLO` | 없음 | YOLO 모드 플래그 (tmux에서만) |
@@ -1300,18 +1300,18 @@ npm link             # 글로벌 discode 명령어 등록
 
 | 파일 | 위치 |
 |------|------|
-| 설정 | `~/.discode/config.json` |
-| 상태 | `~/.discode/state.json` |
-| 데몬 PID | `~/.discode/daemon.pid` |
-| 데몬 로그 | `~/.discode/daemon.log` |
+| 설정 | `~/.mudcode/config.json` |
+| 상태 | `~/.mudcode/state.json` |
+| 데몬 PID | `~/.mudcode/daemon.pid` |
+| 데몬 로그 | `~/.mudcode/daemon.log` |
 
 ### 디버깅 팁
 
-1. **데몬 로그 확인**: `cat ~/.discode/daemon.log`
-2. **프로세스 확인**: `ps aux | grep discode`
+1. **데몬 로그 확인**: `cat ~/.mudcode/daemon.log`
+2. **프로세스 확인**: `ps aux | grep mudcode`
 3. **포트 확인**: `lsof -i :18470`
 4. **tmux 세션 확인**: `tmux list-sessions`
-5. **상태 파일 확인**: `cat ~/.discode/state.json`
+5. **상태 파일 확인**: `cat ~/.mudcode/state.json`
 
 ---
 
@@ -1324,6 +1324,6 @@ npm link             # 글로벌 discode 명령어 등록
 
 ---
 
-**문서 작성자**: discode 프로젝트
+**문서 작성자**: mudcode 프로젝트
 **마지막 업데이트**: 2024-02-07
 **버전**: 0.1.0

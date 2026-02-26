@@ -34,9 +34,9 @@ describe('daemon-service runtime selection', () => {
     vi.clearAllMocks();
     process.env = { ...originalEnv };
     Object.defineProperty(process, 'execPath', { value: originalExecPath, configurable: true });
-    delete process.env.DISCODE_DAEMON_RUNTIME;
-    delete process.env.DISCODE_RS_BIN;
-    delete process.env.DISCODE_RS_MANIFEST;
+    delete process.env.MUDCODE_DAEMON_RUNTIME;
+    delete process.env.MUDCODE_RS_BIN;
+    delete process.env.MUDCODE_RS_MANIFEST;
 
     hoisted.defaultDaemonManager.getPort.mockReturnValue(18470);
     hoisted.defaultDaemonManager.getLogFile.mockReturnValue('/tmp/daemon.log');
@@ -66,25 +66,25 @@ describe('daemon-service runtime selection', () => {
     });
   });
 
-  it('uses explicit Rust binary when DISCODE_DAEMON_RUNTIME=rust and DISCODE_RS_BIN is set', async () => {
-    process.env.DISCODE_DAEMON_RUNTIME = 'rust';
-    process.env.DISCODE_RS_BIN = '/custom/bin/discode-rs';
+  it('uses explicit Rust binary when MUDCODE_DAEMON_RUNTIME=rust and MUDCODE_RS_BIN is set', async () => {
+    process.env.MUDCODE_DAEMON_RUNTIME = 'rust';
+    process.env.MUDCODE_RS_BIN = '/custom/bin/mudcode-rs';
 
     const mod = await import('../src/app/daemon-service.js');
 
     await mod.ensureDaemonRunning();
 
     expect(hoisted.defaultDaemonManager.startDaemon).toHaveBeenCalledWith({
-      command: '/custom/bin/discode-rs',
+      command: '/custom/bin/mudcode-rs',
       args: [],
     });
   });
 
   it('falls back to cargo run when Rust manifest is available', async () => {
-    process.env.DISCODE_DAEMON_RUNTIME = 'rust';
-    process.env.DISCODE_RS_MANIFEST = '/repo/discode-rs/Cargo.toml';
+    process.env.MUDCODE_DAEMON_RUNTIME = 'rust';
+    process.env.MUDCODE_RS_MANIFEST = '/repo/mudcode-rs/Cargo.toml';
 
-    hoisted.existsSync.mockImplementation((candidate: string) => candidate === '/repo/discode-rs/Cargo.toml');
+    hoisted.existsSync.mockImplementation((candidate: string) => candidate === '/repo/mudcode-rs/Cargo.toml');
 
     const mod = await import('../src/app/daemon-service.js');
 
@@ -92,7 +92,7 @@ describe('daemon-service runtime selection', () => {
 
     expect(hoisted.defaultDaemonManager.startDaemon).toHaveBeenCalledWith({
       command: 'cargo',
-      args: ['run', '--manifest-path', '/repo/discode-rs/Cargo.toml', '--quiet'],
+      args: ['run', '--manifest-path', '/repo/mudcode-rs/Cargo.toml', '--quiet'],
     });
   });
 });

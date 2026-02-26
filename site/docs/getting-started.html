@@ -3,28 +3,28 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Discode Docs - Getting Started</title>
-    <meta name="description" content="Get started with Discode in a few commands." />
+    <title>Mudcode Docs - Getting Started</title>
+    <meta name="description" content="Get started with Mudcode in a few commands." />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Nunito+Sans:wght@700;800;900&display=swap"
       rel="stylesheet"
     />
-    <link rel="icon" type="image/png" href="../discode.png" />
+    <link rel="icon" type="image/png" href="../mudcode.png" />
     <link rel="stylesheet" href="./docs.css" />
   </head>
   <body>
     <div class="page">
       <header class="shell topbar">
         <a class="brand" href="../">
-          <img src="../discode.png" alt="Discode crab icon" class="brand-icon" />
-          <span class="brand-label">Discode</span>
+          <img src="../mudcode.png" alt="Mudcode crab icon" class="brand-icon" />
+          <span class="brand-label">Mudcode</span>
         </a>
         <nav class="topnav" aria-label="Primary">
           <a href="../">Home</a>
           <a href="./" aria-current="page">Docs</a>
-          <a href="https://github.com/siisee11/discode" target="_blank" rel="noreferrer">GitHub</a>
+          <a href="https://github.com/mudramo/mudcode" target="_blank" rel="noreferrer">GitHub</a>
           <label class="language-picker">
             <span class="sr-only">Language</span>
             <select data-language-select aria-label="Select language">
@@ -49,8 +49,8 @@
           <article class="doc-article">
             <h1>Getting Started</h1>
             <p class="lead">
-              Discode bridges your local AI coding CLI to Discord channels. Start with prerequisites,
-              onboarding, and one <code>discode new</code> command.
+              Mudcode bridges your local AI coding CLI to Discord channels. Start with prerequisites,
+              onboarding, and one <code>mudcode new</code> command.
             </p>
 
             <section class="doc-section" id="prerequisites">
@@ -67,13 +67,13 @@
             </section>
 
             <section class="doc-section" id="install">
-              <h2>Install Discode</h2>
+              <h2>Install Mudcode</h2>
               <p>Choose one method:</p>
-              <pre class="command"><code>curl -fsSL https://discode.chat/install | bash</code></pre>
-              <pre class="command"><code>npm install -g @siisee11/discode
-bun add -g @siisee11/discode</code></pre>
-              <pre class="command"><code>git clone https://github.com/siisee11/discode.git
-cd discode
+              <pre class="command"><code>curl -fsSL https://mudcode.chat/install | bash</code></pre>
+              <pre class="command"><code>npm install -g @mudramo/mudcode
+bun add -g @mudramo/mudcode</code></pre>
+              <pre class="command"><code>git clone https://github.com/mudramo/mudcode.git
+cd mudcode
 bun install
 bun run build
 bun link</code></pre>
@@ -85,9 +85,9 @@ bun link</code></pre>
                 <code>onboard</code> stores your token, detects server ID, and configures default agent
                 settings.
               </p>
-              <pre class="command"><code>discode onboard</code></pre>
-              <pre class="command"><code>discode config --show
-discode config --server SERVER_ID</code></pre>
+              <pre class="command"><code>mudcode onboard</code></pre>
+              <pre class="command"><code>mudcode config --show
+mudcode config --server SERVER_ID</code></pre>
               <p class="callout">
                 Use <code>onboard</code> for first-time setup. It auto-detects your Discord server. Use
                 <code>config</code> for later edits.
@@ -97,26 +97,26 @@ discode config --server SERVER_ID</code></pre>
             <section class="doc-section" id="first-session">
               <h2>Start your first session</h2>
               <pre class="command"><code>cd ~/projects/my-app
-discode new</code></pre>
+mudcode new</code></pre>
               <p>
                 <code>new</code> can auto-detect installed agents, create a Discord channel, start the daemon,
                 launch tmux, and attach to the session.
               </p>
-              <pre class="command"><code>discode new claude
-discode new --no-attach</code></pre>
+              <pre class="command"><code>mudcode new claude
+mudcode new --no-attach</code></pre>
             </section>
 
             <section class="doc-section" id="next-steps">
               <h2>Next steps</h2>
               <ul>
                 <li>Use <a href="./cli-reference.html">CLI Reference</a> for full command coverage.</li>
-                <li>Check status with <code>discode status</code> and list projects via <code>discode list</code>.</li>
+                <li>Check status with <code>mudcode status</code> and list projects via <code>mudcode list</code>.</li>
                 <li>Detach tmux with <code>Ctrl-b d</code> without stopping the agent.</li>
               </ul>
             </section>
 
             <p class="doc-footer">
-              Source: <a href="https://github.com/siisee11/discode/blob/main/README.md" target="_blank" rel="noreferrer">README.md</a>
+              Source: <a href="https://github.com/mudramo/mudcode/blob/main/README.md" target="_blank" rel="noreferrer">README.md</a>
             </p>
           </article>
         </div>

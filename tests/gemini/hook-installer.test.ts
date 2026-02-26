@@ -14,7 +14,7 @@ describe('gemini hook installer', () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = mkdtempSync(join(tmpdir(), 'discode-gemini-hook-test-'));
+    tempDir = mkdtempSync(join(tmpdir(), 'mudcode-gemini-hook-test-'));
   });
 
   afterEach(() => {
@@ -29,7 +29,7 @@ describe('gemini hook installer', () => {
     const hookPath = installGeminiHook(undefined, tempDir);
     const settingsPath = join(tempDir, 'settings.json');
 
-    expect(hookPath).toBe(join(tempDir, 'discode-hooks', GEMINI_AFTER_AGENT_HOOK_FILENAME));
+    expect(hookPath).toBe(join(tempDir, 'mudcode-hooks', GEMINI_AFTER_AGENT_HOOK_FILENAME));
     expect(existsSync(hookPath)).toBe(true);
     expect(existsSync(settingsPath)).toBe(true);
 

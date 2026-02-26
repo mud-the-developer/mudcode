@@ -1,18 +1,18 @@
 # Slack 설정 가이드
 
-Discode를 Discord 대신 Slack에 연결하는 방법을 안내합니다.
+Mudcode를 Discord 대신 Slack에 연결하는 방법을 안내합니다.
 
 ## 사전 준비
 
 - Node.js 18+ 또는 Bun 1.3+
-- Discode 설치 완료 (`npm install -g @siisee11/discode`)
+- Mudcode 설치 완료 (`npm install -g @mudramo/mudcode`)
 - 앱 설치 권한이 있는 Slack 워크스페이스
 
 ## 1. Slack App 생성
 
 1. [api.slack.com/apps](https://api.slack.com/apps)에서 **Create New App** 클릭
 2. **From scratch** 선택
-3. 이름 입력 (예: `Discode Bot`), 워크스페이스 선택
+3. 이름 입력 (예: `Mudcode Bot`), 워크스페이스 선택
 4. **Create App** 클릭
 
 ## 2. Socket Mode 활성화
@@ -20,7 +20,7 @@ Discode를 Discord 대신 Slack에 연결하는 방법을 안내합니다.
 1. 앱 설정에서 **Socket Mode** (왼쪽 사이드바) 이동
 2. **Enable Socket Mode** 토글 On
 3. **App-Level Token** 생성 프롬프트가 나타남:
-   - Name: `discode-socket`
+   - Name: `mudcode-socket`
    - Scope: `connections:write`
    - **Generate** 클릭
 4. **`xapp-...` 토큰을 복사** — 나중에 필요함
@@ -58,12 +58,12 @@ Discode를 Discord 대신 Slack에 연결하는 방법을 안내합니다.
 3. 권한을 확인하고 **Allow** 클릭
 4. **`xoxb-...` Bot User OAuth Token을 복사**
 
-## 6. Discode 설정
+## 6. Mudcode 설정
 
 온보딩 명령어 실행:
 
 ```bash
-discode onboard --platform slack
+mudcode onboard --platform slack
 ```
 
 다음 항목을 입력받습니다:
@@ -73,7 +73,7 @@ discode onboard --platform slack
 또는 토큰을 직접 전달:
 
 ```bash
-discode onboard --platform slack \
+mudcode onboard --platform slack \
   --slack-bot-token xoxb-your-bot-token \
   --slack-app-token xapp-your-app-token
 ```
@@ -82,10 +82,10 @@ discode onboard --platform slack \
 
 ```bash
 cd your-project
-discode new claude
+mudcode new claude
 ```
 
-Discode가 수행하는 작업:
+Mudcode가 수행하는 작업:
 1. Slack 채널 생성 (예: `#your-project-claude`)
 2. tmux 세션에서 AI 에이전트 실행
 3. Slack과 에이전트 간 메시지 브릿지
@@ -114,7 +114,7 @@ export SLACK_APP_TOKEN=xapp-...
 ## 문제 해결
 
 ### 봇이 메시지에 응답하지 않음
-- 봇이 채널에 초대되었는지 확인 (`@Discode Bot` 멘션 또는 `/invite` 사용)
+- 봇이 채널에 초대되었는지 확인 (`@Mudcode Bot` 멘션 또는 `/invite` 사용)
 - `message.channels` 이벤트 구독이 활성화되어 있는지 확인
 - Socket Mode가 활성화되어 있는지 확인
 

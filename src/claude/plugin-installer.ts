@@ -2,8 +2,8 @@ import { chmodSync, cpSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 
-export const CLAUDE_PLUGIN_NAME = 'discode-claude-bridge';
-export const CLAUDE_STOP_HOOK_FILENAME = 'discode-stop-hook.js';
+export const CLAUDE_PLUGIN_NAME = 'mudcode-claude-bridge';
+export const CLAUDE_STOP_HOOK_FILENAME = 'mudcode-stop-hook.js';
 
 export function getClaudePluginDir(): string {
   return join(homedir(), '.claude', 'plugins', CLAUDE_PLUGIN_NAME);

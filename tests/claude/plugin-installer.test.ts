@@ -13,7 +13,7 @@ describe('claude plugin installer', () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = mkdtempSync(join(tmpdir(), 'discode-plugin-test-'));
+    tempDir = mkdtempSync(join(tmpdir(), 'mudcode-plugin-test-'));
   });
 
   afterEach(() => {
@@ -39,7 +39,7 @@ describe('claude plugin installer', () => {
     const hooks = JSON.parse(readFileSync(join(sourceDir, 'hooks', 'hooks.json'), 'utf-8'));
     expect(hooks.hooks.Stop[0].hooks[0]).toEqual({
       type: 'command',
-      command: '${CLAUDE_PLUGIN_ROOT}/scripts/discode-stop-hook.js',
+      command: '${CLAUDE_PLUGIN_ROOT}/scripts/mudcode-stop-hook.js',
     });
   });
 
@@ -67,14 +67,14 @@ describe('claude plugin installer', () => {
     expect(stats.mode & 0o755).toBe(0o755);
   });
 
-  it('source plugin directory contains discode-send skill', () => {
+  it('source plugin directory contains mudcode-send skill', () => {
     const sourceDir = getPluginSourceDir();
-    const skillPath = join(sourceDir, 'skills', 'discode-send', 'SKILL.md');
+    const skillPath = join(sourceDir, 'skills', 'mudcode-send', 'SKILL.md');
     expect(existsSync(skillPath)).toBe(true);
 
     const content = readFileSync(skillPath, 'utf-8');
-    expect(content).toContain('name: discode-send');
-    expect(content).toContain('discode-send');
+    expect(content).toContain('name: mudcode-send');
+    expect(content).toContain('mudcode-send');
     expect(content).toContain('allowed-tools: Bash');
     expect(content).toContain('Do NOT explore');
   });
@@ -83,7 +83,7 @@ describe('claude plugin installer', () => {
     const pluginDir = join(tempDir, CLAUDE_PLUGIN_NAME);
     installClaudePlugin(undefined, pluginDir);
 
-    const skillPath = join(pluginDir, 'skills', 'discode-send', 'SKILL.md');
+    const skillPath = join(pluginDir, 'skills', 'mudcode-send', 'SKILL.md');
     expect(existsSync(skillPath)).toBe(true);
   });
 });

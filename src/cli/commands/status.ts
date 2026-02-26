@@ -13,7 +13,7 @@ export function statusCommand(options: TmuxCliOptions) {
   const tmux = new TmuxManager(effectiveConfig.tmux.sessionPrefix);
   const sessions = tmux.listSessions();
 
-  console.log(chalk.cyan('\n📊 Discode Status\n'));
+  console.log(chalk.cyan('\n📊 Mudcode Status\n'));
 
   console.log(chalk.white('Configuration:'));
   console.log(chalk.gray(`   Config file: ${getConfigPath()}`));

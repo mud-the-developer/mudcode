@@ -6,6 +6,27 @@ import { basename, join, resolve } from 'path';
 
 const root = resolve(new URL('..', import.meta.url).pathname);
 const releaseRoot = join(root, 'dist', 'release');
+const targetProfiles = {
+  full: [
+    'darwin-arm64',
+    'darwin-x64',
+    'darwin-x64-baseline',
+    'linux-arm64',
+    'linux-x64',
+    'linux-x64-baseline',
+    'linux-arm64-musl',
+    'linux-x64-musl',
+    'linux-x64-baseline-musl',
+    'windows-x64',
+    'windows-x64-baseline',
+  ],
+  linux: [
+    'linux-x64',
+    'linux-x64-baseline',
+    'linux-x64-musl',
+    'linux-x64-baseline-musl',
+  ],
+};
 
 function normalizeScope(raw) {
   const trimmed = (raw || '').trim();
@@ -43,6 +64,19 @@ function run(cmd, args, options = {}) {
   }
 }
 
+function runScript(pm, script, extraArgs = []) {
+  if (pm === 'bun') {
+    run('bun', ['run', script, ...extraArgs]);
+    return;
+  }
+
+  const args = ['run', script];
+  if (extraArgs.length > 0) {
+    args.push('--', ...extraArgs);
+  }
+  run('npm', args);
+}
+
 function readPackageName(dir) {
   const pkgPath = join(dir, 'package.json');
   const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
@@ -64,13 +98,31 @@ function assertScopeIfNeeded(dir, expectedScope) {
   }
 }
 
+function resolveProfile(profile) {
+  const normalized = (profile || '').trim();
+  if (!normalized) return '';
+  if (!targetProfiles[normalized]) {
+    const supported = Object.keys(targetProfiles).join(', ');
+    console.error(`Unknown --profile value: ${normalized}`);
+    console.error(`Supported profiles: ${supported}`);
+    process.exit(1);
+  }
+  return normalized;
+}
+
+function targetDirNamesForProfile(profile) {
+  const suffixes = targetProfiles[profile] || [];
+  return suffixes.map((suffix) => `mudcode-${suffix}`);
+}
+
 const dryRun = hasFlag('--dry-run');
 const skipBuild = hasFlag('--skip-build');
 const single = hasFlag('--single');
 const tag = argValue('--tag');
 const access = argValue('--access') || 'public';
-const publishPm = (argValue('--pm') || process.env.DISCODE_PUBLISH_PM || 'npm').trim().toLowerCase();
-const requestedScope = normalizeScope(argValue('--scope') || process.env.DISCODE_NPM_SCOPE || '');
+const publishPm = (argValue('--pm') || process.env.MUDCODE_PUBLISH_PM || 'npm').trim().toLowerCase();
+const requestedScope = normalizeScope(argValue('--scope') || process.env.MUDCODE_NPM_SCOPE || '');
+const requestedProfile = resolveProfile(argValue('--profile') || process.env.MUDCODE_RELEASE_PROFILE || '');
 
 if (publishPm !== 'npm' && publishPm !== 'bun') {
   console.error(`Unsupported publish package manager: ${publishPm}`);
@@ -78,33 +130,45 @@ if (publishPm !== 'npm' && publishPm !== 'bun') {
   process.exit(1);
 }
 
+if (single && requestedProfile) {
+  console.error('--single cannot be combined with --profile.');
+  process.exit(1);
+}
+
 if (requestedScope) {
-  process.env.DISCODE_NPM_SCOPE = requestedScope;
+  process.env.MUDCODE_NPM_SCOPE = requestedScope;
   console.log(`Using npm scope: ${requestedScope}`);
 }
 
 console.log(`Publishing via: ${publishPm}`);
+if (requestedProfile) {
+  console.log(`Release profile: ${requestedProfile}`);
+}
 
 if (!skipBuild) {
   if (single) {
-    if (publishPm === 'bun') {
-      run('bun', ['run', 'build:release:binaries:single']);
-      run('bun', ['run', 'build:release:npm']);
-    } else {
-      run('npm', ['run', 'build:release:binaries:single']);
-      run('npm', ['run', 'build:release:npm']);
-    }
-  } else if (publishPm === 'bun') {
-    run('bun', ['run', 'build:release']);
+    runScript(publishPm, 'build:release:binaries:single');
+    runScript(publishPm, 'build:release:npm');
+  } else if (requestedProfile) {
+    runScript(publishPm, 'build:release:binaries', ['--profile', requestedProfile]);
+    runScript(publishPm, 'build:release:npm');
   } else {
-    run('npm', ['run', 'build:release']);
+    runScript(publishPm, 'build:release');
   }
 }
+
+const allowedProfileDirNames = requestedProfile
+  ? new Set(targetDirNamesForProfile(requestedProfile))
+  : undefined;
 
 const platformDirs = readdirSync(releaseRoot)
   .map((name) => join(releaseRoot, name))
   .filter((dir) => statSync(dir).isDirectory())
   .filter((dir) => basename(dir) !== 'npm')
+  .filter((dir) => {
+    if (!allowedProfileDirNames) return true;
+    return allowedProfileDirNames.has(basename(dir));
+  })
   .filter((dir) => {
     if (hasPackageJson(dir)) return true;
     console.log(`Skipping non-package directory: ${dir}`);
@@ -112,7 +176,17 @@ const platformDirs = readdirSync(releaseRoot)
   })
   .sort((a, b) => basename(a).localeCompare(basename(b)));
 
-const npmMetaDir = join(releaseRoot, 'npm', 'discode');
+if (allowedProfileDirNames) {
+  const foundDirNames = new Set(platformDirs.map((dir) => basename(dir)));
+  const missing = [...allowedProfileDirNames].filter((name) => !foundDirNames.has(name));
+  if (missing.length > 0) {
+    console.error(`Missing release artifacts for profile '${requestedProfile}': ${missing.join(', ')}`);
+    console.error('Build missing targets first, or remove --profile to publish all available artifacts.');
+    process.exit(1);
+  }
+}
+
+const npmMetaDir = join(releaseRoot, 'npm', 'mudcode');
 const publishDirs = [...platformDirs];
 
 if (hasPackageJson(npmMetaDir)) {

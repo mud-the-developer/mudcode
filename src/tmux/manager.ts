@@ -7,10 +7,12 @@ import type { ICommandExecutor } from '../types/interfaces.js';
 import { ShellCommandExecutor } from '../infra/shell.js';
 import { escapeShellArg } from '../infra/shell-escape.js';
 
-const TUI_PANE_TITLE = 'discode-tui';
-const TUI_PANE_COMMAND_MARKERS = ['discode.js tui', 'mudcode.js tui', 'discode tui', 'mudcode tui'];
+const TUI_PANE_TITLE = 'mudcode-tui';
+const TUI_PANE_COMMAND_MARKERS = ['mudcode.js tui', 'mudcode.js tui', 'mudcode tui', 'mudcode tui'];
 const TUI_PANE_MAX_WIDTH = 80;
 const TUI_PANE_DELAY_SECONDS = 0.35;
+const TMUX_SEND_KEYS_CHUNK_SIZE = 2000;
+const DEFAULT_CAPTURE_HISTORY_LINES = 300;
 
 type AgentPaneHint = 'opencode' | 'claude' | 'gemini' | 'codex';
 
@@ -135,7 +137,8 @@ export class TmuxManager {
 
   capturePane(sessionName: string): string {
     const escapedTarget = escapeShellArg(`${this.sessionPrefix}${sessionName}`);
-    return this.executor.exec(`tmux capture-pane -t ${escapedTarget} -p`);
+    const captureStartLine = this.resolveCaptureStartLine();
+    return this.executor.exec(`tmux capture-pane -t ${escapedTarget} -p -S ${captureStartLine}`);
   }
 
   sessionExists(name: string): boolean {
@@ -198,7 +201,7 @@ export class TmuxManager {
     }
   }
 
-  ensureWindowAtIndex(sessionName: string, windowIndex: number, windowName: string = 'discode-control'): void {
+  ensureWindowAtIndex(sessionName: string, windowIndex: number, windowName: string = 'mudcode-control'): void {
     const indexName = String(windowIndex);
     if (this.windowExists(sessionName, indexName)) return;
 
@@ -477,11 +480,10 @@ export class TmuxManager {
   sendKeysToWindow(sessionName: string, windowName: string, keys: string, paneHint?: string): void {
     const target = this.resolveWindowTarget(sessionName, windowName, paneHint);
     const escapedTarget = escapeShellArg(target);
-    const escapedKeys = escapeShellArg(keys);
 
     try {
       // Send keys and Enter separately for reliability
-      this.executor.exec(`tmux send-keys -t ${escapedTarget} ${escapedKeys}`);
+      this.sendTextChunksToTarget(escapedTarget, keys);
       this.executor.exec(`tmux send-keys -t ${escapedTarget} Enter`);
     } catch (error) {
       throw new Error(`Failed to send keys to window '${windowName}' in session '${sessionName}': ${error instanceof Error ? error.message : String(error)}`);
@@ -495,12 +497,20 @@ export class TmuxManager {
   typeKeysToWindow(sessionName: string, windowName: string, keys: string, paneHint?: string): void {
     const target = this.resolveWindowTarget(sessionName, windowName, paneHint);
     const escapedTarget = escapeShellArg(target);
-    const escapedKeys = escapeShellArg(keys);
 
     try {
-      this.executor.exec(`tmux send-keys -t ${escapedTarget} ${escapedKeys}`);
+      this.sendTextChunksToTarget(escapedTarget, keys);
     } catch (error) {
       throw new Error(`Failed to type keys to window '${windowName}' in session '${sessionName}': ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private sendTextChunksToTarget(escapedTarget: string, keys: string): void {
+    if (keys.length === 0) return;
+    for (let start = 0; start < keys.length; start += TMUX_SEND_KEYS_CHUNK_SIZE) {
+      const chunk = keys.slice(start, start + TMUX_SEND_KEYS_CHUNK_SIZE);
+      const escapedChunk = escapeShellArg(chunk);
+      this.executor.exec(`tmux send-keys -t ${escapedTarget} ${escapedChunk}`);
     }
   }
 
@@ -515,6 +525,45 @@ export class TmuxManager {
       this.executor.exec(`tmux send-keys -t ${escapedTarget} Enter`);
     } catch (error) {
       throw new Error(`Failed to send Enter to window '${windowName}' in session '${sessionName}': ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /**
+   * Send a raw tmux key token (e.g. "C-c", "Escape") to a specific window.
+   * We intentionally avoid shell-escaping the key token so tmux can parse it.
+   */
+  sendRawKeyToWindow(sessionName: string, windowName: string, keyToken: string, paneHint?: string): void {
+    const target = this.resolveWindowTarget(sessionName, windowName, paneHint);
+    const escapedTarget = escapeShellArg(target);
+    const normalized = keyToken.trim();
+    if (!/^[A-Za-z0-9._+-]+$/.test(normalized)) {
+      throw new Error(`Invalid tmux key token: ${keyToken}`);
+    }
+
+    try {
+      this.executor.exec(`tmux send-keys -t ${escapedTarget} ${normalized}`);
+    } catch (error) {
+      throw new Error(
+        `Failed to send key '${normalized}' to window '${windowName}' in session '${sessionName}': ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * Restart the resolved pane in-place with a new command.
+   * Uses `respawn-pane -k` so the window target stays stable.
+   */
+  respawnPaneInWindow(sessionName: string, windowName: string, command: string, paneHint?: string): void {
+    const target = this.resolveWindowTarget(sessionName, windowName, paneHint);
+    const escapedTarget = escapeShellArg(target);
+    const escapedCommand = escapeShellArg(command);
+
+    try {
+      this.executor.exec(`tmux respawn-pane -k -t ${escapedTarget} ${escapedCommand}`);
+    } catch (error) {
+      throw new Error(
+        `Failed to respawn pane for window '${windowName}' in session '${sessionName}': ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
@@ -541,12 +590,24 @@ export class TmuxManager {
   capturePaneFromWindow(sessionName: string, windowName: string, paneHint?: string): string {
     const target = this.resolveWindowTarget(sessionName, windowName, paneHint);
     const escapedTarget = escapeShellArg(target);
+    const captureStartLine = this.resolveCaptureStartLine();
 
     try {
-      return this.executor.exec(`tmux capture-pane -t ${escapedTarget} -p`);
+      return this.executor.exec(`tmux capture-pane -t ${escapedTarget} -p -S ${captureStartLine}`);
     } catch (error) {
       throw new Error(`Failed to capture pane from window '${windowName}' in session '${sessionName}': ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  private resolveCaptureStartLine(): number {
+    const raw = process.env.AGENT_DISCORD_CAPTURE_HISTORY_LINES;
+    if (typeof raw === 'string' && raw.trim().length > 0) {
+      const fromEnv = Number(raw);
+      if (Number.isFinite(fromEnv) && fromEnv >= 0) {
+        return -Math.trunc(fromEnv);
+      }
+    }
+    return -DEFAULT_CAPTURE_HISTORY_LINES;
   }
 
   /**
@@ -611,6 +672,14 @@ export class TmuxManager {
     const target = `${sessionName}:${windowName}`;
     const escapedTarget = escapeShellArg(target);
     this.executor.execVoid(`tmux kill-window -t ${escapedTarget}`, { stdio: 'ignore' });
+  }
+
+  /**
+   * Kill a tmux session by full session name.
+   */
+  killSession(sessionName: string): void {
+    const escapedTarget = escapeShellArg(sessionName);
+    this.executor.execVoid(`tmux kill-session -t ${escapedTarget}`, { stdio: 'ignore' });
   }
 
   /**

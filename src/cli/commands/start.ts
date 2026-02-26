@@ -42,9 +42,9 @@ export async function startCommand(options: TmuxCliOptions & { project?: string;
       process.exit(1);
     }
 
-    const runtime = (process.env.DISCODE_DAEMON_RUNTIME || '').trim().toLowerCase();
+    const runtime = (process.env.MUDCODE_DAEMON_RUNTIME || '').trim().toLowerCase();
 
-    console.log(chalk.cyan('\n🚀 Starting Discode\n'));
+    console.log(chalk.cyan('\n🚀 Starting Mudcode\n'));
     console.log(chalk.white('Configuration:'));
     console.log(chalk.gray(`   Config file: ${getConfigPath()}`));
     console.log(chalk.gray(`   Server ID: ${stateManager.getGuildId()}`));

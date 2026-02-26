@@ -7,7 +7,7 @@
 import { App, type LogLevel } from '@slack/bolt';
 import type { AgentConfig } from '../agents/index.js';
 import type { MessageAttachment } from '../types/index.js';
-import type { MessagingClient, MessageCallback, ChannelInfo } from '../messaging/interface.js';
+import type { MessagingClient, MessageCallback, ChannelInfo, MessageContext } from '../messaging/interface.js';
 
 export class SlackClient implements MessagingClient {
   readonly platform = 'slack' as const;
@@ -55,6 +55,18 @@ export class SlackClient implements MessagingClient {
             }));
           }
 
+          const authorId = typeof message.user === 'string' ? message.user : '';
+          const threadTs = 'thread_ts' in message && typeof message.thread_ts === 'string'
+            ? message.thread_ts
+            : undefined;
+          const messageTs = 'ts' in message && typeof message.ts === 'string' ? message.ts : undefined;
+          const context = this.buildMessageContext({
+            channelId,
+            authorId,
+            threadTs,
+            messageTs,
+          });
+
           await this.messageCallback(
             channelInfo.agentType,
             message.text || '',
@@ -63,6 +75,7 @@ export class SlackClient implements MessagingClient {
             message.ts,
             channelInfo.instanceId,
             attachments && attachments.length > 0 ? attachments : undefined,
+            context,
           );
         } catch (error) {
           console.error(
@@ -313,7 +326,7 @@ export class SlackClient implements MessagingClient {
   async deleteChannel(channelId: string): Promise<boolean> {
     // Slack bot tokens cannot unarchive channels they've been removed from,
     // so we avoid archiving entirely. Just remove from mapping and leave
-    // the channel intact for reuse on next `discode new`.
+    // the channel intact for reuse on next `mudcode new`.
     this.channelMapping.delete(channelId);
     return true;
   }
@@ -525,6 +538,30 @@ export class SlackClient implements MessagingClient {
     } catch (error) {
       console.warn('Failed to scan existing Slack channels:', error);
     }
+  }
+
+  private buildMessageContext(input: {
+    channelId: string;
+    authorId: string;
+    threadTs?: string;
+    messageTs?: string;
+  }): MessageContext {
+    const replyToMessageId = input.threadTs && input.threadTs !== input.messageTs
+      ? input.threadTs
+      : undefined;
+    const conversationKey = input.threadTs
+      ? `slack:thread:${input.channelId}:${input.threadTs}`
+      : `slack:channel:${input.channelId}:author:${input.authorId}`;
+
+    return {
+      platform: 'slack',
+      sourceChannelId: input.channelId,
+      routeChannelId: input.channelId,
+      authorId: input.authorId,
+      threadId: input.threadTs,
+      replyToMessageId,
+      conversationKey,
+    };
   }
 
   /** Map Unicode emoji to Slack emoji name (without colons). */

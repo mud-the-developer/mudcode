@@ -2,7 +2,7 @@
 
 English version: [DISCORD_SETUP.md](DISCORD_SETUP.md)
 
-Discode를 위한 Discord 봇 설정 완전 가이드입니다.
+Mudcode를 위한 Discord 봇 설정 완전 가이드입니다.
 
 ---
 
@@ -12,7 +12,7 @@ Discode를 위한 Discord 봇 설정 완전 가이드입니다.
 
 1. [Discord Developer Portal](https://discord.com/developers/applications)에 접속합니다
 2. 우측 상단의 **"New Application"** 버튼을 클릭합니다
-3. 봇의 이름을 입력합니다 (예: "Discode")
+3. 봇의 이름을 입력합니다 (예: "Mudcode")
 4. 서비스 약관에 동의하고 **"Create"**를 클릭합니다
 
 ### Step 1.2: 봇 토큰 복사
@@ -92,9 +92,9 @@ Discode를 위한 Discord 봇 설정 완전 가이드입니다.
 
 5. 서버에 봇 초대
 
-6. 실행: discode onboard
+6. 실행: mudcode onboard
 
-7. 사용 시작: discode new
+7. 사용 시작: mudcode new
 ```
 
 ---

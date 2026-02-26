@@ -18,7 +18,7 @@ import {
   normalizeProjectState,
 } from './state/instances.js';
 import { installFileInstruction } from './infra/file-instruction.js';
-import { installDiscodeSendScript } from './infra/send-script.js';
+import { installMudcodeSendScript } from './infra/send-script.js';
 import { buildAgentLaunchEnv, buildExportPrefix, withClaudePluginDir } from './policy/agent-launch.js';
 import { installAgentIntegration } from './policy/agent-integration.js';
 import { toProjectScopedName } from './policy/window-naming.js';
@@ -116,7 +116,7 @@ export class AgentBridge {
   }
 
   async start(): Promise<void> {
-    console.log('🚀 Starting Discode...');
+    console.log('🚀 Starting Mudcode...');
 
     await this.messaging.connect();
     console.log('✅ Messaging client connected');
@@ -126,7 +126,7 @@ export class AgentBridge {
     this.hookServer.start();
     this.capturePoller.start();
 
-    console.log('✅ Discode is running');
+    console.log('✅ Mudcode is running');
     console.log(`📡 Server listening on port ${this.bridgeConfig.hookServerPort || 18470}`);
     console.log(`🤖 Registered agents: ${this.registry.getAll().map(a => a.config.displayName).join(', ')}`);
   }
@@ -193,7 +193,7 @@ export class AgentBridge {
       console.warn(message);
     }
 
-    // Install file-handling instructions and discode-send script for the agent
+    // Install file-handling instructions and mudcode-send script for the agent
     try {
       installFileInstruction(projectPath, adapter.config.name);
       console.log(`📎 Installed file instructions for ${adapter.config.displayName}`);
@@ -201,7 +201,7 @@ export class AgentBridge {
       console.warn(`Failed to install file instructions: ${error instanceof Error ? error.message : String(error)}`);
     }
     try {
-      installDiscodeSendScript(projectPath, { projectName, port });
+      installMudcodeSendScript(projectPath, { projectName, port });
     } catch {
       // Non-critical.
     }

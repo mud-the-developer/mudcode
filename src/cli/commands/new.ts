@@ -16,7 +16,7 @@ import type { TmuxCliOptions } from '../common/types.js';
 import {
   applyTmuxCliOverrides,
   attachToTmux,
-  cleanupStaleDiscodeTuiProcesses,
+  cleanupStaleMudcodeTuiProcesses,
   ensureProjectTuiPane,
   ensureTmuxInstalled,
   pruneStaleProjects,
@@ -45,7 +45,7 @@ export async function newCommand(
     const projectName = options.name || basename(projectPath);
     let port = effectiveConfig.hookServerPort || 18470;
 
-    const staleTuiCount = cleanupStaleDiscodeTuiProcesses();
+    const staleTuiCount = cleanupStaleMudcodeTuiProcesses();
     if (staleTuiCount > 0) {
       console.log(chalk.yellow(`⚠️ Cleaned ${staleTuiCount} stale mudcode TUI process(es).`));
     }

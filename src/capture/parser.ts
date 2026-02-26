@@ -4,6 +4,7 @@
  */
 
 const ANSI_REGEX = /\x1B(?:\[[0-9;]*[A-Za-z]|\].*?(?:\x07|\x1B\\)|\([A-Z])/g;
+const DISCORD_MAX_MESSAGE_LENGTH = 2000;
 
 /**
  * Strip ANSI escape codes from terminal output
@@ -76,22 +77,14 @@ export function stripOuterCodeblock(text: string): string {
  * @param maxLen Default 1900 (Discord-safe). Use 3900 for Slack.
  */
 export function splitMessages(text: string, maxLen: number = 1900): string[] {
+  const normalizedMaxLen = Math.max(1, Math.trunc(maxLen));
   const stripped = stripOuterCodeblock(text);
-  if (stripped.length <= maxLen) return [stripped];
+  if (stripped.length <= normalizedMaxLen) return [stripped];
 
-  const lines = stripped.split('\n');
-  const rawChunks: string[] = [];
-  let current = '';
-
-  for (const line of lines) {
-    if (current.length + line.length + 1 > maxLen) {
-      if (current) rawChunks.push(current);
-      current = line.length > maxLen ? line.substring(0, maxLen) : line;
-    } else {
-      current += (current ? '\n' : '') + line;
-    }
-  }
-  if (current) rawChunks.push(current);
+  // Reserve room for codeblock re-open/close wrappers so post-processing stays
+  // within max length while preserving all content.
+  const codeFenceOverhead = estimateCodeFenceOverhead(stripped);
+  const rawChunks = splitRawText(stripped, Math.max(1, normalizedMaxLen - codeFenceOverhead));
 
   // Post-process: ensure codeblock fences are balanced in each chunk
   const result: string[] = [];
@@ -137,12 +130,52 @@ export function splitMessages(text: string, maxLen: number = 1900): string[] {
 
 /** Split text into chunks for Discord (2000 char limit). */
 export function splitForDiscord(text: string, maxLen: number = 1900): string[] {
-  return splitMessages(text, maxLen);
+  const capped = Math.min(Math.max(1, Math.trunc(maxLen)), DISCORD_MAX_MESSAGE_LENGTH);
+  return splitMessages(text, capped);
 }
 
 /** Split text into chunks for Slack (40,000 char limit, use 3900 for safety). */
 export function splitForSlack(text: string, maxLen: number = 3900): string[] {
   return splitMessages(text, maxLen);
+}
+
+function estimateCodeFenceOverhead(text: string): number {
+  let maxLangLen = 0;
+  for (const match of text.matchAll(/^```(\w*)/gm)) {
+    const langLen = (match[1] || '').length;
+    if (langLen > maxLangLen) maxLangLen = langLen;
+  }
+
+  // Worst case for a chunk in code mode: prepend "```lang\n" + append "\n```".
+  return 8 + maxLangLen;
+}
+
+function splitRawText(text: string, maxLen: number): string[] {
+  if (text.length <= maxLen) return [text];
+
+  const chunks: string[] = [];
+  let cursor = 0;
+
+  while (cursor < text.length) {
+    let end = Math.min(cursor + maxLen, text.length);
+
+    if (end < text.length) {
+      const breakAt = text.lastIndexOf('\n', end - 1);
+      if (breakAt >= cursor) {
+        // Preserve the newline itself in the current chunk.
+        end = breakAt + 1;
+      }
+    }
+
+    if (end <= cursor) {
+      end = Math.min(cursor + maxLen, text.length);
+    }
+
+    chunks.push(text.slice(cursor, end));
+    cursor = end;
+  }
+
+  return chunks;
 }
 
 /**

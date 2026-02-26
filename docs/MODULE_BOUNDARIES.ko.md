@@ -6,7 +6,7 @@
 
 아래 단방향 의존을 유지합니다.
 
-`bin/discode.ts` -> `src/cli/**` -> `src/app/**` -> `src/{bridge,state,tmux,discord,agents,infra}`
+`bin/mudcode.ts` -> `src/cli/**` -> `src/app/**` -> `src/{bridge,state,tmux,discord,agents,infra}`
 
 규칙:
 

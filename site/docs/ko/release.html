@@ -3,28 +3,28 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Discode 문서 - 릴리즈 가이드</title>
-    <meta name="description" content="Discode npm 패키지 배포를 위한 유지보수자 가이드." />
+    <title>Mudcode 문서 - 릴리즈 가이드</title>
+    <meta name="description" content="Mudcode npm 패키지 배포를 위한 유지보수자 가이드." />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Nunito+Sans:wght@700;800;900&display=swap"
       rel="stylesheet"
     />
-    <link rel="icon" type="image/png" href="../../discode.png" />
+    <link rel="icon" type="image/png" href="../../mudcode.png" />
     <link rel="stylesheet" href="../docs.css" />
   </head>
   <body>
     <div class="page">
       <header class="shell topbar">
         <a class="brand" href="../../">
-          <img src="../../discode.png" alt="Discode crab icon" class="brand-icon" />
-          <span class="brand-label">Discode</span>
+          <img src="../../mudcode.png" alt="Mudcode crab icon" class="brand-icon" />
+          <span class="brand-label">Mudcode</span>
         </a>
         <nav class="topnav" aria-label="Primary">
           <a href="../../">홈</a>
           <a href="./" aria-current="page">문서</a>
-          <a href="https://github.com/siisee11/discode" target="_blank" rel="noreferrer">GitHub</a>
+          <a href="https://github.com/mudramo/mudcode" target="_blank" rel="noreferrer">GitHub</a>
           <label class="language-picker">
             <span class="sr-only">언어</span>
             <select data-language-select aria-label="언어 선택">
@@ -49,14 +49,14 @@
           <article class="doc-article">
             <h1>릴리즈 가이드</h1>
             <p class="lead">
-              <code>@siisee11/discode</code>와 플랫폼 바이너리 패키지를 배포하는 유지보수자 흐름입니다.
+              <code>@mudramo/mudcode</code>와 플랫폼 바이너리 패키지를 배포하는 유지보수자 흐름입니다.
               <code>docs/RELEASE_NPM.ko.md</code>를 기반으로 정리했습니다.
             </p>
 
             <section class="doc-section" id="precheck">
               <h2>1) 사전 점검</h2>
               <ul>
-                <li>npm 계정이 <code>siisee11</code> 조직에 publish 권한이 있는지 확인합니다.</li>
+                <li>npm 계정이 <code>mudramo</code> 조직에 publish 권한이 있는지 확인합니다.</li>
                 <li>2FA 사용 시 npm automation token 사용을 권장합니다.</li>
                 <li>npm 토큰은 절대 노출하거나 커밋하지 마세요.</li>
               </ul>
@@ -69,7 +69,7 @@ npm token list</code></pre>
               <p>아래 값을 같은 버전으로 함께 올립니다:</p>
               <ul>
                 <li><code>package.json</code>의 <code>version</code></li>
-                <li><code>optionalDependencies</code>의 <code>@siisee11/discode-*</code> 버전들</li>
+                <li><code>optionalDependencies</code>의 <code>@mudramo/mudcode-*</code> 버전들</li>
               </ul>
             </section>
 
@@ -85,12 +85,12 @@ npm run pack:release</code></pre>
             <section class="doc-section" id="publish">
               <h2>4) 패키지 배포</h2>
               <p>플랫폼 패키지를 먼저 배포한 뒤 메타 패키지를 배포합니다.</p>
-              <pre class="command"><code>npm publish --access public --workspaces=false dist/release/discode-darwin-arm64
-npm publish --access public --workspaces=false dist/release/discode-darwin-x64
-npm publish --access public --workspaces=false dist/release/discode-linux-x64
-npm publish --access public --workspaces=false dist/release/discode-windows-x64
+              <pre class="command"><code>npm publish --access public --workspaces=false dist/release/mudcode-darwin-arm64
+npm publish --access public --workspaces=false dist/release/mudcode-darwin-x64
+npm publish --access public --workspaces=false dist/release/mudcode-linux-x64
+npm publish --access public --workspaces=false dist/release/mudcode-windows-x64
 
-npm publish --access public --workspaces=false dist/release/npm/discode</code></pre>
+npm publish --access public --workspaces=false dist/release/npm/mudcode</code></pre>
               <p class="callout">
                 위 명령은 예시입니다. 실제 릴리즈에서는 생성된 모든 플랫폼 패키지를 빠짐없이
                 배포하세요.
@@ -99,9 +99,9 @@ npm publish --access public --workspaces=false dist/release/npm/discode</code></
 
             <section class="doc-section" id="verify">
               <h2>5) 배포 검증</h2>
-              <pre class="command"><code>npm view @siisee11/discode version
-npm i -g @siisee11/discode@latest
-discode --version</code></pre>
+              <pre class="command"><code>npm view @mudramo/mudcode version
+npm i -g @mudramo/mudcode@latest
+mudcode --version</code></pre>
             </section>
 
             <section class="doc-section" id="troubleshooting">
@@ -115,7 +115,7 @@ discode --version</code></pre>
 
             <p class="doc-footer">
               출처:
-              <a href="https://github.com/siisee11/discode/blob/main/docs/RELEASE_NPM.ko.md" target="_blank" rel="noreferrer">RELEASE_NPM.ko.md</a>
+              <a href="https://github.com/mudramo/mudcode/blob/main/docs/RELEASE_NPM.ko.md" target="_blank" rel="noreferrer">RELEASE_NPM.ko.md</a>
             </p>
           </article>
         </div>

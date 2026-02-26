@@ -88,7 +88,7 @@ vi.mock('../src/state/index.js', () => ({
 
 vi.mock('../src/config/index.js', () => ({
   config: mocks.config,
-  getConfigPath: vi.fn().mockReturnValue('/tmp/discode/config.json'),
+  getConfigPath: vi.fn().mockReturnValue('/tmp/mudcode/config.json'),
   validateConfig: vi.fn(),
 }));
 
@@ -118,7 +118,7 @@ describe('startCommand runtime routing', () => {
     vi.clearAllMocks();
     mocks.bridgeInstances.length = 0;
     process.env = { ...originalEnv };
-    delete process.env.DISCODE_DAEMON_RUNTIME;
+    delete process.env.MUDCODE_DAEMON_RUNTIME;
 
     mocks.stateManager.listProjects.mockReturnValue([
       {
@@ -165,7 +165,7 @@ describe('startCommand runtime routing', () => {
   });
 
   it('uses daemon-service when rust runtime is selected', async () => {
-    process.env.DISCODE_DAEMON_RUNTIME = 'rust';
+    process.env.MUDCODE_DAEMON_RUNTIME = 'rust';
     const { startCommand } = await import('../src/cli/commands/start.js');
 
     await startCommand({});
@@ -175,7 +175,7 @@ describe('startCommand runtime routing', () => {
   });
 
   it('attaches to tmux after rust daemon startup when --attach is used', async () => {
-    process.env.DISCODE_DAEMON_RUNTIME = 'rust';
+    process.env.MUDCODE_DAEMON_RUNTIME = 'rust';
     const { startCommand } = await import('../src/cli/commands/start.js');
 
     await startCommand({ project: 'demo', attach: true });

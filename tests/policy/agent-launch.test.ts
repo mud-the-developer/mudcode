@@ -6,10 +6,11 @@ describe('agent launch policy', () => {
     const prefix = buildExportPrefix({
       A: 'alpha',
       B: "it's",
+      C: null,
       EMPTY: undefined,
     });
 
-    expect(prefix).toBe("export A='alpha'; export B='it'\\''s'; ");
+    expect(prefix).toBe("export A='alpha'; export B='it'\\''s'; unset C; ");
   });
 
   it('injects claude plugin dir only for claude command token', () => {
@@ -46,7 +47,8 @@ describe('agent launch policy', () => {
       instanceId: 'codex',
       permissionAllow: false,
     });
-    expect(codexEnv.CODEX_SANDBOX_NETWORK_DISABLED).toBeUndefined();
+    expect(codexEnv.CODEX_SANDBOX_NETWORK_DISABLED).toBeNull();
+    expect(buildExportPrefix(codexEnv)).toContain('unset CODEX_SANDBOX_NETWORK_DISABLED;');
   });
 
   it('allows overriding codex sandbox network flag via environment variable', () => {
@@ -62,6 +64,7 @@ describe('agent launch policy', () => {
       });
 
       expect(codexEnv.CODEX_SANDBOX_NETWORK_DISABLED).toBe('1');
+      expect(buildExportPrefix(codexEnv)).toContain("export CODEX_SANDBOX_NETWORK_DISABLED='1';");
     } finally {
       process.env.MUDCODE_CODEX_SANDBOX_NETWORK_DISABLED = previous;
     }

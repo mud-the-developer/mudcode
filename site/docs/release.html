@@ -3,28 +3,28 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Discode Docs - Release Guide</title>
-    <meta name="description" content="Maintainer release process for Discode npm packages." />
+    <title>Mudcode Docs - Release Guide</title>
+    <meta name="description" content="Maintainer release process for Mudcode npm packages." />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Nunito+Sans:wght@700;800;900&display=swap"
       rel="stylesheet"
     />
-    <link rel="icon" type="image/png" href="../discode.png" />
+    <link rel="icon" type="image/png" href="../mudcode.png" />
     <link rel="stylesheet" href="./docs.css" />
   </head>
   <body>
     <div class="page">
       <header class="shell topbar">
         <a class="brand" href="../">
-          <img src="../discode.png" alt="Discode crab icon" class="brand-icon" />
-          <span class="brand-label">Discode</span>
+          <img src="../mudcode.png" alt="Mudcode crab icon" class="brand-icon" />
+          <span class="brand-label">Mudcode</span>
         </a>
         <nav class="topnav" aria-label="Primary">
           <a href="../">Home</a>
           <a href="./" aria-current="page">Docs</a>
-          <a href="https://github.com/siisee11/discode" target="_blank" rel="noreferrer">GitHub</a>
+          <a href="https://github.com/mudramo/mudcode" target="_blank" rel="noreferrer">GitHub</a>
           <label class="language-picker">
             <span class="sr-only">Language</span>
             <select data-language-select aria-label="Select language">
@@ -49,14 +49,14 @@
           <article class="doc-article">
             <h1>Release Guide</h1>
             <p class="lead">
-              Maintainer flow for publishing <code>@siisee11/discode</code> and platform-specific binary
+              Maintainer flow for publishing <code>@mudramo/mudcode</code> and platform-specific binary
               packages. Adapted from <code>docs/RELEASE_NPM.ko.md</code>.
             </p>
 
             <section class="doc-section" id="precheck">
               <h2>1) Pre-check</h2>
               <ul>
-                <li>Confirm npm account has publish access under <code>siisee11</code>.</li>
+                <li>Confirm npm account has publish access under <code>mudramo</code>.</li>
                 <li>Use npm automation token if 2FA is enabled.</li>
                 <li>Never expose or commit npm tokens.</li>
               </ul>
@@ -69,7 +69,7 @@ npm token list</code></pre>
               <p>Update both:</p>
               <ul>
                 <li><code>package.json</code> <code>version</code></li>
-                <li><code>optionalDependencies</code> versions for all <code>@siisee11/discode-*</code> packages</li>
+                <li><code>optionalDependencies</code> versions for all <code>@mudramo/mudcode-*</code> packages</li>
               </ul>
             </section>
 
@@ -85,12 +85,12 @@ npm run pack:release</code></pre>
             <section class="doc-section" id="publish">
               <h2>4) Publish packages</h2>
               <p>Publish platform packages first, then publish the meta package.</p>
-              <pre class="command"><code>npm publish --access public --workspaces=false dist/release/discode-darwin-arm64
-npm publish --access public --workspaces=false dist/release/discode-darwin-x64
-npm publish --access public --workspaces=false dist/release/discode-linux-x64
-npm publish --access public --workspaces=false dist/release/discode-windows-x64
+              <pre class="command"><code>npm publish --access public --workspaces=false dist/release/mudcode-darwin-arm64
+npm publish --access public --workspaces=false dist/release/mudcode-darwin-x64
+npm publish --access public --workspaces=false dist/release/mudcode-linux-x64
+npm publish --access public --workspaces=false dist/release/mudcode-windows-x64
 
-npm publish --access public --workspaces=false dist/release/npm/discode</code></pre>
+npm publish --access public --workspaces=false dist/release/npm/mudcode</code></pre>
               <p class="callout">
                 Publish every generated platform package for your release. The list above is shortened for
                 readability.
@@ -99,9 +99,9 @@ npm publish --access public --workspaces=false dist/release/npm/discode</code></
 
             <section class="doc-section" id="verify">
               <h2>5) Verify release</h2>
-              <pre class="command"><code>npm view @siisee11/discode version
-npm i -g @siisee11/discode@latest
-discode --version</code></pre>
+              <pre class="command"><code>npm view @mudramo/mudcode version
+npm i -g @mudramo/mudcode@latest
+mudcode --version</code></pre>
             </section>
 
             <section class="doc-section" id="troubleshooting">
@@ -115,7 +115,7 @@ discode --version</code></pre>
 
             <p class="doc-footer">
               Source:
-              <a href="https://github.com/siisee11/discode/blob/main/docs/RELEASE_NPM.ko.md" target="_blank" rel="noreferrer">RELEASE_NPM.ko.md</a>
+              <a href="https://github.com/mudramo/mudcode/blob/main/docs/RELEASE_NPM.ko.md" target="_blank" rel="noreferrer">RELEASE_NPM.ko.md</a>
             </p>
           </article>
         </div>

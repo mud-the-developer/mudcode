@@ -2,7 +2,7 @@ import { cpSync } from 'fs';
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
-  entry: ['src/index.ts', 'src/daemon-entry.ts', 'bin/discode.ts', 'bin/tui.tsx'],
+  entry: ['src/index.ts', 'src/daemon-entry.ts', 'bin/mudcode.ts', 'bin/tui.tsx'],
   format: ['esm'],
   dts: true,
   clean: true,

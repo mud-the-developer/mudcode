@@ -18,6 +18,8 @@ function createMockMessaging() {
 
 function createMockPendingTracker() {
   return {
+    getPendingChannel: vi.fn().mockReturnValue(undefined),
+    getPendingDepth: vi.fn().mockReturnValue(0),
     markPending: vi.fn().mockResolvedValue(undefined),
     markCompleted: vi.fn().mockResolvedValue(undefined),
     markError: vi.fn().mockResolvedValue(undefined),
@@ -64,7 +66,7 @@ describe('BridgeHookServer', () => {
   beforeEach(() => {
     // Use realpathSync to resolve macOS symlinks (/var → /private/var)
     // so that validateFilePaths' realpathSync check doesn't fail.
-    const rawDir = join(tmpdir(), `discode-hookserver-test-${Date.now()}`);
+    const rawDir = join(tmpdir(), `mudcode-hookserver-test-${Date.now()}`);
     mkdirSync(rawDir, { recursive: true });
     tempDir = realpathSync(rawDir);
     // Use a random high port to avoid conflicts
@@ -157,7 +159,7 @@ describe('BridgeHookServer', () => {
     });
 
     it('sends files for valid project with channelId', async () => {
-      const filesDir = join(tempDir, '.discode', 'files');
+      const filesDir = join(tempDir, '.mudcode', 'files');
       mkdirSync(filesDir, { recursive: true });
       const testFile = join(filesDir, 'test.png');
       writeFileSync(testFile, 'fake-png-data');
@@ -178,6 +180,46 @@ describe('BridgeHookServer', () => {
         },
       });
       startServer({ messaging: mockMessaging as any, stateManager: stateManager as any });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const res = await postJSON(port, '/send-files', {
+        projectName: 'test',
+        agentType: 'claude',
+        files: [testFile],
+      });
+      expect(res.status).toBe(200);
+      expect(mockMessaging.sendToChannelWithFiles).toHaveBeenCalledWith('ch-123', '', [testFile]);
+    });
+
+    it('falls back to default channel when multiple pending requests exist', async () => {
+      const filesDir = join(tempDir, '.mudcode', 'files');
+      mkdirSync(filesDir, { recursive: true });
+      const testFile = join(filesDir, 'test-multi.png');
+      writeFileSync(testFile, 'fake-png-data');
+
+      const mockMessaging = createMockMessaging();
+      const mockPendingTracker = createMockPendingTracker();
+      mockPendingTracker.getPendingChannel.mockReturnValue('thread-xyz');
+      mockPendingTracker.getPendingDepth.mockReturnValue(2);
+      const stateManager = createMockStateManager({
+        test: {
+          projectName: 'test',
+          projectPath: tempDir,
+          tmuxSession: 'bridge',
+          agents: { claude: true },
+          discordChannels: { claude: 'ch-123' },
+          instances: {
+            claude: { instanceId: 'claude', agentType: 'claude', channelId: 'ch-123' },
+          },
+          createdAt: new Date(),
+          lastActive: new Date(),
+        },
+      });
+      startServer({
+        messaging: mockMessaging as any,
+        stateManager: stateManager as any,
+        pendingTracker: mockPendingTracker as any,
+      });
       await new Promise((r) => setTimeout(r, 50));
 
       const res = await postJSON(port, '/send-files', {
@@ -261,8 +303,118 @@ describe('BridgeHookServer', () => {
       expect(mockMessaging.sendToChannel).toHaveBeenCalledWith('ch-123', 'Hello from agent');
     });
 
+    it('marks pending as error when session.idle delivery fails', async () => {
+      const mockMessaging = createMockMessaging();
+      mockMessaging.sendToChannel.mockRejectedValue(new Error('send failed'));
+      const mockPendingTracker = createMockPendingTracker();
+      const stateManager = createMockStateManager({
+        test: {
+          projectName: 'test',
+          projectPath: tempDir,
+          tmuxSession: 'bridge',
+          agents: { claude: true },
+          discordChannels: { claude: 'ch-123' },
+          instances: {
+            claude: { instanceId: 'claude', agentType: 'claude', channelId: 'ch-123' },
+          },
+          createdAt: new Date(),
+          lastActive: new Date(),
+        },
+      });
+      startServer({
+        messaging: mockMessaging as any,
+        stateManager: stateManager as any,
+        pendingTracker: mockPendingTracker as any,
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const res = await postJSON(port, '/opencode-event', {
+        projectName: 'test',
+        agentType: 'claude',
+        type: 'session.idle',
+        text: 'Hello from agent',
+      });
+
+      expect(res.status).toBe(500);
+      expect(mockPendingTracker.markCompleted).not.toHaveBeenCalled();
+      expect(mockPendingTracker.markError).toHaveBeenCalled();
+    });
+
+    it('uses pending channel override for session.idle output', async () => {
+      const mockMessaging = createMockMessaging();
+      const mockPendingTracker = createMockPendingTracker();
+      mockPendingTracker.getPendingChannel.mockReturnValue('thread-xyz');
+      const stateManager = createMockStateManager({
+        test: {
+          projectName: 'test',
+          projectPath: tempDir,
+          tmuxSession: 'bridge',
+          agents: { claude: true },
+          discordChannels: { claude: 'ch-123' },
+          instances: {
+            claude: { instanceId: 'claude', agentType: 'claude', channelId: 'ch-123' },
+          },
+          createdAt: new Date(),
+          lastActive: new Date(),
+        },
+      });
+      startServer({
+        messaging: mockMessaging as any,
+        stateManager: stateManager as any,
+        pendingTracker: mockPendingTracker as any,
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const res = await postJSON(port, '/opencode-event', {
+        projectName: 'test',
+        agentType: 'claude',
+        type: 'session.idle',
+        text: 'Hello in thread',
+      });
+      expect(res.status).toBe(200);
+      expect(mockPendingTracker.getPendingChannel).toHaveBeenCalledWith('test', 'claude', 'claude');
+      expect(mockMessaging.sendToChannel).toHaveBeenCalledWith('thread-xyz', 'Hello in thread');
+    });
+
+    it('falls back to default channel for session.idle when multiple pending requests exist', async () => {
+      const mockMessaging = createMockMessaging();
+      const mockPendingTracker = createMockPendingTracker();
+      mockPendingTracker.getPendingChannel.mockReturnValue('thread-xyz');
+      mockPendingTracker.getPendingDepth.mockReturnValue(2);
+      const stateManager = createMockStateManager({
+        test: {
+          projectName: 'test',
+          projectPath: tempDir,
+          tmuxSession: 'bridge',
+          agents: { claude: true },
+          discordChannels: { claude: 'ch-123' },
+          instances: {
+            claude: { instanceId: 'claude', agentType: 'claude', channelId: 'ch-123' },
+          },
+          createdAt: new Date(),
+          lastActive: new Date(),
+        },
+      });
+      startServer({
+        messaging: mockMessaging as any,
+        stateManager: stateManager as any,
+        pendingTracker: mockPendingTracker as any,
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const res = await postJSON(port, '/opencode-event', {
+        projectName: 'test',
+        agentType: 'claude',
+        type: 'session.idle',
+        text: 'Hello in parent',
+      });
+      expect(res.status).toBe(200);
+      expect(mockMessaging.sendToChannel).toHaveBeenCalledWith('ch-123', 'Hello in parent');
+      expect(mockPendingTracker.markCompleted).toHaveBeenCalled();
+    });
+
     it('strips file paths from display text in session.idle', async () => {
-      const filesDir = join(tempDir, '.discode', 'files');
+      const filesDir = join(tempDir, '.mudcode', 'files');
       mkdirSync(filesDir, { recursive: true });
       const testFile = join(filesDir, 'output.png');
       writeFileSync(testFile, 'png-data');

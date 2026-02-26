@@ -98,7 +98,7 @@ describe('getFilesDir', () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = join(tmpdir(), `discode-test-${Date.now()}`);
+    tempDir = join(tmpdir(), `mudcode-test-${Date.now()}`);
     mkdirSync(tempDir, { recursive: true });
   });
 
@@ -106,9 +106,9 @@ describe('getFilesDir', () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('creates .discode/files/ directory under projectPath', () => {
+  it('creates .mudcode/files/ directory under projectPath', () => {
     const dir = getFilesDir(tempDir);
-    expect(dir).toBe(join(tempDir, '.discode', 'files'));
+    expect(dir).toBe(join(tempDir, '.mudcode', 'files'));
     expect(existsSync(dir)).toBe(true);
   });
 
@@ -145,7 +145,7 @@ describe('downloadFileAttachments', () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = join(tmpdir(), `discode-dl-test-${Date.now()}`);
+    tempDir = join(tmpdir(), `mudcode-dl-test-${Date.now()}`);
     mkdirSync(tempDir, { recursive: true });
   });
 
@@ -189,7 +189,7 @@ describe('downloadFileAttachments', () => {
     expect(result).toHaveLength(1);
     expect(result[0].originalName).toBe('screenshot.png');
     expect(result[0].contentType).toBe('image/png');
-    expect(result[0].localPath).toContain('.discode/files/');
+    expect(result[0].localPath).toContain('.mudcode/files/');
     expect(result[0].localPath).toContain('screenshot.png');
     expect(existsSync(result[0].localPath)).toBe(true);
   });
@@ -213,7 +213,7 @@ describe('downloadFileAttachments', () => {
     expect(result).toHaveLength(1);
     expect(result[0].originalName).toBe('report.pdf');
     expect(result[0].contentType).toBe('application/pdf');
-    expect(result[0].localPath).toContain('.discode/files/');
+    expect(result[0].localPath).toContain('.mudcode/files/');
     expect(result[0].localPath).toContain('report.pdf');
     expect(existsSync(result[0].localPath)).toBe(true);
   });

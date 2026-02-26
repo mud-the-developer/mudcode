@@ -1,4 +1,4 @@
 {
-  "name": "discode-claude-bridge",
-  "description": "Bridge Claude Code stop events to discode"
+  "name": "mudcode-claude-bridge",
+  "description": "Bridge Claude Code stop events to mudcode"
 }

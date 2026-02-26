@@ -13,11 +13,12 @@ import {
   ComponentType,
   EmbedBuilder,
   AttachmentBuilder,
+  ApplicationCommandOptionType,
 } from 'discord.js';
 import type { AgentMessage, MessageAttachment } from '../types/index.js';
 import { agentRegistry as defaultAgentRegistry, type AgentConfig, type AgentRegistry } from '../agents/index.js';
 import { normalizeDiscordToken } from '../config/token.js';
-import type { MessagingClient, MessageCallback, ChannelInfo } from '../messaging/interface.js';
+import type { MessagingClient, MessageCallback, ChannelInfo, MessageContext } from '../messaging/interface.js';
 
 export type { MessageCallback, ChannelInfo };
 
@@ -28,6 +29,7 @@ export class DiscordClient implements MessagingClient {
   private targetChannel?: TextChannel;
   private messageCallback?: MessageCallback;
   private channelMapping: Map<string, ChannelInfo> = new Map();
+  private typingIndicators: Map<string, { timer: ReturnType<typeof setInterval>; refs: number }> = new Map();
   private registry: AgentRegistry;
 
   constructor(token: string, registry?: AgentRegistry) {
@@ -46,9 +48,10 @@ export class DiscordClient implements MessagingClient {
   }
 
   private setupEventHandlers(): void {
-    this.client.on('clientReady', () => {
+    this.client.on('clientReady', async () => {
       console.log(`Discord bot logged in as ${this.client.user?.tag}`);
       this.scanExistingChannels();
+      await this.registerSessionControlCommands();
     });
 
     this.client.on('error', (error) => {
@@ -62,8 +65,9 @@ export class DiscordClient implements MessagingClient {
       // Only process text channels
       if (!message.channel.isTextBased()) return;
 
-      const channelInfo = this.channelMapping.get(message.channelId);
-      if (channelInfo && this.messageCallback) {
+      const route = this.resolveRouteForIncomingMessage(message.channelId, message.channel as unknown);
+      if (route && this.messageCallback) {
+        const { channelInfo, routeChannelId, threadId } = route;
         try {
           // Extract attachments from the Discord message
           const attachments: MessageAttachment[] = message.attachments.map((a) => ({
@@ -72,6 +76,13 @@ export class DiscordClient implements MessagingClient {
             contentType: a.contentType,
             size: a.size,
           }));
+          const context = this.buildMessageContext({
+            sourceChannelId: message.channelId,
+            routeChannelId,
+            authorId: message.author.id,
+            threadId,
+            replyToMessageId: message.reference?.messageId || undefined,
+          });
 
           await this.messageCallback(
             channelInfo.agentType,
@@ -80,7 +91,8 @@ export class DiscordClient implements MessagingClient {
             message.channelId,
             message.id,
             channelInfo.instanceId,
-            attachments.length > 0 ? attachments : undefined
+            attachments.length > 0 ? attachments : undefined,
+            context,
           );
         } catch (error) {
           console.error(
@@ -90,6 +102,230 @@ export class DiscordClient implements MessagingClient {
         }
       }
     });
+
+    this.client.on('interactionCreate', async (interaction) => {
+      if (!interaction.isChatInputCommand()) return;
+
+      const commandName = interaction.commandName.toLowerCase();
+      const sessionCommands = new Set(['q', 'qw']);
+      const keyCommands = new Set(['enter', 'tab', 'esc', 'up', 'down']);
+      if (!sessionCommands.has(commandName) && !keyCommands.has(commandName)) return;
+      if (interaction.user.bot) return;
+
+      const route = this.resolveRouteForIncomingMessage(interaction.channelId, interaction.channel as unknown);
+      if (!route || !this.messageCallback) {
+        if (!interaction.deferred && !interaction.replied) {
+          await interaction.reply({
+            content: '⚠️ This channel is not mapped to an active agent instance.',
+            ephemeral: true,
+          });
+        }
+        return;
+      }
+
+      const { channelInfo, routeChannelId, threadId } = route;
+      const context = this.buildMessageContext({
+        sourceChannelId: interaction.channelId,
+        routeChannelId,
+        authorId: interaction.user.id,
+        threadId,
+      });
+      const count = interaction.options.getInteger('count') || 1;
+      const commandPayload =
+        keyCommands.has(commandName) && count > 1
+          ? `/${commandName} ${count}`
+          : `/${commandName}`;
+
+      try {
+        await interaction.deferReply({ ephemeral: true });
+        await this.messageCallback(
+          channelInfo.agentType,
+          commandPayload,
+          channelInfo.projectName,
+          interaction.channelId,
+          undefined,
+          channelInfo.instanceId,
+          undefined,
+          context,
+        );
+        await interaction.editReply(`✅ \`${commandPayload}\` request submitted.`);
+      } catch (error) {
+        console.error(
+          `Discord slash command error [${channelInfo.projectName}/${channelInfo.agentType}] channel=${interaction.channelId}:`,
+          error,
+        );
+        if (interaction.deferred || interaction.replied) {
+          await interaction.editReply('⚠️ Failed to process the command. Try again.').catch(() => {});
+        } else {
+          await interaction.reply({
+            content: '⚠️ Failed to process the command. Try again.',
+            ephemeral: true,
+          }).catch(() => {});
+        }
+      }
+    });
+  }
+
+  private async registerSessionControlCommands(): Promise<void> {
+    const commands = [
+      {
+        name: 'q',
+        description: 'Stop the current agent pane and delete this channel.',
+      },
+      {
+        name: 'qw',
+        description: 'Stop the current agent pane and save this channel.',
+      },
+      {
+        name: 'enter',
+        description: 'Send Enter key to the active agent pane.',
+        options: [
+          {
+            name: 'count',
+            description: 'How many times to send Enter (1-20).',
+            type: ApplicationCommandOptionType.Integer,
+            required: false,
+            min_value: 1,
+            max_value: 20,
+          },
+        ],
+      },
+      {
+        name: 'tab',
+        description: 'Send Tab key to the active agent pane.',
+        options: [
+          {
+            name: 'count',
+            description: 'How many times to send Tab (1-20).',
+            type: ApplicationCommandOptionType.Integer,
+            required: false,
+            min_value: 1,
+            max_value: 20,
+          },
+        ],
+      },
+      {
+        name: 'esc',
+        description: 'Send Escape key to the active agent pane.',
+        options: [
+          {
+            name: 'count',
+            description: 'How many times to send Escape (1-20).',
+            type: ApplicationCommandOptionType.Integer,
+            required: false,
+            min_value: 1,
+            max_value: 20,
+          },
+        ],
+      },
+      {
+        name: 'up',
+        description: 'Send Up Arrow key to the active agent pane.',
+        options: [
+          {
+            name: 'count',
+            description: 'How many times to send Up Arrow (1-20).',
+            type: ApplicationCommandOptionType.Integer,
+            required: false,
+            min_value: 1,
+            max_value: 20,
+          },
+        ],
+      },
+      {
+        name: 'down',
+        description: 'Send Down Arrow key to the active agent pane.',
+        options: [
+          {
+            name: 'count',
+            description: 'How many times to send Down Arrow (1-20).',
+            type: ApplicationCommandOptionType.Integer,
+            required: false,
+            min_value: 1,
+            max_value: 20,
+          },
+        ],
+      },
+    ] as const;
+
+    const guildsToRegister = new Map<string, any>();
+    for (const guild of this.client.guilds.cache.values()) {
+      guildsToRegister.set(guild.id, guild);
+    }
+
+    if (guildsToRegister.size === 0) {
+      try {
+        const fetchedGuilds = await this.client.guilds.fetch();
+        for (const entry of fetchedGuilds.values()) {
+          const guild = await entry.fetch();
+          guildsToRegister.set(guild.id, guild);
+        }
+      } catch (error) {
+        console.warn('Failed to fetch guilds for slash command registration:', error);
+      }
+    }
+
+    if (guildsToRegister.size === 0) {
+      console.warn('No guilds available for slash command registration.');
+      return;
+    }
+
+    for (const guild of guildsToRegister.values()) {
+      try {
+        await guild.commands.set(commands);
+      } catch (error) {
+        console.warn(`Failed to register slash commands for guild ${guild.id}:`, error);
+      }
+    }
+  }
+
+  private resolveRouteForIncomingMessage(
+    sourceChannelId: string,
+    channel: unknown,
+  ): { channelInfo: ChannelInfo; routeChannelId: string; threadId?: string } | null {
+    const direct = this.channelMapping.get(sourceChannelId);
+    if (direct) {
+      return {
+        channelInfo: direct,
+        routeChannelId: sourceChannelId,
+      };
+    }
+
+    const threadLike = channel as { isThread?: () => boolean; parentId?: string };
+    const isThread = typeof threadLike?.isThread === 'function' && threadLike.isThread();
+    const parentId = isThread ? threadLike.parentId : undefined;
+    if (!parentId) return null;
+
+    const parentMapping = this.channelMapping.get(parentId);
+    if (!parentMapping) return null;
+
+    return {
+      channelInfo: parentMapping,
+      routeChannelId: parentId,
+      threadId: sourceChannelId,
+    };
+  }
+
+  private buildMessageContext(input: {
+    sourceChannelId: string;
+    routeChannelId: string;
+    authorId: string;
+    threadId?: string;
+    replyToMessageId?: string;
+  }): MessageContext {
+    const conversationKey = input.threadId
+      ? `discord:thread:${input.threadId}`
+      : `discord:channel:${input.routeChannelId}:author:${input.authorId}`;
+
+    return {
+      platform: 'discord',
+      sourceChannelId: input.sourceChannelId,
+      routeChannelId: input.routeChannelId,
+      authorId: input.authorId,
+      threadId: input.threadId,
+      replyToMessageId: input.replyToMessageId,
+      conversationKey,
+    };
   }
 
   private scanExistingChannels(): void {
@@ -116,6 +352,26 @@ export class DiscordClient implements MessagingClient {
       };
     }
     return null;
+  }
+
+  private normalizeChannelName(name: string, maxLength: number = 100): string {
+    const normalized = name
+      .toLowerCase()
+      .replace(/\s+/g, '-')
+      .replace(/[^a-z0-9_-]/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^[-_]+|[-_]+$/g, '');
+
+    const clipped = normalized.slice(0, maxLength).replace(/^[-_]+|[-_]+$/g, '');
+    return clipped.length > 0 ? clipped : 'saved-channel';
+  }
+
+  private buildSavedChannelName(currentName: string, now: Date = new Date()): string {
+    const pad = (value: number) => String(value).padStart(2, '0');
+    const timestamp =
+      `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+    return this.normalizeChannelName(`saved_${timestamp}_${currentName}`, 100);
   }
 
   async connect(): Promise<void> {
@@ -250,6 +506,10 @@ export class DiscordClient implements MessagingClient {
   }
 
   async disconnect(): Promise<void> {
+    for (const state of this.typingIndicators.values()) {
+      clearInterval(state.timer);
+    }
+    this.typingIndicators.clear();
     await this.client.destroy();
   }
 
@@ -377,6 +637,27 @@ export class DiscordClient implements MessagingClient {
         console.error(`Failed to delete channel ${channelId}:`, error);
       }
       return false;
+    }
+  }
+
+  async archiveChannel(channelId: string): Promise<string | null> {
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel) return null;
+
+      const hasSetName = 'setName' in channel && typeof (channel as any).setName === 'function';
+      if (!hasSetName) return null;
+
+      const currentName =
+        'name' in channel && typeof (channel as any).name === 'string'
+          ? (channel as any).name
+          : 'channel';
+      const savedName = this.buildSavedChannelName(currentName);
+      await (channel as any).setName(savedName);
+      return savedName;
+    } catch (error) {
+      console.error(`Failed to archive channel ${channelId}:`, error);
+      return null;
     }
   }
 
@@ -528,6 +809,40 @@ export class DiscordClient implements MessagingClient {
       await message.react(toEmoji);
     } catch (error) {
       console.warn(`Failed to replace reaction on ${channelId}/${messageId}:`, error);
+    }
+  }
+
+  async startTypingIndicator(channelId: string): Promise<() => void> {
+    const existing = this.typingIndicators.get(channelId);
+    if (existing) {
+      existing.refs += 1;
+      return () => this.stopTypingIndicator(channelId);
+    }
+
+    const channel = await this.client.channels.fetch(channelId);
+    if (!channel?.isTextBased() || !('sendTyping' in channel)) {
+      return () => {};
+    }
+
+    const textChannel = channel as TextChannel;
+    await textChannel.sendTyping().catch(() => undefined);
+
+    const timer = setInterval(() => {
+      void textChannel.sendTyping().catch(() => undefined);
+    }, 8000);
+
+    this.typingIndicators.set(channelId, { timer, refs: 1 });
+    return () => this.stopTypingIndicator(channelId);
+  }
+
+  private stopTypingIndicator(channelId: string): void {
+    const state = this.typingIndicators.get(channelId);
+    if (!state) return;
+
+    state.refs -= 1;
+    if (state.refs <= 0) {
+      clearInterval(state.timer);
+      this.typingIndicators.delete(channelId);
     }
   }
 }

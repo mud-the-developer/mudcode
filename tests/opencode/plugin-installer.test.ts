@@ -59,7 +59,7 @@ describe('opencode plugin installer', () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = mkdtempSync(join(tmpdir(), 'discode-opencode-plugin-test-'));
+    tempDir = mkdtempSync(join(tmpdir(), 'mudcode-opencode-plugin-test-'));
   });
 
   afterEach(() => {

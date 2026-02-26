@@ -102,7 +102,7 @@ function handoffToBunRuntime(): never {
     stdio: 'inherit',
     env: {
       ...process.env,
-      DISCODE_TUI_BUN_HANDOFF: '1',
+      MUDCODE_TUI_BUN_HANDOFF: '1',
     },
   });
 
@@ -366,7 +366,7 @@ export async function tuiCommand(options: TmuxCliOptions): Promise<void> {
 
   const isBunRuntime = Boolean((process as { versions?: { bun?: string } }).versions?.bun);
   if (!isBunRuntime) {
-    if (process.env.DISCODE_TUI_BUN_HANDOFF === '1') {
+    if (process.env.MUDCODE_TUI_BUN_HANDOFF === '1') {
       throw new Error('TUI requires Bun runtime. Run with: mudcode tui');
     }
     handoffToBunRuntime();

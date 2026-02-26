@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Rebuild and restart discode daemon.
+Rebuild and restart mudcode daemon.
 
 Usage:
   rebuild_restart_daemon.sh [--repo <path>] [--skip-build] [--dry-run]
@@ -77,12 +77,12 @@ else
 fi
 
 echo "[2/4] Stop daemon"
-run_cmd bun dist/bin/discode.js daemon stop
+run_cmd bun dist/bin/mudcode.js daemon stop
 
 echo "[3/4] Start daemon"
-run_cmd bun dist/bin/discode.js daemon start
+run_cmd bun dist/bin/mudcode.js daemon start
 
 echo "[4/4] Check daemon status"
-run_cmd bun dist/bin/discode.js daemon status
+run_cmd bun dist/bin/mudcode.js daemon status
 
-echo "Done. Log: ~/.discode/daemon.log"
+echo "Done. Log: ~/.mudcode/daemon.log"

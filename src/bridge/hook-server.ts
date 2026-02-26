@@ -25,6 +25,34 @@ export class BridgeHookServer {
 
   constructor(private deps: BridgeHookServerDeps) {}
 
+  private resolveOutputRoute(
+    defaultChannelId: string | undefined,
+    projectName: string,
+    agentType: string,
+    instanceId?: string,
+  ): { channelId: string | undefined; pendingDepth: number } {
+    const pendingTracker = this.deps.pendingTracker as unknown as {
+      getPendingChannel?: (projectName: string, agentType: string, instanceId?: string) => string | undefined;
+      getPendingDepth?: (projectName: string, agentType: string, instanceId?: string) => number;
+    };
+    const pendingChannel =
+      typeof pendingTracker.getPendingChannel === 'function'
+        ? pendingTracker.getPendingChannel(projectName, agentType, instanceId)
+        : undefined;
+    const pendingDepth =
+      typeof pendingTracker.getPendingDepth === 'function'
+        ? pendingTracker.getPendingDepth(projectName, agentType, instanceId)
+        : pendingChannel
+          ? 1
+          : 0;
+
+    if (pendingDepth > 1) {
+      return { channelId: defaultChannelId || pendingChannel, pendingDepth };
+    }
+
+    return { channelId: pendingChannel || defaultChannelId, pendingDepth };
+  }
+
   start(): void {
     this.httpServer = createServer(async (req, res) => {
       if (req.method !== 'POST') {
@@ -146,7 +174,15 @@ export class BridgeHookServer {
     const instance =
       (instanceId ? getProjectInstance(normalizedProject, instanceId) : undefined) ||
       getPrimaryInstanceForAgent(normalizedProject, agentType);
-    const channelId = instance?.channelId;
+    const resolvedAgentType = instance?.agentType || agentType;
+    const resolvedInstanceId = instance?.instanceId;
+    const routeInfo = this.resolveOutputRoute(
+      instance?.channelId,
+      projectName,
+      resolvedAgentType,
+      resolvedInstanceId,
+    );
+    const channelId = routeInfo.channelId;
     if (!channelId) return { status: 404, message: 'No channel found for project/agent' };
 
     const projectPath = project.projectPath ? resolve(project.projectPath) : '';
@@ -188,7 +224,15 @@ export class BridgeHookServer {
     const instance =
       (instanceId ? getProjectInstance(normalizedProject, instanceId) : undefined) ||
       getPrimaryInstanceForAgent(normalizedProject, agentType);
-    const channelId = instance?.channelId;
+    const resolvedAgentType = instance?.agentType || agentType;
+    const resolvedInstanceId = instance?.instanceId;
+    const routeInfo = this.resolveOutputRoute(
+      instance?.channelId,
+      projectName,
+      resolvedAgentType,
+      resolvedInstanceId,
+    );
+    const channelId = routeInfo.channelId;
     if (!channelId) return false;
 
     const text = this.getEventText(event);
@@ -198,40 +242,46 @@ export class BridgeHookServer {
 
     if (eventType === 'session.error') {
       // Fire reaction update in background – don't block message delivery
-      this.deps.pendingTracker.markError(projectName, instance?.agentType || agentType, instance?.instanceId).catch(() => {});
+      this.deps.pendingTracker.markError(projectName, resolvedAgentType, resolvedInstanceId).catch(() => {});
       const msg = text || 'unknown error';
       await this.deps.messaging.sendToChannel(channelId, `⚠️ OpenCode session error: ${msg}`);
       return true;
     }
 
     if (eventType === 'session.idle') {
-      // Fire reaction update in background – don't block message delivery
-      this.deps.pendingTracker.markCompleted(projectName, instance?.agentType || agentType, instance?.instanceId).catch(() => {});
-      if (text && text.trim().length > 0) {
-        const trimmed = text.trim();
-        // Use turnText (all assistant text from the turn) for file path extraction
-        // to handle the race condition where displayText doesn't contain file paths
-        const turnText = typeof event.turnText === 'string' ? event.turnText.trim() : '';
-        const fileSearchText = turnText || trimmed;
-        const projectPath = project.projectPath ? resolve(project.projectPath) : '';
-        const filePaths = this.validateFilePaths(extractFilePaths(fileSearchText), projectPath);
+      try {
+        if (text && text.trim().length > 0) {
+          const trimmed = text.trim();
+          // Use turnText (all assistant text from the turn) for file path extraction
+          // to handle the race condition where displayText doesn't contain file paths
+          const turnText = typeof event.turnText === 'string' ? event.turnText.trim() : '';
+          const fileSearchText = turnText || trimmed;
+          const projectPath = project.projectPath ? resolve(project.projectPath) : '';
+          const filePaths = this.validateFilePaths(extractFilePaths(fileSearchText), projectPath);
 
-        // Strip file paths from the display text to avoid leaking absolute paths
-        const displayText = filePaths.length > 0 ? stripFilePaths(trimmed, filePaths) : trimmed;
+          // Strip file paths from the display text to avoid leaking absolute paths
+          const displayText = filePaths.length > 0 ? stripFilePaths(trimmed, filePaths) : trimmed;
 
-        const split = this.deps.messaging.platform === 'slack' ? splitForSlack : splitForDiscord;
-        const chunks = split(displayText);
-        for (const chunk of chunks) {
-          if (chunk.trim().length > 0) {
-            await this.deps.messaging.sendToChannel(channelId, chunk);
+          const split = this.deps.messaging.platform === 'slack' ? splitForSlack : splitForDiscord;
+          const chunks = split(displayText);
+          for (const chunk of chunks) {
+            if (chunk.trim().length > 0) {
+              await this.deps.messaging.sendToChannel(channelId, chunk);
+            }
+          }
+
+          if (filePaths.length > 0) {
+            await this.deps.messaging.sendToChannelWithFiles(channelId, '', filePaths);
           }
         }
 
-        if (filePaths.length > 0) {
-          await this.deps.messaging.sendToChannelWithFiles(channelId, '', filePaths);
-        }
+        // Complete after idle output delivery so pending-channel routing remains stable.
+        await this.deps.pendingTracker.markCompleted(projectName, resolvedAgentType, resolvedInstanceId).catch(() => {});
+        return true;
+      } catch (error) {
+        await this.deps.pendingTracker.markError(projectName, resolvedAgentType, resolvedInstanceId).catch(() => {});
+        throw error;
       }
-      return true;
     }
 
     return true;

@@ -1,18 +1,18 @@
 # Slack Setup Guide
 
-This guide walks you through connecting Discode to Slack instead of Discord.
+This guide walks you through connecting Mudcode to Slack instead of Discord.
 
 ## Prerequisites
 
 - Node.js 18+ or Bun 1.3+
-- Discode installed (`npm install -g @siisee11/discode`)
+- Mudcode installed (`npm install -g @mudramo/mudcode`)
 - A Slack workspace where you have permission to install apps
 
 ## 1. Create a Slack App
 
 1. Go to [api.slack.com/apps](https://api.slack.com/apps) and click **Create New App**
 2. Choose **From scratch**
-3. Name it (e.g. `Discode Bot`) and select your workspace
+3. Name it (e.g. `Mudcode Bot`) and select your workspace
 4. Click **Create App**
 
 ## 2. Enable Socket Mode
@@ -20,7 +20,7 @@ This guide walks you through connecting Discode to Slack instead of Discord.
 1. In your app settings, go to **Socket Mode** (left sidebar)
 2. Toggle **Enable Socket Mode** to On
 3. You'll be prompted to create an **App-Level Token**:
-   - Name: `discode-socket`
+   - Name: `mudcode-socket`
    - Scope: `connections:write`
    - Click **Generate**
 4. **Copy the `xapp-...` token** — you'll need this later
@@ -58,12 +58,12 @@ This guide walks you through connecting Discode to Slack instead of Discord.
 3. Review the permissions and click **Allow**
 4. **Copy the `xoxb-...` Bot User OAuth Token**
 
-## 6. Configure Discode
+## 6. Configure Mudcode
 
 Run the onboarding command:
 
 ```bash
-discode onboard --platform slack
+mudcode onboard --platform slack
 ```
 
 This will prompt you for:
@@ -73,19 +73,19 @@ This will prompt you for:
 Or set tokens directly:
 
 ```bash
-discode config --platform slack \
+mudcode config --platform slack \
   --slack-bot-token xoxb-your-bot-token \
   --slack-app-token xapp-your-app-token
 ```
 
-## 7. Start Using Discode
+## 7. Start Using Mudcode
 
 ```bash
 cd your-project
-discode new claude
+mudcode new claude
 ```
 
-Discode will:
+Mudcode will:
 1. Create a Slack channel (e.g. `#your-project-claude`)
 2. Launch the AI agent in a tmux session
 3. Bridge messages between Slack and the agent
@@ -114,7 +114,7 @@ export SLACK_APP_TOKEN=xapp-...
 ## Troubleshooting
 
 ### Bot doesn't respond to messages
-- Ensure the bot is invited to the channel (mention `@Discode Bot` or use `/invite`)
+- Ensure the bot is invited to the channel (mention `@Mudcode Bot` or use `/invite`)
 - Check that `message.channels` event subscription is enabled
 - Verify Socket Mode is enabled
 

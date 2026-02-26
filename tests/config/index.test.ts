@@ -238,6 +238,62 @@ describe('ConfigManager', () => {
 
       expect(() => manager.validateConfig()).not.toThrow();
     });
+
+    it('validateConfig throws for invalid MESSAGING_PLATFORM value', () => {
+      const storage = new MockStorage();
+      const env = new MockEnvironment();
+      env.set('MESSAGING_PLATFORM', 'discrod');
+      env.set('DISCORD_BOT_TOKEN', 'valid-token');
+
+      const manager = new ConfigManager(storage, env, configDir);
+
+      expect(() => manager.validateConfig()).toThrow(/MESSAGING_PLATFORM/);
+    });
+
+    it('validateConfig throws for invalid OPENCODE_PERMISSION_MODE value', () => {
+      const storage = new MockStorage();
+      const env = new MockEnvironment();
+      env.set('DISCORD_BOT_TOKEN', 'valid-token');
+      env.set('OPENCODE_PERMISSION_MODE', 'enabled');
+
+      const manager = new ConfigManager(storage, env, configDir);
+
+      expect(() => manager.validateConfig()).toThrow(/OPENCODE_PERMISSION_MODE/);
+    });
+
+    it('validateConfig throws for invalid HOOK_SERVER_PORT value', () => {
+      const storage = new MockStorage();
+      const env = new MockEnvironment();
+      env.set('DISCORD_BOT_TOKEN', 'valid-token');
+      env.set('HOOK_SERVER_PORT', 'abc');
+
+      const manager = new ConfigManager(storage, env, configDir);
+
+      expect(() => manager.validateConfig()).toThrow(/HOOK_SERVER_PORT/);
+    });
+
+    it('validateConfig throws for invalid stored hookServerPort', () => {
+      const storage = new MockStorage();
+      const env = new MockEnvironment();
+      env.set('DISCORD_BOT_TOKEN', 'valid-token');
+      storage.setFile(configFile, JSON.stringify({ hookServerPort: 70000 }));
+
+      const manager = new ConfigManager(storage, env, configDir);
+
+      expect(() => manager.validateConfig()).toThrow(/hookServerPort/);
+    });
+
+    it('validateConfig throws for malformed slack token formats when slack is enabled', () => {
+      const storage = new MockStorage();
+      const env = new MockEnvironment();
+      env.set('MESSAGING_PLATFORM', 'slack');
+      env.set('SLACK_BOT_TOKEN', 'bot-token');
+      env.set('SLACK_APP_TOKEN', 'app-token');
+
+      const manager = new ConfigManager(storage, env, configDir);
+
+      expect(() => manager.validateConfig()).toThrow(/SLACK_BOT_TOKEN/);
+    });
   });
 
   describe('utilities', () => {

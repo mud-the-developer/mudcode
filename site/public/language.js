@@ -1,5 +1,5 @@
 (() => {
-  const STORAGE_KEY = "discode-language";
+  const STORAGE_KEY = "mudcode-language";
   const DEFAULT_LANGUAGE = "en";
 
   const isLanguage = (value) => value === "en" || value === "ko";

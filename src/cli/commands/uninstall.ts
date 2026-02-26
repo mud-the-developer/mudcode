@@ -25,7 +25,7 @@ function removePathIfExists(path: string): boolean {
 type PackageManager = 'npm' | 'bun';
 
 function resolveCliPackageName(): string {
-  const fromEnv = process.env.DISCODE_NPM_PACKAGE?.trim();
+  const fromEnv = process.env.MUDCODE_NPM_PACKAGE?.trim();
   if (fromEnv) return fromEnv;
 
   const candidates = [
@@ -88,19 +88,19 @@ export async function uninstallCommand(options: {
     console.log(chalk.gray('   Daemon not running'));
   }
 
-  const localBinaryPath = join(homedir(), '.discode', 'bin', 'discode');
+  const localBinaryPath = join(homedir(), '.mudcode', 'bin', 'mudcode');
   if (removePathIfExists(localBinaryPath)) {
     console.log(chalk.green(`✅ Removed local binary: ${localBinaryPath}`));
   }
 
   if (shouldPurge) {
-    const removedState = removePathIfExists(join(homedir(), '.discode'));
+    const removedState = removePathIfExists(join(homedir(), '.mudcode'));
     const removedOpencodePlugin = removePathIfExists(join(homedir(), '.opencode', 'plugins', 'agent-opencode-bridge-plugin.ts'));
-    const removedClaudePlugin = removePathIfExists(join(homedir(), '.claude', 'plugins', 'discode-claude-bridge'));
+    const removedClaudePlugin = removePathIfExists(join(homedir(), '.claude', 'plugins', 'mudcode-claude-bridge'));
     const removedGeminiHook = removeGeminiHook();
 
     if (removedState) {
-      console.log(chalk.green('✅ Removed ~/.discode (state/config/logs)'));
+      console.log(chalk.green('✅ Removed ~/.mudcode (state/config/logs)'));
     }
     if (removedOpencodePlugin) {
       console.log(chalk.green('✅ Removed OpenCode bridge plugin'));

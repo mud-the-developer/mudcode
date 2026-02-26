@@ -7,11 +7,11 @@ import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from 'solid-js';
 
-declare const DISCODE_VERSION: string | undefined;
+declare const MUDCODE_VERSION: string | undefined;
 
 function resolveTuiVersion(): string {
-  if (typeof DISCODE_VERSION !== 'undefined' && DISCODE_VERSION) {
-    return DISCODE_VERSION;
+  if (typeof MUDCODE_VERSION !== 'undefined' && MUDCODE_VERSION) {
+    return MUDCODE_VERSION;
   }
 
   const candidates = [

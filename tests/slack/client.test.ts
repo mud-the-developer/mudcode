@@ -62,7 +62,20 @@ describe('SlackClient message handling', () => {
     });
 
     expect(callback).toHaveBeenCalledWith(
-      'claude', 'hello', 'proj', 'C_TEST', '1234.5678', 'claude', undefined,
+      'claude',
+      'hello',
+      'proj',
+      'C_TEST',
+      '1234.5678',
+      'claude',
+      undefined,
+      expect.objectContaining({
+        platform: 'slack',
+        sourceChannelId: 'C_TEST',
+        routeChannelId: 'C_TEST',
+        authorId: 'U_USER',
+        conversationKey: 'slack:channel:C_TEST:author:U_USER',
+      }),
     );
   });
 

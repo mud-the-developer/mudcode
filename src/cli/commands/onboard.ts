@@ -227,7 +227,7 @@ export async function onboardCommand(options: {
   slackAppToken?: string;
 }) {
   try {
-    console.log(chalk.cyan('\n🚀 Discode Onboarding\n'));
+    console.log(chalk.cyan('\n🚀 Mudcode Onboarding\n'));
 
     const platform = (options.platform as 'discord' | 'slack') || await choosePlatform();
     saveConfig({ messagingPlatform: platform });

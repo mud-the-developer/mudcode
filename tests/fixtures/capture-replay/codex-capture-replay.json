@@ -1,0 +1,95 @@
+[
+  {
+    "name": "single pending echo then answer",
+    "projectName": "demo",
+    "tmuxSession": "agent-demo",
+    "agentType": "codex",
+    "instanceId": "codex",
+    "tmuxWindow": "demo-codex",
+    "channelId": "ch-1",
+    "pendingChannel": "ch-1",
+    "pendingDepth": 1,
+    "promptTails": [
+      "this is an intentionally long prompt suffix for pending echo filtering"
+    ],
+    "captures": [
+      "boot line",
+      "boot line\nthis is an intentionally long prompt suffix for pending echo filtering",
+      "boot line\nthis is an intentionally long prompt suffix for pending echo filtering\nassistant: answer body"
+    ],
+    "expectedMessages": [
+      "assistant: answer body"
+    ],
+    "expectedChannel": "ch-1",
+    "expectedCompletedCalls": 0
+  },
+  {
+    "name": "multi pending exact echo suppressed",
+    "projectName": "demo",
+    "tmuxSession": "agent-demo",
+    "agentType": "codex",
+    "instanceId": "codex",
+    "tmuxWindow": "demo-codex",
+    "channelId": "parent-ch",
+    "pendingChannel": "thread-ch",
+    "pendingDepth": 2,
+    "promptTails": [
+      "this is an intentionally long prompt suffix for pending echo filtering",
+      "another pending tail"
+    ],
+    "captures": [
+      "boot line",
+      "boot line\nthis is an intentionally long prompt suffix for pending echo filtering"
+    ],
+    "expectedMessages": [],
+    "expectedChannel": "parent-ch",
+    "expectedCompletedCalls": 0
+  },
+  {
+    "name": "multi pending non-echo preserved",
+    "projectName": "demo",
+    "tmuxSession": "agent-demo",
+    "agentType": "codex",
+    "instanceId": "codex",
+    "tmuxWindow": "demo-codex",
+    "channelId": "parent-ch",
+    "pendingChannel": "thread-ch",
+    "pendingDepth": 2,
+    "promptTails": [
+      "this is an intentionally long prompt suffix for pending echo filtering",
+      "another pending tail"
+    ],
+    "captures": [
+      "boot line",
+      "boot line\nthis is an intentionally long prompt suffix for pending echo filtering -> transformed by assistant"
+    ],
+    "expectedMessages": [
+      "this is an intentionally long prompt suffix for pending echo filtering -> transformed by assistant"
+    ],
+    "expectedChannel": "parent-ch",
+    "expectedCompletedCalls": 0
+  },
+  {
+    "name": "assistant prefixed line survives echo filter",
+    "projectName": "demo",
+    "tmuxSession": "agent-demo",
+    "agentType": "codex",
+    "instanceId": "codex",
+    "tmuxWindow": "demo-codex",
+    "channelId": "ch-1",
+    "pendingChannel": "ch-1",
+    "pendingDepth": 1,
+    "promptTails": [
+      "this is an intentionally long prompt suffix for pending echo filtering"
+    ],
+    "captures": [
+      "boot line",
+      "boot line\nassistant: this is an intentionally long prompt suffix for pending echo filtering -> handled"
+    ],
+    "expectedMessages": [
+      "assistant: this is an intentionally long prompt suffix for pending echo filtering -> handled"
+    ],
+    "expectedChannel": "ch-1",
+    "expectedCompletedCalls": 0
+  }
+]

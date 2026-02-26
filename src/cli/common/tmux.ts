@@ -35,19 +35,19 @@ export function attachToTmux(sessionName: string, windowName?: string): void {
 }
 
 const TUI_PROCESS_COMMAND_MARKERS = [
-  '/dist/bin/discode.js tui',
   '/dist/bin/mudcode.js tui',
-  '/bin/discode.js tui',
+  '/dist/bin/mudcode.js tui',
   '/bin/mudcode.js tui',
-  'discode.js tui',
+  '/bin/mudcode.js tui',
   'mudcode.js tui',
-  '/bin/discode tui',
+  'mudcode.js tui',
   '/bin/mudcode tui',
-  'discode tui',
+  '/bin/mudcode tui',
+  'mudcode tui',
   'mudcode tui',
 ];
 
-function isDiscodeTuiProcess(command: string): boolean {
+function isMudcodeTuiProcess(command: string): boolean {
   return TUI_PROCESS_COMMAND_MARKERS.some((marker) => command.includes(marker));
 }
 
@@ -150,7 +150,7 @@ function listActiveTmuxPaneTtys(): Set<string> {
   }
 }
 
-export function cleanupStaleDiscodeTuiProcesses(): number {
+export function cleanupStaleMudcodeTuiProcesses(): number {
   const activePaneTtys = listActiveTmuxPaneTtys();
   if (activePaneTtys.size === 0) return 0;
 
@@ -197,7 +197,7 @@ export function cleanupStaleDiscodeTuiProcesses(): number {
   let cleaned = 0;
   for (const row of rows) {
     if (!tmuxPids.has(row.ppid)) continue;
-    if (!isDiscodeTuiProcess(row.command)) continue;
+    if (!isMudcodeTuiProcess(row.command)) continue;
     if (row.tty && activePaneTtys.has(row.tty)) continue;
 
     if (signalProcessTree(row.pid, 'SIGTERM')) {
@@ -298,9 +298,9 @@ export function ensureProjectTuiPane(
       commandParts = [bunCommand, argvRunner, 'tui'];
     } else {
       const runnerDir = dirname(argvRunner);
-      const sourceRunner = resolve(runnerDir, 'discode.ts');
+      const sourceRunner = resolve(runnerDir, 'mudcode.ts');
       const sourceRunnerMudcode = resolve(runnerDir, 'mudcode.ts');
-      const distRunner = resolve(runnerDir, '../dist/bin/discode.js');
+      const distRunner = resolve(runnerDir, '../dist/bin/mudcode.js');
       const distRunnerMudcode = resolve(runnerDir, '../dist/bin/mudcode.js');
       if (existsSync(sourceRunner)) {
         commandParts = [bunCommand, sourceRunner, 'tui'];
@@ -318,11 +318,11 @@ export function ensureProjectTuiPane(
 
   if (!commandParts) {
     const fallbackRunners = [
-      resolve(import.meta.dirname, '../../../dist/bin/discode.js'),
       resolve(import.meta.dirname, '../../../dist/bin/mudcode.js'),
-      resolve(import.meta.dirname, '../../../bin/discode.ts'),
+      resolve(import.meta.dirname, '../../../dist/bin/mudcode.js'),
       resolve(import.meta.dirname, '../../../bin/mudcode.ts'),
-      resolve(import.meta.dirname, '../../../bin/discode.js'),
+      resolve(import.meta.dirname, '../../../bin/mudcode.ts'),
+      resolve(import.meta.dirname, '../../../bin/mudcode.js'),
       resolve(import.meta.dirname, '../../../bin/mudcode.js'),
     ];
     const fallbackRunner = fallbackRunners.find((runner) => existsSync(runner));

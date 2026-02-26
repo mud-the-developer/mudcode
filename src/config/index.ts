@@ -34,7 +34,7 @@ export class ConfigManager {
   constructor(storage?: IStorage, env?: IEnvironment, configDir?: string) {
     this.storage = storage || new FileStorage();
     this.env = env || new SystemEnvironment();
-    this.configDir = configDir || join(this.env.homedir(), '.discode');
+    this.configDir = configDir || join(this.env.homedir(), '.mudcode');
     this.configFile = join(this.configDir, 'config.json');
   }
 
@@ -55,7 +55,7 @@ export class ConfigManager {
           ? envPermissionModeRaw
           : undefined;
       const opencodePermissionMode = storedConfig.opencodePermissionMode || envPermissionMode;
-      const defaultAgentCli = storedConfig.defaultAgentCli || this.env.get('DISCODE_DEFAULT_AGENT_CLI');
+      const defaultAgentCli = storedConfig.defaultAgentCli || this.env.get('MUDCODE_DEFAULT_AGENT_CLI');
 
       const platformRaw = storedConfig.messagingPlatform || this.env.get('MESSAGING_PLATFORM');
       const messagingPlatform: MessagingPlatform | undefined =
@@ -65,6 +65,10 @@ export class ConfigManager {
       const slackAppToken = storedConfig.slackAppToken || this.env.get('SLACK_APP_TOKEN');
 
       // Merge: stored config > environment variables > defaults
+      const resolvedHookPort = this.resolveHookServerPort(
+        storedConfig.hookServerPort,
+        this.env.get('HOOK_SERVER_PORT'),
+      );
       this._config = {
         discord: {
           token: storedToken || envToken || '',
@@ -79,8 +83,7 @@ export class ConfigManager {
           sessionPrefix: this.env.get('TMUX_SESSION_PREFIX') || '',
           sharedSessionName: this.env.get('TMUX_SHARED_SESSION_NAME') || 'bridge',
         },
-        hookServerPort: storedConfig.hookServerPort ||
-          (this.env.get('HOOK_SERVER_PORT') ? parseInt(this.env.get('HOOK_SERVER_PORT')!, 10) : 18470),
+        hookServerPort: resolvedHookPort,
         ...(defaultAgentCli ? { defaultAgentCli } : {}),
         opencode: opencodePermissionMode
           ? { permissionMode: opencodePermissionMode }
@@ -127,6 +130,8 @@ export class ConfigManager {
   }
 
   validateConfig(): void {
+    this.validateRawInputs();
+
     if (this.config.messagingPlatform === 'slack') {
       if (!this.config.slack?.botToken || !this.config.slack?.appToken) {
         throw new Error(
@@ -143,6 +148,89 @@ export class ConfigManager {
           'Or set DISCORD_BOT_TOKEN environment variable'
         );
       }
+    }
+  }
+
+  private resolveHookServerPort(storedPort: unknown, envPortRaw: string | undefined): number {
+    const storedCandidate = this.parsePortCandidate(storedPort);
+    if (storedCandidate !== undefined) {
+      return storedCandidate;
+    }
+
+    const envCandidate = this.parsePortCandidate(envPortRaw);
+    if (envCandidate !== undefined) {
+      return envCandidate;
+    }
+
+    return 18470;
+  }
+
+  private parsePortCandidate(raw: unknown): number | undefined {
+    if (raw === undefined || raw === null || raw === '') return undefined;
+
+    if (typeof raw === 'number') {
+      if (!Number.isInteger(raw)) return undefined;
+      if (raw < 1 || raw > 65535) return undefined;
+      return raw;
+    }
+
+    if (typeof raw === 'string') {
+      const trimmed = raw.trim();
+      if (!/^\d+$/.test(trimmed)) return undefined;
+      const parsed = parseInt(trimmed, 10);
+      if (parsed < 1 || parsed > 65535) return undefined;
+      return parsed;
+    }
+
+    return undefined;
+  }
+
+  private validateRawInputs(): void {
+    const errors: string[] = [];
+    const storedConfig = this.loadStoredConfig();
+
+    const rawPlatform = storedConfig.messagingPlatform || this.env.get('MESSAGING_PLATFORM');
+    if (rawPlatform && rawPlatform !== 'discord' && rawPlatform !== 'slack') {
+      errors.push(
+        `MESSAGING_PLATFORM must be "discord" or "slack" (received: ${rawPlatform})`,
+      );
+    }
+
+    const envPermissionMode = this.env.get('OPENCODE_PERMISSION_MODE');
+    if (envPermissionMode && envPermissionMode !== 'allow' && envPermissionMode !== 'default') {
+      errors.push(
+        `OPENCODE_PERMISSION_MODE must be "allow" or "default" (received: ${envPermissionMode})`,
+      );
+    }
+
+    const rawStoredPort = storedConfig.hookServerPort;
+    if (rawStoredPort !== undefined && this.parsePortCandidate(rawStoredPort) === undefined) {
+      errors.push(
+        `Stored hookServerPort must be an integer between 1 and 65535 (received: ${String(rawStoredPort)})`,
+      );
+    }
+
+    const rawEnvPort = this.env.get('HOOK_SERVER_PORT');
+    if (rawEnvPort !== undefined && this.parsePortCandidate(rawEnvPort) === undefined) {
+      errors.push(
+        `HOOK_SERVER_PORT must be an integer between 1 and 65535 (received: ${rawEnvPort})`,
+      );
+    }
+
+    const effectivePlatform = rawPlatform === 'slack' ? 'slack' : 'discord';
+    if (effectivePlatform === 'slack') {
+      const slackBotToken = storedConfig.slackBotToken || this.env.get('SLACK_BOT_TOKEN');
+      const slackAppToken = storedConfig.slackAppToken || this.env.get('SLACK_APP_TOKEN');
+      if (slackBotToken && !slackBotToken.startsWith('xoxb-')) {
+        errors.push('SLACK_BOT_TOKEN must start with "xoxb-"');
+      }
+      if (slackAppToken && !slackAppToken.startsWith('xapp-')) {
+        errors.push('SLACK_APP_TOKEN must start with "xapp-"');
+      }
+    }
+
+    if (errors.length > 0) {
+      throw new Error(`Invalid configuration:\n- ${errors.join('\n- ')}`);
     }
   }
 

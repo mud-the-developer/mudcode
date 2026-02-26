@@ -27,7 +27,7 @@ export class StateManager implements IStateManager {
 
   constructor(storage?: IStorage, stateDir?: string, stateFile?: string) {
     this.storage = storage || new FileStorage();
-    this.stateDir = stateDir || join(homedir(), '.discode');
+    this.stateDir = stateDir || join(homedir(), '.mudcode');
     this.stateFile = stateFile || join(this.stateDir, 'state.json');
     this.state = this.loadState();
   }

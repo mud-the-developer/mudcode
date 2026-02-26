@@ -172,12 +172,12 @@ describe('DaemonManager', () => {
 
     dm.startDaemon({
       command: 'cargo',
-      args: ['run', '--manifest-path', '/repo/discode-rs/Cargo.toml', '--quiet'],
+      args: ['run', '--manifest-path', '/repo/mudcode-rs/Cargo.toml', '--quiet'],
     });
 
     expect(pm.spawn).toHaveBeenCalledWith(
       'cargo',
-      ['run', '--manifest-path', '/repo/discode-rs/Cargo.toml', '--quiet'],
+      ['run', '--manifest-path', '/repo/mudcode-rs/Cargo.toml', '--quiet'],
       expect.objectContaining({
         detached: true,
         env: expect.objectContaining({

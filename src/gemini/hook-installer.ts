@@ -3,8 +3,8 @@ import { homedir } from 'os';
 import { join } from 'path';
 import { escapeShellArg } from '../infra/shell-escape.js';
 
-export const GEMINI_HOOK_NAME = 'discode-gemini-after-agent';
-export const GEMINI_AFTER_AGENT_HOOK_FILENAME = 'discode-after-agent-hook.js';
+export const GEMINI_HOOK_NAME = 'mudcode-gemini-after-agent';
+export const GEMINI_AFTER_AGENT_HOOK_FILENAME = 'mudcode-after-agent-hook.js';
 
 function asObject(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -146,7 +146,7 @@ export function getGeminiConfigDir(): string {
 
 export function getGeminiHookDir(targetGeminiDir?: string): string {
   const geminiDir = targetGeminiDir ?? getGeminiConfigDir();
-  return join(geminiDir, 'discode-hooks');
+  return join(geminiDir, 'mudcode-hooks');
 }
 
 export function getGeminiSettingsPath(targetGeminiDir?: string): string {

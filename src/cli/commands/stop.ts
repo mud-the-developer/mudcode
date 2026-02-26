@@ -9,7 +9,7 @@ import { removeInstanceFromProjectState, removeProjectState } from '../../app/pr
 import type { TmuxCliOptions } from '../common/types.js';
 import {
   applyTmuxCliOverrides,
-  cleanupStaleDiscodeTuiProcesses,
+  cleanupStaleMudcodeTuiProcesses,
   escapeShellArg,
   resolveProjectWindowName,
   terminateTmuxPaneProcesses,
@@ -88,7 +88,7 @@ export async function stopCommand(
       console.log(chalk.green(`✅ Instance removed from state: ${instance.instanceId}`));
     }
 
-    const staleTuiCount = cleanupStaleDiscodeTuiProcesses();
+    const staleTuiCount = cleanupStaleMudcodeTuiProcesses();
     if (staleTuiCount > 0) {
       console.log(chalk.yellow(`⚠️ Cleaned ${staleTuiCount} stale mudcode TUI process(es).`));
     }
@@ -157,7 +157,7 @@ export async function stopCommand(
     console.log(chalk.green('✅ Project removed from state'));
   }
 
-  const staleTuiCount = cleanupStaleDiscodeTuiProcesses();
+  const staleTuiCount = cleanupStaleMudcodeTuiProcesses();
   if (staleTuiCount > 0) {
     console.log(chalk.yellow(`⚠️ Cleaned ${staleTuiCount} stale mudcode TUI process(es).`));
   }

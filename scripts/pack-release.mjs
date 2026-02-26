@@ -20,6 +20,6 @@ for (const dir of dirs) {
   execSync('npm pack', { cwd: dir, stdio: 'inherit' });
 }
 
-const npmMeta = join(releaseRoot, 'npm', 'discode');
+const npmMeta = join(releaseRoot, 'npm', 'mudcode');
 console.log(`Packing ${npmMeta}`);
 execSync('npm pack', { cwd: npmMeta, stdio: 'inherit' });

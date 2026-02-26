@@ -6,7 +6,7 @@ This document defines the architectural boundaries introduced during refactor st
 
 Use this one-way dependency flow:
 
-`bin/discode.ts` -> `src/cli/**` -> `src/app/**` -> `src/{bridge,state,tmux,discord,agents,infra}`
+`bin/mudcode.ts` -> `src/cli/**` -> `src/app/**` -> `src/{bridge,state,tmux,discord,agents,infra}`
 
 Rules:
 

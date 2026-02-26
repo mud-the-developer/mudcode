@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/discode-stop-hook.js"
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/mudcode-stop-hook.js"
           }
         ]
       }

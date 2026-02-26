@@ -241,7 +241,7 @@ async function main() {
   if (!text && typeof input.message === "string" && input.message.trim().length > 0) {
     text = input.message;
   }
-  console.error(`[discode-stop-hook] project=${projectName} text_len=${text.length} turn_text_len=${turnText.length}`);
+  console.error(`[mudcode-stop-hook] project=${projectName} text_len=${text.length} turn_text_len=${turnText.length}`);
 
   if (!text && !turnText) return;
 

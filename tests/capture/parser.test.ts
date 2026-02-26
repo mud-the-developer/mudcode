@@ -97,13 +97,14 @@ describe('splitForDiscord', () => {
     });
   });
 
-  it('truncates single long line exceeding maxLen', () => {
+  it('splits single long line exceeding maxLen without truncation', () => {
     const longLine = 'x'.repeat(2500);
     const result = splitForDiscord(longLine, 1900);
     expect(result.length).toBeGreaterThan(0);
     result.forEach(chunk => {
       expect(chunk.length).toBeLessThanOrEqual(1900);
     });
+    expect(result.join('')).toBe(longLine);
   });
 
   it('handles empty string', () => {
@@ -117,6 +118,16 @@ describe('splitForDiscord', () => {
     result.forEach(chunk => {
       expect(chunk.length).toBeLessThanOrEqual(1900);
     });
+  });
+
+  it('enforces Discord hard cap (2000) even if caller passes larger maxLen', () => {
+    const text = 'z'.repeat(4100);
+    const result = splitForDiscord(text, 5000);
+    expect(result.length).toBeGreaterThan(1);
+    result.forEach(chunk => {
+      expect(chunk.length).toBeLessThanOrEqual(2000);
+    });
+    expect(result.join('')).toBe(text);
   });
 
   it('preserves line structure when possible', () => {
@@ -158,6 +169,7 @@ describe('splitForDiscord', () => {
     for (const chunk of result) {
       const fences = chunk.match(/^```/gm) || [];
       expect(fences.length % 2).toBe(0);
+      expect(chunk.length).toBeLessThanOrEqual(500);
     }
   });
 
@@ -181,6 +193,7 @@ describe('splitForDiscord', () => {
     for (const chunk of result) {
       const fences = chunk.match(/^```/gm) || [];
       expect(fences.length % 2).toBe(0);
+      expect(chunk.length).toBeLessThanOrEqual(500);
     }
   });
 });
@@ -254,8 +267,8 @@ describe('stripFilePaths', () => {
   });
 
   it('removes a standalone absolute path', () => {
-    const text = 'Here is the file: /home/user/project/.discode/files/chart.png done';
-    const result = stripFilePaths(text, ['/home/user/project/.discode/files/chart.png']);
+    const text = 'Here is the file: /home/user/project/.mudcode/files/chart.png done';
+    const result = stripFilePaths(text, ['/home/user/project/.mudcode/files/chart.png']);
     expect(result).toBe('Here is the file:  done');
     expect(result).not.toContain('/home/user');
   });

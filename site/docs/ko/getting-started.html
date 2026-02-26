@@ -3,28 +3,28 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Discode 문서 - 시작하기</title>
-    <meta name="description" content="몇 가지 명령어로 Discode를 빠르게 시작하세요." />
+    <title>Mudcode 문서 - 시작하기</title>
+    <meta name="description" content="몇 가지 명령어로 Mudcode를 빠르게 시작하세요." />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Nunito+Sans:wght@700;800;900&display=swap"
       rel="stylesheet"
     />
-    <link rel="icon" type="image/png" href="../../discode.png" />
+    <link rel="icon" type="image/png" href="../../mudcode.png" />
     <link rel="stylesheet" href="../docs.css" />
   </head>
   <body>
     <div class="page">
       <header class="shell topbar">
         <a class="brand" href="../../">
-          <img src="../../discode.png" alt="Discode crab icon" class="brand-icon" />
-          <span class="brand-label">Discode</span>
+          <img src="../../mudcode.png" alt="Mudcode crab icon" class="brand-icon" />
+          <span class="brand-label">Mudcode</span>
         </a>
         <nav class="topnav" aria-label="Primary">
           <a href="../../">홈</a>
           <a href="./" aria-current="page">문서</a>
-          <a href="https://github.com/siisee11/discode" target="_blank" rel="noreferrer">GitHub</a>
+          <a href="https://github.com/mudramo/mudcode" target="_blank" rel="noreferrer">GitHub</a>
           <label class="language-picker">
             <span class="sr-only">언어</span>
             <select data-language-select aria-label="언어 선택">
@@ -49,8 +49,8 @@
           <article class="doc-article">
             <h1>시작하기</h1>
             <p class="lead">
-              Discode는 로컬 AI 코딩 CLI를 Discord 채널에 연결합니다. 사전 요구 사항을 확인한 뒤
-              온보딩과 <code>discode new</code>로 시작하세요.
+              Mudcode는 로컬 AI 코딩 CLI를 Discord 채널에 연결합니다. 사전 요구 사항을 확인한 뒤
+              온보딩과 <code>mudcode new</code>로 시작하세요.
             </p>
 
             <section class="doc-section" id="prerequisites">
@@ -70,13 +70,13 @@
             </section>
 
             <section class="doc-section" id="install">
-              <h2>Discode 설치</h2>
+              <h2>Mudcode 설치</h2>
               <p>다음 중 하나를 선택하세요:</p>
-              <pre class="command"><code>curl -fsSL https://discode.chat/install | bash</code></pre>
-              <pre class="command"><code>npm install -g @siisee11/discode
-bun add -g @siisee11/discode</code></pre>
-              <pre class="command"><code>git clone https://github.com/siisee11/discode.git
-cd discode
+              <pre class="command"><code>curl -fsSL https://mudcode.chat/install | bash</code></pre>
+              <pre class="command"><code>npm install -g @mudramo/mudcode
+bun add -g @mudramo/mudcode</code></pre>
+              <pre class="command"><code>git clone https://github.com/mudramo/mudcode.git
+cd mudcode
 bun install
 bun run build
 bun link</code></pre>
@@ -88,9 +88,9 @@ bun link</code></pre>
                 <code>onboard</code>는 토큰 저장, 서버 ID 감지, 기본 에이전트 설정을 한 번에
                 처리합니다.
               </p>
-              <pre class="command"><code>discode onboard</code></pre>
-              <pre class="command"><code>discode config --show
-discode config --server SERVER_ID</code></pre>
+              <pre class="command"><code>mudcode onboard</code></pre>
+              <pre class="command"><code>mudcode config --show
+mudcode config --server SERVER_ID</code></pre>
               <p class="callout">
                 최초 설정은 <code>onboard</code>를 사용하세요. 이후 값 수정은
                 <code>config</code> 명령어로 관리하면 됩니다.
@@ -100,27 +100,27 @@ discode config --server SERVER_ID</code></pre>
             <section class="doc-section" id="first-session">
               <h2>첫 세션 시작</h2>
               <pre class="command"><code>cd ~/projects/my-app
-discode new</code></pre>
+mudcode new</code></pre>
               <p>
                 <code>new</code>는 에이전트 감지, Discord 채널 생성, 데몬 시작, tmux 실행/연결까지
                 자동으로 진행합니다.
               </p>
-              <pre class="command"><code>discode new claude
-discode new --no-attach</code></pre>
+              <pre class="command"><code>mudcode new claude
+mudcode new --no-attach</code></pre>
             </section>
 
             <section class="doc-section" id="next-steps">
               <h2>다음 단계</h2>
               <ul>
                 <li><a href="./cli-reference.html">CLI 레퍼런스</a>에서 전체 명령어를 확인하세요.</li>
-                <li><code>discode status</code>, <code>discode list</code>로 상태를 점검하세요.</li>
+                <li><code>mudcode status</code>, <code>mudcode list</code>로 상태를 점검하세요.</li>
                 <li>에이전트를 멈추지 않고 tmux를 분리하려면 <code>Ctrl-b d</code>를 사용하세요.</li>
               </ul>
             </section>
 
             <p class="doc-footer">
               출처:
-              <a href="https://github.com/siisee11/discode/blob/main/docs/README.ko.md" target="_blank" rel="noreferrer">README.ko.md</a>
+              <a href="https://github.com/mudramo/mudcode/blob/main/docs/README.ko.md" target="_blank" rel="noreferrer">README.ko.md</a>
             </p>
           </article>
         </div>

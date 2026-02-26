@@ -1,6 +1,6 @@
 import type { MessagingClient } from '../messaging/interface.js';
 import { installFileInstruction } from '../infra/file-instruction.js';
-import { installDiscodeSendScript } from '../infra/send-script.js';
+import { installMudcodeSendScript } from '../infra/send-script.js';
 import { installAgentIntegration } from '../policy/agent-integration.js';
 import type { IStateManager } from '../types/interfaces.js';
 import {
@@ -74,7 +74,7 @@ export class BridgeProjectBootstrap {
       }
 
       try {
-        installDiscodeSendScript(project.projectPath, {
+        installMudcodeSendScript(project.projectPath, {
           projectName: project.projectName,
           port: this.hookServerPort,
         });

@@ -1,19 +1,19 @@
 /**
  * Install file-handling instructions for each agent type.
  *
- * When a Discord user sends files, discode downloads them and appends
+ * When a Discord user sends files, mudcode downloads them and appends
  * `[file:/absolute/path]` markers to the message text. These instructions
  * teach agents how to recognize and read those markers.
  *
  * Injection strategies per agent:
  *   - Claude Code: Writes a CLAUDE.md snippet in the project's
- *     `.discode/` directory and references it via `--append-system-prompt`.
+ *     `.mudcode/` directory and references it via `--append-system-prompt`.
  *     Falls back to CLAUDE.md at project root if the agent will read it
- *     automatically.  We use `.discode/CLAUDE.md` so we don't pollute the
+ *     automatically.  We use `.mudcode/CLAUDE.md` so we don't pollute the
  *     user's own CLAUDE.md.
  *   - OpenCode: Appends an instruction block to `.opencode/instructions.md`
  *     in the project directory (OpenCode reads this automatically).
- *   - Generic: Places a `.discode/FILE_INSTRUCTIONS.md` that the agent
+ *   - Generic: Places a `.mudcode/FILE_INSTRUCTIONS.md` that the agent
  *     can discover via file listing or be told about.
  */
 
@@ -21,21 +21,21 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
 /** Start marker embedded in instruction blocks. */
-const DISCODE_FILE_MARKER = '<!-- discode:file-instructions -->';
+const MUDCODE_FILE_MARKER = '<!-- mudcode:file-instructions -->';
 
 /** End marker — allows us to find and replace the section on updates. */
-const DISCODE_FILE_MARKER_END = '<!-- /discode:file-instructions -->';
+const MUDCODE_FILE_MARKER_END = '<!-- /mudcode:file-instructions -->';
 
 /** Legacy marker for backward-compatible detection. */
-const DISCODE_IMAGE_MARKER_LEGACY = '<!-- discode:image-instructions -->';
+const MUDCODE_IMAGE_MARKER_LEGACY = '<!-- mudcode:image-instructions -->';
 
 /**
  * All known start markers (current + legacy).
  */
-const ALL_START_MARKERS = [DISCODE_FILE_MARKER, DISCODE_IMAGE_MARKER_LEGACY];
+const ALL_START_MARKERS = [MUDCODE_FILE_MARKER, MUDCODE_IMAGE_MARKER_LEGACY];
 
 /**
- * Replace the discode instruction section in existing file content, or
+ * Replace the mudcode instruction section in existing file content, or
  * append if not found.
  *
  * Handles:
@@ -50,11 +50,11 @@ function replaceOrAppendSection(existing: string, newSection: string): string {
     const startIdx = existing.indexOf(marker);
     if (startIdx === -1) continue;
 
-    const endIdx = existing.indexOf(DISCODE_FILE_MARKER_END, startIdx);
+    const endIdx = existing.indexOf(MUDCODE_FILE_MARKER_END, startIdx);
     if (endIdx !== -1) {
       // Found both start and end markers — replace the section
       const before = existing.substring(0, startIdx);
-      const after = existing.substring(endIdx + DISCODE_FILE_MARKER_END.length);
+      const after = existing.substring(endIdx + MUDCODE_FILE_MARKER_END.length);
       return (before + newSection + after).replace(/\n{3,}/g, '\n\n');
     }
 
@@ -72,28 +72,28 @@ function replaceOrAppendSection(existing: string, newSection: string): string {
  */
 export function getFileInstructionText(projectPath?: string): string {
   const filesDir = projectPath
-    ? `${projectPath}/.discode/files/`
-    : '.discode/files/';
+    ? `${projectPath}/.mudcode/files/`
+    : '.mudcode/files/';
 
   const binDir = projectPath
-    ? `${projectPath}/.discode/bin/`
-    : '.discode/bin/';
+    ? `${projectPath}/.mudcode/bin/`
+    : '.mudcode/bin/';
 
-  return `${DISCODE_FILE_MARKER}
-## Discode — Discord/Slack Bridge
+  return `${MUDCODE_FILE_MARKER}
+## Mudcode — Discord/Slack Bridge
 
-You are connected to a Discord/Slack channel through **discode**.
+You are connected to a Discord/Slack channel through **mudcode**.
 
-### Sending files to Discord — use \`discode-send\`
+### Sending files to Discord — use \`mudcode-send\`
 
-The \`discode-send\` command is **pre-configured and ready to use**.
+The \`mudcode-send\` command is **pre-configured and ready to use**.
 **Do NOT explore the project or check settings before running it. Just run it immediately.**
 
 \`\`\`bash
-${binDir}discode-send ${filesDir}example.png
+${binDir}mudcode-send ${filesDir}example.png
 \`\`\`
 
-Multiple files: \`${binDir}discode-send ${filesDir}a.png ${filesDir}b.pdf\`
+Multiple files: \`${binDir}mudcode-send ${filesDir}a.png ${filesDir}b.pdf\`
 
 - All arguments must be absolute paths
 - Save generated files to \`${filesDir}\` before sending
@@ -123,7 +123,7 @@ pip install <package>
 
 Reuse the existing venv if \`${filesDir}.venv\` exists. Never install
 packages globally outside of a venv.
-${DISCODE_FILE_MARKER_END}
+${MUDCODE_FILE_MARKER_END}
 `;
 }
 
@@ -131,20 +131,20 @@ ${DISCODE_FILE_MARKER_END}
  * Install file instructions for Claude Code.
  *
  * Claude Code automatically reads CLAUDE.md files in the project tree.
- * We write to `{projectPath}/.discode/CLAUDE.md` so we don't interfere
+ * We write to `{projectPath}/.mudcode/CLAUDE.md` so we don't interfere
  * with the user's own CLAUDE.md at the project root.
  *
- * Since this file is fully owned by discode, we always overwrite with
+ * Since this file is fully owned by mudcode, we always overwrite with
  * the latest instruction content.
  */
 export function installFileInstructionForClaude(projectPath: string): void {
-  const discodeDir = join(projectPath, '.discode');
-  mkdirSync(discodeDir, { recursive: true });
+  const mudcodeDir = join(projectPath, '.mudcode');
+  mkdirSync(mudcodeDir, { recursive: true });
 
-  const claudeMdPath = join(discodeDir, 'CLAUDE.md');
+  const claudeMdPath = join(mudcodeDir, 'CLAUDE.md');
   const instruction = getFileInstructionText(projectPath);
 
-  // .discode/CLAUDE.md is fully owned by discode — always overwrite.
+  // .mudcode/CLAUDE.md is fully owned by mudcode — always overwrite.
   writeFileSync(claudeMdPath, instruction, 'utf-8');
 }
 
@@ -153,7 +153,7 @@ export function installFileInstructionForClaude(projectPath: string): void {
  *
  * OpenCode reads `{projectPath}/.opencode/instructions.md` automatically
  * as system-level instructions. This file may contain user content, so
- * we replace only the discode section.
+ * we replace only the mudcode section.
  */
 export function installFileInstructionForOpencode(projectPath: string): void {
   const opencodeDir = join(projectPath, '.opencode');
@@ -173,17 +173,17 @@ export function installFileInstructionForOpencode(projectPath: string): void {
 /**
  * Install file instructions for any generic agent.
  *
- * Places the instructions at `{projectPath}/.discode/FILE_INSTRUCTIONS.md`
- * where agents can discover them. Fully owned by discode — always overwrite.
+ * Places the instructions at `{projectPath}/.mudcode/FILE_INSTRUCTIONS.md`
+ * where agents can discover them. Fully owned by mudcode — always overwrite.
  */
 export function installFileInstructionGeneric(projectPath: string): void {
-  const discodeDir = join(projectPath, '.discode');
-  mkdirSync(discodeDir, { recursive: true });
+  const mudcodeDir = join(projectPath, '.mudcode');
+  mkdirSync(mudcodeDir, { recursive: true });
 
-  const instructionPath = join(discodeDir, 'FILE_INSTRUCTIONS.md');
+  const instructionPath = join(mudcodeDir, 'FILE_INSTRUCTIONS.md');
   const instruction = getFileInstructionText(projectPath);
 
-  // Fully owned by discode — always overwrite.
+  // Fully owned by mudcode — always overwrite.
   writeFileSync(instructionPath, instruction, 'utf-8');
 }
 

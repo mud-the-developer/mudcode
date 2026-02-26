@@ -17,8 +17,8 @@ import {
 describe('getFileInstructionText', () => {
   it('contains the start and end markers', () => {
     const text = getFileInstructionText();
-    expect(text).toContain('<!-- discode:file-instructions -->');
-    expect(text).toContain('<!-- /discode:file-instructions -->');
+    expect(text).toContain('<!-- mudcode:file-instructions -->');
+    expect(text).toContain('<!-- /mudcode:file-instructions -->');
   });
 
   it('documents the [file:...] marker format', () => {
@@ -48,12 +48,12 @@ describe('getFileInstructionText', () => {
   it('includes sending files to Discord instructions', () => {
     const text = getFileInstructionText();
     expect(text).toContain('Sending files to Discord');
-    expect(text).toContain('discode-send');
+    expect(text).toContain('mudcode-send');
   });
 
-  it('includes discode description header', () => {
+  it('includes mudcode description header', () => {
     const text = getFileInstructionText();
-    expect(text).toContain('Discode');
+    expect(text).toContain('Mudcode');
     expect(text).toContain('Discord/Slack');
   });
 
@@ -62,7 +62,7 @@ describe('getFileInstructionText', () => {
     expect(text).toContain('Do NOT include absolute file paths in your response text');
   });
 
-  it('emphasizes discode-send is pre-configured', () => {
+  it('emphasizes mudcode-send is pre-configured', () => {
     const text = getFileInstructionText();
     expect(text).toContain('pre-configured and ready to use');
     expect(text).toContain('Do NOT explore the project or check settings');
@@ -85,13 +85,13 @@ describe('getFileInstructionText', () => {
 
   it('uses relative path when projectPath is not provided', () => {
     const text = getFileInstructionText();
-    expect(text).toContain('.discode/files/');
-    expect(text).not.toContain('/abs/path/.discode/files/');
+    expect(text).toContain('.mudcode/files/');
+    expect(text).not.toContain('/abs/path/.mudcode/files/');
   });
 
   it('uses absolute path when projectPath is provided', () => {
     const text = getFileInstructionText('/abs/path');
-    expect(text).toContain('/abs/path/.discode/files/');
+    expect(text).toContain('/abs/path/.mudcode/files/');
   });
 });
 
@@ -99,7 +99,7 @@ describe('installFileInstructionForClaude', () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = join(tmpdir(), `discode-claude-instr-${Date.now()}`);
+    tempDir = join(tmpdir(), `mudcode-claude-instr-${Date.now()}`);
     mkdirSync(tempDir, { recursive: true });
   });
 
@@ -107,41 +107,41 @@ describe('installFileInstructionForClaude', () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('creates .discode/CLAUDE.md with instruction including absolute files dir', () => {
+  it('creates .mudcode/CLAUDE.md with instruction including absolute files dir', () => {
     installFileInstructionForClaude(tempDir);
 
-    const claudeMd = join(tempDir, '.discode', 'CLAUDE.md');
+    const claudeMd = join(tempDir, '.mudcode', 'CLAUDE.md');
     expect(existsSync(claudeMd)).toBe(true);
 
     const content = readFileSync(claudeMd, 'utf-8');
-    expect(content).toContain('<!-- discode:file-instructions -->');
+    expect(content).toContain('<!-- mudcode:file-instructions -->');
     expect(content).toContain('[file:');
-    expect(content).toContain(`${tempDir}/.discode/files/`);
+    expect(content).toContain(`${tempDir}/.mudcode/files/`);
     expect(content).toContain('Sending files to Discord');
   });
 
-  it('always overwrites with latest content (discode-owned file)', () => {
-    const discodeDir = join(tempDir, '.discode');
-    mkdirSync(discodeDir, { recursive: true });
-    writeFileSync(join(discodeDir, 'CLAUDE.md'), '<!-- discode:file-instructions -->\nold content\n', 'utf-8');
+  it('always overwrites with latest content (mudcode-owned file)', () => {
+    const mudcodeDir = join(tempDir, '.mudcode');
+    mkdirSync(mudcodeDir, { recursive: true });
+    writeFileSync(join(mudcodeDir, 'CLAUDE.md'), '<!-- mudcode:file-instructions -->\nold content\n', 'utf-8');
 
     installFileInstructionForClaude(tempDir);
 
-    const content = readFileSync(join(discodeDir, 'CLAUDE.md'), 'utf-8');
-    expect(content).toContain('discode-send');
+    const content = readFileSync(join(mudcodeDir, 'CLAUDE.md'), 'utf-8');
+    expect(content).toContain('mudcode-send');
     expect(content).not.toContain('old content');
   });
 
   it('overwrites even when legacy marker is present', () => {
-    const discodeDir = join(tempDir, '.discode');
-    mkdirSync(discodeDir, { recursive: true });
-    writeFileSync(join(discodeDir, 'CLAUDE.md'), '<!-- discode:image-instructions -->\nold content\n', 'utf-8');
+    const mudcodeDir = join(tempDir, '.mudcode');
+    mkdirSync(mudcodeDir, { recursive: true });
+    writeFileSync(join(mudcodeDir, 'CLAUDE.md'), '<!-- mudcode:image-instructions -->\nold content\n', 'utf-8');
 
     installFileInstructionForClaude(tempDir);
 
-    const content = readFileSync(join(discodeDir, 'CLAUDE.md'), 'utf-8');
-    expect(content).toContain('<!-- discode:file-instructions -->');
-    expect(content).toContain('discode-send');
+    const content = readFileSync(join(mudcodeDir, 'CLAUDE.md'), 'utf-8');
+    expect(content).toContain('<!-- mudcode:file-instructions -->');
+    expect(content).toContain('mudcode-send');
     expect(content).not.toContain('old content');
   });
 
@@ -149,8 +149,8 @@ describe('installFileInstructionForClaude', () => {
     installFileInstructionForClaude(tempDir);
     installFileInstructionForClaude(tempDir);
 
-    const content = readFileSync(join(tempDir, '.discode', 'CLAUDE.md'), 'utf-8');
-    const markerCount = (content.match(/<!-- discode:file-instructions -->/g) || []).length;
+    const content = readFileSync(join(tempDir, '.mudcode', 'CLAUDE.md'), 'utf-8');
+    const markerCount = (content.match(/<!-- mudcode:file-instructions -->/g) || []).length;
     expect(markerCount).toBe(1);
   });
 });
@@ -159,7 +159,7 @@ describe('installFileInstructionForOpencode', () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = join(tmpdir(), `discode-opencode-instr-${Date.now()}`);
+    tempDir = join(tmpdir(), `mudcode-opencode-instr-${Date.now()}`);
     mkdirSync(tempDir, { recursive: true });
   });
 
@@ -174,15 +174,15 @@ describe('installFileInstructionForOpencode', () => {
     expect(existsSync(instructionsPath)).toBe(true);
 
     const content = readFileSync(instructionsPath, 'utf-8');
-    expect(content).toContain('<!-- discode:file-instructions -->');
+    expect(content).toContain('<!-- mudcode:file-instructions -->');
   });
 
-  it('replaces the discode section on re-install (preserves user content)', () => {
+  it('replaces the mudcode section on re-install (preserves user content)', () => {
     const opencodeDir = join(tempDir, '.opencode');
     mkdirSync(opencodeDir, { recursive: true });
     writeFileSync(
       join(opencodeDir, 'instructions.md'),
-      '# My rules\n\n<!-- discode:file-instructions -->\nold discode content\n<!-- /discode:file-instructions -->\n\n# More rules\n',
+      '# My rules\n\n<!-- mudcode:file-instructions -->\nold mudcode content\n<!-- /mudcode:file-instructions -->\n\n# More rules\n',
       'utf-8',
     );
 
@@ -191,8 +191,8 @@ describe('installFileInstructionForOpencode', () => {
     const content = readFileSync(join(opencodeDir, 'instructions.md'), 'utf-8');
     expect(content).toContain('# My rules');
     expect(content).toContain('# More rules');
-    expect(content).toContain('discode-send');
-    expect(content).not.toContain('old discode content');
+    expect(content).toContain('mudcode-send');
+    expect(content).not.toContain('old mudcode content');
   });
 
   it('replaces old-format section (no end marker) on re-install', () => {
@@ -200,7 +200,7 @@ describe('installFileInstructionForOpencode', () => {
     mkdirSync(opencodeDir, { recursive: true });
     writeFileSync(
       join(opencodeDir, 'instructions.md'),
-      '# My rules\n\n<!-- discode:file-instructions -->\nold stuff no end marker\n',
+      '# My rules\n\n<!-- mudcode:file-instructions -->\nold stuff no end marker\n',
       'utf-8',
     );
 
@@ -208,7 +208,7 @@ describe('installFileInstructionForOpencode', () => {
 
     const content = readFileSync(join(opencodeDir, 'instructions.md'), 'utf-8');
     expect(content).toContain('# My rules');
-    expect(content).toContain('discode-send');
+    expect(content).toContain('mudcode-send');
     expect(content).not.toContain('old stuff no end marker');
   });
 
@@ -221,7 +221,7 @@ describe('installFileInstructionForOpencode', () => {
 
     const content = readFileSync(join(opencodeDir, 'instructions.md'), 'utf-8');
     expect(content).toContain('# My rules');
-    expect(content).toContain('<!-- discode:file-instructions -->');
+    expect(content).toContain('<!-- mudcode:file-instructions -->');
   });
 
   it('does not duplicate markers on repeated installs', () => {
@@ -229,7 +229,7 @@ describe('installFileInstructionForOpencode', () => {
     installFileInstructionForOpencode(tempDir);
 
     const content = readFileSync(join(tempDir, '.opencode', 'instructions.md'), 'utf-8');
-    const markerCount = (content.match(/<!-- discode:file-instructions -->/g) || []).length;
+    const markerCount = (content.match(/<!-- mudcode:file-instructions -->/g) || []).length;
     expect(markerCount).toBe(1);
   });
 });
@@ -238,7 +238,7 @@ describe('installFileInstructionGeneric', () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = join(tmpdir(), `discode-generic-instr-${Date.now()}`);
+    tempDir = join(tmpdir(), `mudcode-generic-instr-${Date.now()}`);
     mkdirSync(tempDir, { recursive: true });
   });
 
@@ -246,22 +246,22 @@ describe('installFileInstructionGeneric', () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('creates .discode/FILE_INSTRUCTIONS.md', () => {
+  it('creates .mudcode/FILE_INSTRUCTIONS.md', () => {
     installFileInstructionGeneric(tempDir);
 
-    const path = join(tempDir, '.discode', 'FILE_INSTRUCTIONS.md');
+    const path = join(tempDir, '.mudcode', 'FILE_INSTRUCTIONS.md');
     expect(existsSync(path)).toBe(true);
 
     const content = readFileSync(path, 'utf-8');
-    expect(content).toContain('<!-- discode:file-instructions -->');
+    expect(content).toContain('<!-- mudcode:file-instructions -->');
   });
 
-  it('always overwrites with latest content (discode-owned file)', () => {
+  it('always overwrites with latest content (mudcode-owned file)', () => {
     installFileInstructionGeneric(tempDir);
     installFileInstructionGeneric(tempDir);
 
-    const content = readFileSync(join(tempDir, '.discode', 'FILE_INSTRUCTIONS.md'), 'utf-8');
-    const markerCount = (content.match(/<!-- discode:file-instructions -->/g) || []).length;
+    const content = readFileSync(join(tempDir, '.mudcode', 'FILE_INSTRUCTIONS.md'), 'utf-8');
+    const markerCount = (content.match(/<!-- mudcode:file-instructions -->/g) || []).length;
     expect(markerCount).toBe(1);
   });
 });
@@ -270,7 +270,7 @@ describe('installFileInstruction', () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = join(tmpdir(), `discode-dispatch-instr-${Date.now()}`);
+    tempDir = join(tmpdir(), `mudcode-dispatch-instr-${Date.now()}`);
     mkdirSync(tempDir, { recursive: true });
   });
 
@@ -280,7 +280,7 @@ describe('installFileInstruction', () => {
 
   it('dispatches to claude handler for agent type "claude"', () => {
     installFileInstruction(tempDir, 'claude');
-    expect(existsSync(join(tempDir, '.discode', 'CLAUDE.md'))).toBe(true);
+    expect(existsSync(join(tempDir, '.mudcode', 'CLAUDE.md'))).toBe(true);
   });
 
   it('dispatches to opencode handler for agent type "opencode"', () => {
@@ -290,6 +290,6 @@ describe('installFileInstruction', () => {
 
   it('dispatches to generic handler for unknown agent types', () => {
     installFileInstruction(tempDir, 'some-other-agent');
-    expect(existsSync(join(tempDir, '.discode', 'FILE_INSTRUCTIONS.md'))).toBe(true);
+    expect(existsSync(join(tempDir, '.mudcode', 'FILE_INSTRUCTIONS.md'))).toBe(true);
   });
 });

@@ -2,7 +2,7 @@
 
 한국어 버전: [DISCORD_SETUP.ko.md](DISCORD_SETUP.ko.md)
 
-Complete step-by-step guide to setting up your Discord bot for the Discode.
+Complete step-by-step guide to setting up your Discord bot for the Mudcode.
 
 ---
 
@@ -12,7 +12,7 @@ Complete step-by-step guide to setting up your Discord bot for the Discode.
 
 1. Go to the [Discord Developer Portal](https://discord.com/developers/applications)
 2. Click the **"New Application"** button (top right corner)
-3. Enter a name for your bot (e.g., "Discode")
+3. Enter a name for your bot (e.g., "Mudcode")
 4. Accept the Terms of Service and click **"Create"**
 
 ### Step 1.2: Copy the Bot Token
@@ -92,9 +92,9 @@ In the **"BOT PERMISSIONS"** section that appears below, check:
 
 5. Invite bot to server
 
-6. Run: discode onboard
+6. Run: mudcode onboard
 
-7. Start using: discode new
+7. Start using: mudcode new
 ```
 
 ---

@@ -1,10 +1,10 @@
-# Discode Architecture
+# Mudcode Architecture
 
 [English](ARCHITECTURE.md) | [한국어](ARCHITECTURE.ko.md)
 
 ## Overview
 
-Discode is a **bridge tool** that connects AI agent CLIs (Claude Code, Gemini, OpenCode) running in local tmux sessions to Discord or Slack for **remote monitoring and control**.
+Mudcode is a **bridge tool** that connects AI agent CLIs (Claude Code, Gemini, OpenCode) running in local tmux sessions to Discord or Slack for **remote monitoring and control**.
 
 - Run AI coding agents locally in tmux sessions
 - Stream agent output to dedicated Discord/Slack channels through event hooks
@@ -87,7 +87,7 @@ channelMapping lookup → { projectName, agentType, instanceId }
        │
        ▼
 BridgeMessageRouter.onMessage()
-       │  ├─ Download attachments → .discode/files/
+       │  ├─ Download attachments → .mudcode/files/
        │  ├─ Append [file:...] markers
        │  └─ Sanitize input (max 10000 chars)
        │
@@ -129,7 +129,7 @@ PendingMessageTracker → ✅ or ❌ reaction
 ### 3. Agent Sending Files
 
 ```
-Agent calls: .discode/bin/discode-send /path/to/file.png
+Agent calls: .mudcode/bin/mudcode-send /path/to/file.png
        │
        │ HTTP POST localhost:18470/send-files
        ▼
@@ -142,10 +142,10 @@ MessagingClient.sendToChannelWithFiles()
 Discord/Slack channel receives file
 ```
 
-## Project Setup Flow (`discode new`)
+## Project Setup Flow (`mudcode new`)
 
 ```
-discode new claude
+mudcode new claude
        │
        ▼
 Validate config (token, server ID, etc.)
@@ -159,9 +159,9 @@ setupProjectInstance()
        ├─ 1. Create tmux session + window
        ├─ 2. Create Discord/Slack channel (e.g. myapp-claude)
        ├─ 3. Install agent plugin (~/.claude/plugins/...)
-       ├─ 4. Install discode-send script
+       ├─ 4. Install mudcode-send script
        ├─ 5. Set env vars + start agent
-       └─ 6. Save state to ~/.discode/state.json
+       └─ 6. Save state to ~/.mudcode/state.json
        │
        ▼
 POST /reload → daemon picks up new channel mapping
@@ -174,7 +174,7 @@ Split TUI pane + tmux attach
 
 | Component | Location | Role |
 |-----------|----------|------|
-| **CLI** | `bin/discode.ts` | User interface, project creation/management |
+| **CLI** | `bin/mudcode.ts` | User interface, project creation/management |
 | **Daemon** | `src/daemon-entry.ts` | Background process, manages all projects |
 | **AgentBridge** | `src/index.ts` | Central orchestrator, composes all subsystems |
 | **MessagingClient** | `src/discord/`, `src/slack/` | Bidirectional Discord/Slack communication |
@@ -213,11 +213,11 @@ Wraps tmux CLI commands. Manages sessions, windows, panes. Handles pane resoluti
 
 ### `src/state/` - Project State Management
 
-Persists state to `~/.discode/state.json`. Supports multi-instance projects (e.g., `claude`, `claude-2`, `claude-3`). Handles legacy state format migration.
+Persists state to `~/.mudcode/state.json`. Supports multi-instance projects (e.g., `claude`, `claude-2`, `claude-3`). Handles legacy state format migration.
 
 ### `src/config/` - Configuration Management
 
-Loads from `~/.discode/config.json` with env var fallbacks. Config priority: stored config > env vars > defaults. File permissions set to `0o600` for security.
+Loads from `~/.mudcode/config.json` with env var fallbacks. Config priority: stored config > env vars > defaults. File permissions set to `0o600` for security.
 
 ### `src/policy/` - Agent Launch & Integration Policies
 
@@ -227,19 +227,19 @@ Loads from `~/.discode/config.json` with env var fallbacks. Config priority: sto
 
 ### `src/infra/` - Infrastructure Abstractions
 
-DI-friendly wrappers: `FileStorage`, `ShellCommandExecutor`, `SystemEnvironment`. Also includes `FileDownloader` (Discord/Slack attachment cache), `FileInstruction` (agent-specific instruction docs), and `SendScript` (generates `discode-send` for agents).
+DI-friendly wrappers: `FileStorage`, `ShellCommandExecutor`, `SystemEnvironment`. Also includes `FileDownloader` (Discord/Slack attachment cache), `FileInstruction` (agent-specific instruction docs), and `SendScript` (generates `mudcode-send` for agents).
 
 ## File Structure
 
 ```
-~/.discode/
+~/.mudcode/
   ├── config.json      ← Configuration (token, server ID, default agent)
   ├── state.json       ← Project state (channel mappings, instance info)
   ├── daemon.pid       ← Daemon process ID
   └── daemon.log       ← Daemon logs
 
-{project}/.discode/
-  ├── bin/discode-send  ← Script for agents to send files
+{project}/.mudcode/
+  ├── bin/mudcode-send  ← Script for agents to send files
   ├── files/            ← Attachment cache from Discord/Slack
   └── CLAUDE.md         ← Agent-specific file handling instructions
 ```

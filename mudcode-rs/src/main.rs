@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
     let addr = SocketAddr::from(([127, 0, 0, 1], cfg.hook_server_port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
-    info!("discode-rs bridge listening on http://{}", addr);
+    info!("mudcode-rs bridge listening on http://{}", addr);
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())

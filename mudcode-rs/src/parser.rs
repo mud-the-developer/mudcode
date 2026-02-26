@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn strip_file_paths_removes_backticks_and_plain_paths() {
-        let path = "/tmp/project/.discode/files/out.png".to_string();
+        let path = "/tmp/project/.mudcode/files/out.png".to_string();
         let text = format!("Result: `{}` then {}", path, path);
         let stripped = strip_file_paths(&text, std::slice::from_ref(&path));
         assert!(!stripped.contains(&path));

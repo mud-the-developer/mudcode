@@ -28,7 +28,7 @@ function normalizeScope(raw: string): string {
 }
 
 function resolvePackageScope(packageName: string): string {
-  const envScope = process.env.DISCODE_NPM_SCOPE;
+  const envScope = process.env.MUDCODE_NPM_SCOPE;
   if (envScope) {
     const normalized = normalizeScope(envScope);
     if (normalized) return normalized;
@@ -37,7 +37,7 @@ function resolvePackageScope(packageName: string): string {
   const match = packageName.match(/^(@[^/]+)\//);
   if (match) return match[1];
 
-  return '@siisee11';
+  return '@mudramo';
 }
 
 const packageScope = resolvePackageScope(pkgJson.name);
@@ -75,9 +75,39 @@ function suffixForTarget(target: Target): string {
     .join('-');
 }
 
+const targetBySuffix = new Map(allTargets.map((target) => [suffixForTarget(target), target] as const));
+
+const targetProfiles: Record<string, readonly string[]> = {
+  full: allTargets.map((target) => suffixForTarget(target)),
+  linux: [
+    'linux-x64',
+    'linux-x64-baseline',
+    'linux-x64-musl',
+    'linux-x64-baseline-musl',
+  ],
+};
+
+function resolveTargetBySuffix(suffix: string): Target {
+  const target = targetBySuffix.get(suffix);
+  if (!target) {
+    throw new Error(`Unknown target suffix: ${suffix}`);
+  }
+  return target;
+}
+
+function resolveProfileTargets(profile: string): Target[] {
+  const profileSuffixes = targetProfiles[profile];
+  if (!profileSuffixes) {
+    const supported = Object.keys(targetProfiles).join(', ');
+    throw new Error(`Unknown target profile: ${profile}. Supported profiles: ${supported}`);
+  }
+  return profileSuffixes.map((suffix) => resolveTargetBySuffix(suffix));
+}
+
 const single = process.argv.includes('--single');
 const hostOnly = process.argv.includes('--host-only');
 const targetsArg = argValue('--targets');
+const profile = argValue('--profile');
 const platformMap: Record<NodeJS.Platform, Target['os'] | undefined> = {
   darwin: 'darwin',
   linux: 'linux',
@@ -102,20 +132,21 @@ if (targetsArg && (single || hostOnly)) {
   throw new Error('--targets cannot be combined with --single/--host-only.');
 }
 
+if (profile && (single || hostOnly || targetsArg)) {
+  throw new Error('--profile cannot be combined with --single/--host-only/--targets.');
+}
+
+const strictRequestedTargets = !!targetsArg || !!profile;
+
 let targets: Target[];
 if (targetsArg) {
   const requested = targetsArg
     .split(',')
     .map((item) => item.trim())
     .filter(Boolean);
-  const bySuffix = new Map(allTargets.map((target) => [suffixForTarget(target), target] as const));
-  targets = requested.map((suffix) => {
-    const target = bySuffix.get(suffix);
-    if (!target) {
-      throw new Error(`Unknown target suffix: ${suffix}`);
-    }
-    return target;
-  });
+  targets = requested.map((suffix) => resolveTargetBySuffix(suffix));
+} else if (profile) {
+  targets = resolveProfileTargets(profile);
 } else if (single && currentOs && currentArch) {
   targets = allTargets.filter((t) => t.os === currentOs && t.arch === currentArch && !t.baseline && !t.abi);
 } else if (hostOnly && currentOs && currentArch) {
@@ -134,11 +165,11 @@ let localRustBuildAttempted = false;
 let localRustBuildSucceeded = false;
 
 function rustBinaryNameForTarget(target: Target): string {
-  return target.os === 'windows' ? 'discode-rs.exe' : 'discode-rs';
+  return target.os === 'windows' ? 'mudcode-rs.exe' : 'mudcode-rs';
 }
 
 function rustEnvNameForSuffix(suffix: string): string {
-  return `DISCODE_RS_BIN_${suffix.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
+  return `MUDCODE_RS_BIN_${suffix.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
 }
 
 function isHostCompatibleTarget(target: Target): boolean {
@@ -164,13 +195,13 @@ function ensureLocalRustReleaseBuilt(): boolean {
   if (localRustBuildAttempted) return localRustBuildSucceeded;
   localRustBuildAttempted = true;
 
-  if (process.env.DISCODE_RS_SKIP_LOCAL_BUILD === '1') {
-    console.log('  - Skipping local Rust build (DISCODE_RS_SKIP_LOCAL_BUILD=1)');
+  if (process.env.MUDCODE_RS_SKIP_LOCAL_BUILD === '1') {
+    console.log('  - Skipping local Rust build (MUDCODE_RS_SKIP_LOCAL_BUILD=1)');
     localRustBuildSucceeded = false;
     return false;
   }
 
-  const manifest = join(root, 'discode-rs', 'Cargo.toml');
+  const manifest = join(root, 'mudcode-rs', 'Cargo.toml');
   if (!existsSync(manifest)) {
     localRustBuildSucceeded = false;
     return false;
@@ -196,15 +227,15 @@ function resolveRustBinaryPath(target: Target, suffix: string): string | null {
   const specificEnv = process.env[rustEnvNameForSuffix(suffix)];
   if (specificEnv && existsSync(specificEnv)) return specificEnv;
 
-  const genericEnv = process.env.DISCODE_RS_BIN;
+  const genericEnv = process.env.MUDCODE_RS_BIN;
   if (genericEnv && existsSync(genericEnv)) return genericEnv;
 
-  const prebuiltDir = process.env.DISCODE_RS_PREBUILT_DIR;
+  const prebuiltDir = process.env.MUDCODE_RS_PREBUILT_DIR;
   if (prebuiltDir) {
     const prebuiltCandidates = [
-      join(prebuiltDir, `discode-rs-${suffix}`),
-      join(prebuiltDir, `discode-rs-${suffix}.exe`),
-      join(prebuiltDir, `discode-rs-${suffix}-${target.os}-${target.arch}`),
+      join(prebuiltDir, `mudcode-rs-${suffix}`),
+      join(prebuiltDir, `mudcode-rs-${suffix}.exe`),
+      join(prebuiltDir, `mudcode-rs-${suffix}-${target.os}-${target.arch}`),
       join(prebuiltDir, rustBinaryName),
     ];
     const prebuilt = prebuiltCandidates.find((candidate) => existsSync(candidate));
@@ -212,14 +243,14 @@ function resolveRustBinaryPath(target: Target, suffix: string): string | null {
   }
 
   if (isHostCompatibleTarget(target)) {
-    const releaseCandidate = join(root, 'discode-rs', 'target', 'release', rustBinaryName);
+    const releaseCandidate = join(root, 'mudcode-rs', 'target', 'release', rustBinaryName);
     if (!existsSync(releaseCandidate)) {
       ensureLocalRustReleaseBuilt();
     }
 
     const localCandidates = [
       releaseCandidate,
-      join(root, 'discode-rs', 'target', 'debug', rustBinaryName),
+      join(root, 'mudcode-rs', 'target', 'debug', rustBinaryName),
     ];
     const local = localCandidates.find((candidate) => existsSync(candidate));
     if (local) return local;
@@ -234,7 +265,7 @@ function tryAttachRustDaemonBinary(target: Target, suffix: string, binDir: strin
   if (!source) {
     console.log(
       `  - Rust daemon sidecar not found for ${suffix}. ` +
-      `Set ${rustEnvNameForSuffix(suffix)} / DISCODE_RS_BIN / DISCODE_RS_PREBUILT_DIR to include it.`,
+      `Set ${rustEnvNameForSuffix(suffix)} / MUDCODE_RS_BIN / MUDCODE_RS_PREBUILT_DIR to include it.`,
     );
     return;
   }
@@ -254,12 +285,12 @@ const binaries: Record<string, string> = {};
 
 for (const target of targets) {
   const suffix = suffixForTarget(target);
-  const packageName = `${packageScope}/discode-${suffix}`;
+  const packageName = `${packageScope}/mudcode-${suffix}`;
   const compileTarget = `bun-${suffix}`;
   const packageDirName = packageName.split('/')[1] || packageName;
   const packageDir = join(outRoot, packageDirName);
   const binDir = join(packageDir, 'bin');
-  const binaryName = target.os === 'windows' ? 'discode.exe' : 'discode';
+  const binaryName = target.os === 'windows' ? 'mudcode.exe' : 'mudcode';
   const outfile = join(binDir, binaryName);
 
   console.log(`Building ${packageName} (${compileTarget})`);
@@ -276,6 +307,13 @@ for (const target of targets) {
       );
     }
 
+    if (strictRequestedTargets) {
+      throw new Error(
+        `Missing required module ${openTuiRuntime.moduleName} for requested target ${suffix}. ` +
+        `Build this target on a matching runner (or install that optional package explicitly).`,
+      );
+    }
+
     console.log(
       `  - Skipping ${packageName}: missing ${openTuiRuntime.moduleName}. ` +
       `Build this target on a matching runner or install that optional package explicitly.`,
@@ -287,7 +325,7 @@ for (const target of targets) {
 
   const result = await Bun.build({
     plugins: [solidPlugin],
-    entrypoints: ['./bin/discode.ts', './bin/tui.tsx'],
+    entrypoints: ['./bin/mudcode.ts', './bin/tui.tsx'],
     target: 'bun',
     sourcemap: 'external',
     compile: {
@@ -301,7 +339,7 @@ for (const target of targets) {
       execArgv: ['--'],
     },
     define: {
-      DISCODE_VERSION: `'${pkgJson.version}'`,
+      MUDCODE_VERSION: `'${pkgJson.version}'`,
     },
   });
 

@@ -5,7 +5,7 @@
 Release 작업 시 아래 항목은 필수입니다.
 
 - 웹사이트 landing page의 `new` 문구를 최신 릴리즈 내용으로 업데이트한다. (`site/index.html`)
-- npm에 릴리즈 버전을 반드시 publish한다. (메타 패키지 `@siisee11/discode`와 플랫폼 패키지 `@siisee11/discode-*` 모두)
+- npm에 릴리즈 버전을 반드시 publish한다. (메타 패키지 `@mudramo/mudcode`와 플랫폼 패키지 `@mudramo/mudcode-*` 모두)
 - GitHub Releases 페이지에 릴리즈를 등록하고, changelog를 포함해 배포 아티팩트를 업로드한다.
 
 ## Web 배포
@@ -29,11 +29,11 @@ Release 작업 시 아래 항목은 필수입니다.
 
 주의:
 
-- `discode-src onboard`는 이미 실행 중인 글로벌 daemon을 재사용하므로 코드 변경이 자동 반영되지 않는다.
+- `mudcode-src onboard`는 이미 실행 중인 글로벌 daemon을 재사용하므로 코드 변경이 자동 반영되지 않는다.
 - 코드 변경 후 아래 명령으로 수동 재시작한다.
 
 ```bash
-discode-src daemon stop
-discode-src daemon start
-discode-src daemon status
+mudcode-src daemon stop
+mudcode-src daemon start
+mudcode-src daemon status
 ```

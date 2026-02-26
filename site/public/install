@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP="discode"
-OWNER="siisee11"
-REPO="discode"
-INSTALL_DIR="$HOME/.discode/bin"
+APP="mudcode"
+OWNER="mudramo"
+REPO="mudcode"
+INSTALL_DIR="$HOME/.mudcode/bin"
 NO_MODIFY_PATH=false
 
 while [[ $# -gt 0 ]]; do
@@ -15,11 +15,11 @@ while [[ $# -gt 0 ]]; do
       ;;
     -h|--help)
       cat <<'EOF'
-Discode installer
+Mudcode installer
 
 Usage:
-  curl -fsSL https://discode.chat/install | bash
-  curl -fsSL https://discode.chat/install | bash -s -- --no-modify-path
+  curl -fsSL https://mudcode.chat/install | bash
+  curl -fsSL https://mudcode.chat/install | bash -s -- --no-modify-path
 EOF
       exit 0
       ;;
@@ -121,7 +121,7 @@ filename="$APP-$suffix.$archive_ext"
 url="https://github.com/$OWNER/$REPO/releases/download/v$version/$filename"
 package_name="@$OWNER/$APP-$suffix"
 
-tmp_dir="${TMPDIR:-/tmp}/discode-install-$$"
+tmp_dir="${TMPDIR:-/tmp}/mudcode-install-$$"
 mkdir -p "$tmp_dir"
 trap 'rm -rf "$tmp_dir"' EXIT
 
@@ -206,7 +206,7 @@ add_to_path() {
 
   {
     echo
-    echo "# discode"
+    echo "# mudcode"
     echo "$command_line"
   } >> "$config_file"
   echo "Added PATH entry to: $config_file"

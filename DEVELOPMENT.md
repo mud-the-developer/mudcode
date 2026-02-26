@@ -1,44 +1,44 @@
 # Development Notes
 
-## Switching Discode Runtime (Local vs Release)
+## Switching Mudcode Runtime (Local vs Release)
 
-By default, `discode` should point to your local TypeScript source runtime during development.
+By default, `mudcode` should point to your local TypeScript source runtime during development.
 
 Add this patch to `~/.zshrc`:
 
 ```zsh
-# --- Discode runtime switchers ---
-export DISCODE_REPO="/Users/dev/git/discode"
-export DISCODE_LOCAL_BIN="$DISCODE_REPO/dist/release/discode-darwin-arm64/bin/discode"
+# --- Mudcode runtime switchers ---
+export MUDCODE_REPO="/Users/dev/git/mudcode"
+export MUDCODE_LOCAL_BIN="$MUDCODE_REPO/dist/release/mudcode-darwin-arm64/bin/mudcode"
 
 # Force globally installed release runtime
-discode-rel() {
-  env -u DISCODE_BIN_PATH command discode "$@"
+mudcode-rel() {
+  env -u MUDCODE_BIN_PATH command mudcode "$@"
 }
 
 # Force local compiled runtime
-discode-local() {
-  DISCODE_BIN_PATH="$DISCODE_LOCAL_BIN" command discode "$@"
+mudcode-local() {
+  MUDCODE_BIN_PATH="$MUDCODE_LOCAL_BIN" command mudcode "$@"
 }
 
 # Run TypeScript source directly
-discode-src() {
-  bun run tsx "$DISCODE_REPO/bin/discode.ts" "$@"
+mudcode-src() {
+  bun run tsx "$MUDCODE_REPO/bin/mudcode.ts" "$@"
 }
 
-# Default `discode` to local source runtime
-alias discode='discode-src'
+# Default `mudcode` to local source runtime
+alias mudcode='mudcode-src'
 ```
 
 Helpers:
 
-- `discode`: local TypeScript source runtime (default alias)
-- `discode-local`: local compiled binary from this repo
-- `discode-rel`: global installed release runtime (ignores `DISCODE_BIN_PATH`)
-- `discode-src`: local TypeScript source runtime
+- `mudcode`: local TypeScript source runtime (default alias)
+- `mudcode-local`: local compiled binary from this repo
+- `mudcode-rel`: global installed release runtime (ignores `MUDCODE_BIN_PATH`)
+- `mudcode-src`: local TypeScript source runtime
 
-Note: `discode-src` intentionally preserves your current working directory.
-This keeps commands like `discode new` tied to the folder you ran them in.
+Note: `mudcode-src` intentionally preserves your current working directory.
+This keeps commands like `mudcode new` tied to the folder you ran them in.
 
 After updating `~/.zshrc`, reload shell config:
 
@@ -50,35 +50,35 @@ source ~/.zshrc
 
 ```bash
 # Release (global installed package)
-discode-rel onboard
+mudcode-rel onboard
 
 # Local compiled binary
-discode-local onboard
+mudcode-local onboard
 
 # Local source (tsx)
-discode-src onboard
+mudcode-src onboard
 ```
 
 ### Build local binary (when needed)
 
 ```bash
-cd /Users/dev/git/discode
+cd /Users/dev/git/mudcode
 npm run build
 npm run build:release:binaries:single
 ```
 
-The `discode-local` helper expects:
+The `mudcode-local` helper expects:
 
 ```text
-/Users/dev/git/discode/dist/release/discode-darwin-arm64/bin/discode
+/Users/dev/git/mudcode/dist/release/mudcode-darwin-arm64/bin/mudcode
 ```
 
-### Keep `discode-local` up to date
+### Keep `mudcode-local` up to date
 
-Use this workflow whenever `discode-local` behavior differs from `discode-src`, or after changing CLI code:
+Use this workflow whenever `mudcode-local` behavior differs from `mudcode-src`, or after changing CLI code:
 
 ```bash
-cd /Users/dev/git/discode
+cd /Users/dev/git/mudcode
 npm run build
 npm run build:release:binaries:single
 ```
@@ -87,17 +87,17 @@ Quick verification:
 
 ```bash
 # 1) Check the helper target path
-echo "$DISCODE_LOCAL_BIN"
+echo "$MUDCODE_LOCAL_BIN"
 
 # 2) Confirm the binary is freshly updated
-ls -l /Users/dev/git/discode/dist/release/discode-darwin-arm64/bin/discode
+ls -l /Users/dev/git/mudcode/dist/release/mudcode-darwin-arm64/bin/mudcode
 
 # 3) Smoke test onboarding behavior
-discode-local onboard
+mudcode-local onboard
 ```
 
-If `discode-local` still behaves differently:
+If `mudcode-local` still behaves differently:
 
-- Confirm your shell function is loaded from `~/.zshrc` (`type discode-local`).
-- Confirm `DISCODE_LOCAL_BIN` points to the repo build output path above.
+- Confirm your shell function is loaded from `~/.zshrc` (`type mudcode-local`).
+- Confirm `MUDCODE_LOCAL_BIN` points to the repo build output path above.
 - Re-run `source ~/.zshrc` and test again.

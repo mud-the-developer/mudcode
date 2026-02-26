@@ -105,7 +105,7 @@ vi.mock('../src/config/index.js', () => ({
   validateConfig: vi.fn(),
   config: mocks.config,
   saveConfig: vi.fn(),
-  getConfigPath: vi.fn().mockReturnValue('/tmp/discode/config.json'),
+  getConfigPath: vi.fn().mockReturnValue('/tmp/mudcode/config.json'),
   getConfigValue: vi.fn(),
 }));
 
@@ -191,7 +191,7 @@ describe('CLI flow safety (stage 1)', () => {
   });
 
   it('new: starts daemon and sets up a new instance', async () => {
-    const mod = await import('../bin/discode.ts');
+    const mod = await import('../bin/mudcode.ts');
 
     await mod.newCommand('claude', { name: 'demo', attach: false });
 
@@ -212,7 +212,7 @@ describe('CLI flow safety (stage 1)', () => {
   });
 
   it('attach: attaches to requested instance window', async () => {
-    const mod = await import('../bin/discode.ts');
+    const mod = await import('../bin/mudcode.ts');
     const project = {
       projectName: 'demo',
       projectPath: '/work/demo',
@@ -242,7 +242,7 @@ describe('CLI flow safety (stage 1)', () => {
   });
 
   it('stop: stops one instance and keeps remaining instances in state', async () => {
-    const mod = await import('../bin/discode.ts');
+    const mod = await import('../bin/mudcode.ts');
     const project = {
       projectName: 'demo',
       projectPath: '/work/demo',
