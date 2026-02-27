@@ -8,7 +8,9 @@ import {
   normalizeProjectState,
 } from '../state/instances.js';
 import { downloadFileAttachments, buildFileMarkers } from '../infra/file-downloader.js';
-import { PendingMessageTracker } from './pending-message-tracker.js';
+import { PendingMessageTracker, type PendingRuntimeSnapshot } from './pending-message-tracker.js';
+import { getDaemonStatus } from '../app/daemon-service.js';
+import { cleanCapture, splitForDiscord, splitForSlack } from '../capture/parser.js';
 
 export interface BridgeMessageRouterDeps {
   messaging: MessagingClient;
@@ -41,8 +43,10 @@ type SessionControlCommand = 'q' | 'qw';
 export class BridgeMessageRouter {
   private routeByMessageId: Map<string, RouteMemory> = new Map();
   private routeByConversationKey: Map<string, RouteMemory> = new Map();
+  private lastPromptByInstance: Map<string, string> = new Map();
   private readonly maxMessageRoutes = 4000;
   private readonly maxConversationRoutes = 2000;
+  private readonly maxPromptMemory = 2000;
 
   constructor(private deps: BridgeMessageRouterDeps) {}
 
@@ -91,6 +95,208 @@ export class BridgeMessageRouter {
     if (context?.threadId) return 'thread';
     if (source === 'conversation') return 'memory';
     return undefined;
+  }
+
+  private promptMemoryKey(projectName: string, instanceId: string): string {
+    return `${projectName}:${instanceId}`;
+  }
+
+  private rememberPrompt(projectName: string, instanceId: string, prompt: string): void {
+    const key = this.promptMemoryKey(projectName, instanceId);
+    this.lastPromptByInstance.set(key, prompt);
+    this.pruneOldest(this.lastPromptByInstance, this.maxPromptMemory);
+  }
+
+  private getRememberedPrompt(projectName: string, instanceId: string): string | undefined {
+    const key = this.promptMemoryKey(projectName, instanceId);
+    return this.lastPromptByInstance.get(key);
+  }
+
+  private parseUtilityCommand(content: string): 'retry' | 'health' | 'snapshot' | undefined {
+    const normalized = content.trim().toLowerCase();
+    if (normalized === '/retry') return 'retry';
+    if (normalized === '/health') return 'health';
+    if (normalized === '/snapshot') return 'snapshot';
+    return undefined;
+  }
+
+  private resolveSnapshotTailLines(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_SNAPSHOT_TAIL_LINES || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 1 && fromEnv <= 500) {
+      return Math.trunc(fromEnv);
+    }
+    return 30;
+  }
+
+  private getPendingDepth(projectName: string, agentType: string, instanceId?: string): number {
+    const pendingTracker = this.deps.pendingTracker as unknown as {
+      getPendingDepth?: (projectName: string, agentType: string, instanceId?: string) => number;
+    };
+    return typeof pendingTracker.getPendingDepth === 'function'
+      ? pendingTracker.getPendingDepth(projectName, agentType, instanceId)
+      : 0;
+  }
+
+  private getPendingRuntimeSnapshot(
+    projectName: string,
+    agentType: string,
+    instanceId?: string,
+  ): PendingRuntimeSnapshot {
+    const pendingTracker = this.deps.pendingTracker as unknown as {
+      getRuntimeSnapshot?: (projectName: string, agentType: string, instanceId?: string) => PendingRuntimeSnapshot;
+      getPendingDepth?: (projectName: string, agentType: string, instanceId?: string) => number;
+    };
+    if (typeof pendingTracker.getRuntimeSnapshot === 'function') {
+      return pendingTracker.getRuntimeSnapshot(projectName, agentType, instanceId);
+    }
+    return { pendingDepth: this.getPendingDepth(projectName, agentType, instanceId) };
+  }
+
+  private formatAge(ageMs?: number): string {
+    if (!Number.isFinite(ageMs) || typeof ageMs !== 'number' || ageMs < 0) return 'unknown';
+    if (ageMs < 1000) return '<1s';
+    const sec = Math.round(ageMs / 1000);
+    if (sec < 60) return `${sec}s`;
+    const min = Math.round(sec / 60);
+    if (min < 60) return `${min}m`;
+    const hours = Math.round(min / 60);
+    return `${hours}h`;
+  }
+
+  private hasEscToInterruptMarker(captureRaw: string): boolean {
+    const lines = cleanCapture(captureRaw)
+      .split('\n')
+      .map((line) => line.toLowerCase().replace(/\s+/g, ' ').trim())
+      .filter((line) => line.length > 0);
+    const tail = lines.slice(-20);
+    return tail.some((line) => {
+      if (line === 'esc to interrupt') return true;
+      if (line.includes('for shortcuts') && line.includes('esc to interrupt')) return true;
+      if (line.startsWith('esc to interrupt ') && line.length <= 48) return true;
+      return false;
+    });
+  }
+
+  private detectPaneWorkingHint(sessionName: string, windowName: string, agentType: string): boolean {
+    if (agentType !== 'codex') return false;
+    try {
+      const pane = this.deps.tmux.capturePaneFromWindow(sessionName, windowName, agentType);
+      return this.hasEscToInterruptMarker(pane);
+    } catch {
+      return false;
+    }
+  }
+
+  private buildInputStatus(snapshot: PendingRuntimeSnapshot, paneWorkingHint: boolean): string {
+    if (snapshot.pendingDepth > 0) {
+      const latestStage = snapshot.latestStage || snapshot.oldestStage || 'received';
+      return `✅ accepted (\`${snapshot.pendingDepth}\` queued, latest stage: \`${latestStage}\`)`;
+    }
+    if (paneWorkingHint) {
+      return '⚠️ tracker queue is empty, but pane still shows working (`Esc to interrupt`)';
+    }
+    if (snapshot.lastTerminalStage === 'completed') {
+      return `✅ completed recently (${this.formatAge(snapshot.lastTerminalAgeMs)} ago)`;
+    }
+    if (snapshot.lastTerminalStage === 'error') {
+      return `⚠️ last request failed (${this.formatAge(snapshot.lastTerminalAgeMs)} ago)`;
+    }
+    if (snapshot.lastTerminalStage === 'retry') {
+      return `⚠️ last request needs retry (${this.formatAge(snapshot.lastTerminalAgeMs)} ago)`;
+    }
+    return 'ℹ️ no in-flight request';
+  }
+
+  private buildRuntimeStatus(snapshot: PendingRuntimeSnapshot, paneWorkingHint: boolean): string {
+    if (paneWorkingHint) return '🟡 working (pane shows `Esc to interrupt`)';
+    if (snapshot.pendingDepth <= 0) return '🟢 idle';
+
+    const stage = snapshot.oldestStage || snapshot.latestStage || 'received';
+    if (stage === 'processing') {
+      return `🟡 working (oldest stage: \`${stage}\`, age: ${this.formatAge(snapshot.oldestAgeMs)})`;
+    }
+    if (stage === 'routed') {
+      return `🟡 routed to tmux (age: ${this.formatAge(snapshot.oldestAgeMs)})`;
+    }
+    return `🟡 queued (stage: \`${stage}\`, age: ${this.formatAge(snapshot.oldestAgeMs)})`;
+  }
+
+  private async sendHealthSummary(params: {
+    channelId: string;
+    projectName: string;
+    normalizedProject: ReturnType<typeof normalizeProjectState>;
+    resolvedAgentType: string;
+    instanceId: string;
+    windowName: string;
+  }): Promise<void> {
+    const sessionName = params.normalizedProject.tmuxSession;
+    const sessionAlive = this.deps.tmux.sessionExistsFull(sessionName);
+    const windowAlive = sessionAlive && this.deps.tmux.windowExists(sessionName, params.windowName);
+    const paneWorkingHint =
+      windowAlive && this.detectPaneWorkingHint(sessionName, params.windowName, params.resolvedAgentType);
+    const runtimeSnapshot = this.getPendingRuntimeSnapshot(
+      params.projectName,
+      params.resolvedAgentType,
+      params.instanceId,
+    );
+    const daemonStatus = await getDaemonStatus().catch(() => undefined);
+
+    const lines = [
+      '🩺 **Mudcode Health**',
+      `Project: \`${params.projectName}\``,
+      `Instance: \`${params.instanceId}\` (\`${params.resolvedAgentType}\`)`,
+      `tmux session: \`${sessionName}\` ${sessionAlive ? '✅' : '⚠️ missing'}`,
+      `tmux window: \`${params.windowName}\` ${windowAlive ? '✅' : '⚠️ missing'}`,
+      `input status: ${this.buildInputStatus(runtimeSnapshot, paneWorkingHint)}`,
+      `runtime status: ${this.buildRuntimeStatus(runtimeSnapshot, paneWorkingHint)}`,
+      `pending queue: \`${runtimeSnapshot.pendingDepth}\``,
+    ];
+
+    if (daemonStatus) {
+      lines.push(`daemon: ${daemonStatus.running ? `✅ running on ${daemonStatus.port}` : `⚠️ not running (expected ${daemonStatus.port})`}`);
+    }
+
+    await this.deps.messaging.sendToChannel(params.channelId, lines.join('\n'));
+  }
+
+  private async sendSnapshot(params: {
+    channelId: string;
+    projectName: string;
+    normalizedProject: ReturnType<typeof normalizeProjectState>;
+    resolvedAgentType: string;
+    instanceId: string;
+    windowName: string;
+  }): Promise<void> {
+    try {
+      const pane = this.deps.tmux.capturePaneFromWindow(
+        params.normalizedProject.tmuxSession,
+        params.windowName,
+        params.resolvedAgentType,
+      );
+      const snapshot = cleanCapture(pane);
+      if (!snapshot || snapshot.trim().length === 0) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          `⚠️ Snapshot is empty for \`${params.projectName}/${params.instanceId}\`.`,
+        );
+        return;
+      }
+
+      const lines = snapshot.split('\n');
+      const tailLines = lines.slice(-this.resolveSnapshotTailLines());
+      const title =
+        tailLines.length < lines.length
+          ? `📸 Snapshot \`${params.projectName}/${params.instanceId}\` (last ${tailLines.length}/${lines.length} lines)`
+          : `📸 Snapshot \`${params.projectName}/${params.instanceId}\``;
+      const payload = `${title}\n\`\`\`text\n${tailLines.join('\n')}\n\`\`\``;
+      const split = this.deps.messaging.platform === 'slack' ? splitForSlack : splitForDiscord;
+      for (const chunk of split(payload)) {
+        if (chunk.trim().length === 0) continue;
+        await this.deps.messaging.sendToChannel(params.channelId, chunk);
+      }
+    } catch (error) {
+      await this.deps.messaging.sendToChannel(params.channelId, this.buildDeliveryFailureGuidance(params.projectName, error));
+    }
   }
 
   private parseSpecialKeyCommand(content: string): SpecialKeyCommandParse {
@@ -213,6 +419,7 @@ export class BridgeMessageRouter {
         this.routeByConversationKey.delete(key);
       }
     }
+    this.lastPromptByInstance.delete(this.promptMemoryKey(projectName, instanceId));
   }
 
   private clearPendingForInstance(projectName: string, agentType: string, instanceId: string): void {
@@ -442,39 +649,76 @@ export class BridgeMessageRouter {
         return;
       }
 
-      let promptToSend: string | null = null;
-      let specialKeyCommand: SpecialKeyCommand | null = null;
-      let downloadedAttachmentCount = 0;
-      const keyCommand = this.parseSpecialKeyCommand(content);
-      if (keyCommand.kind === 'invalid') {
-        await messaging.sendToChannel(channelId, keyCommand.message);
+      const utilityCommand = this.parseUtilityCommand(content);
+      if (utilityCommand === 'health') {
+        await this.sendHealthSummary({
+          channelId: commandChannelId,
+          projectName,
+          normalizedProject,
+          resolvedAgentType,
+          instanceId: instanceKey,
+          windowName,
+        });
+        return;
+      }
+      if (utilityCommand === 'snapshot') {
+        await this.sendSnapshot({
+          channelId: commandChannelId,
+          projectName,
+          normalizedProject,
+          resolvedAgentType,
+          instanceId: instanceKey,
+          windowName,
+        });
         return;
       }
 
-      if (keyCommand.kind === 'valid') {
-        specialKeyCommand = keyCommand.command;
-      } else {
-        let enrichedContent = content;
-        if (attachments && attachments.length > 0) {
-          try {
-            const downloaded = await downloadFileAttachments(attachments, project.projectPath, attachments[0]?.authHeaders);
-            if (downloaded.length > 0) {
-              const markers = buildFileMarkers(downloaded);
-              enrichedContent = content + markers;
-              downloadedAttachmentCount = downloaded.length;
-              console.log(`📎 [${projectName}/${agentType}] ${downloaded.length} file(s) attached`);
-            }
-          } catch (error) {
-            console.warn('Failed to process file attachments:', error);
-          }
-        }
-
-        const sanitized = this.deps.sanitizeInput(enrichedContent);
-        if (!sanitized) {
-          await messaging.sendToChannel(channelId, '⚠️ Invalid message: empty, too long (>10000 chars), or contains invalid characters');
+      let promptToSend: string | null = null;
+      let specialKeyCommand: SpecialKeyCommand | null = null;
+      let downloadedAttachmentCount = 0;
+      const isRetryCommand = utilityCommand === 'retry';
+      if (isRetryCommand) {
+        const remembered = this.getRememberedPrompt(projectName, instanceKey);
+        if (!remembered) {
+          await messaging.sendToChannel(
+            channelId,
+            '⚠️ No previous prompt found for this instance. Send a normal prompt first.',
+          );
           return;
         }
-        promptToSend = sanitized;
+        promptToSend = remembered;
+      } else {
+        const keyCommand = this.parseSpecialKeyCommand(content);
+        if (keyCommand.kind === 'invalid') {
+          await messaging.sendToChannel(channelId, keyCommand.message);
+          return;
+        }
+
+        if (keyCommand.kind === 'valid') {
+          specialKeyCommand = keyCommand.command;
+        } else {
+          let enrichedContent = content;
+          if (attachments && attachments.length > 0) {
+            try {
+              const downloaded = await downloadFileAttachments(attachments, project.projectPath, attachments[0]?.authHeaders);
+              if (downloaded.length > 0) {
+                const markers = buildFileMarkers(downloaded);
+                enrichedContent = content + markers;
+                downloadedAttachmentCount = downloaded.length;
+                console.log(`📎 [${projectName}/${agentType}] ${downloaded.length} file(s) attached`);
+              }
+            } catch (error) {
+              console.warn('Failed to process file attachments:', error);
+            }
+          }
+
+          const sanitized = this.deps.sanitizeInput(enrichedContent);
+          if (!sanitized) {
+            await messaging.sendToChannel(channelId, '⚠️ Invalid message: empty, too long (>10000 chars), or contains invalid characters');
+            return;
+          }
+          promptToSend = sanitized;
+        }
       }
 
       if (messageId) {
@@ -542,6 +786,9 @@ export class BridgeMessageRouter {
       }
 
       if (delivered) {
+        if (!specialKeyCommand && promptToSend && promptToSend.trim().length > 0) {
+          this.rememberPrompt(projectName, instanceKey, promptToSend);
+        }
         this.rememberMessageRoute(messageId, routeMemory);
         this.rememberConversationRoute(context?.conversationKey, routeMemory);
       }
@@ -595,10 +842,20 @@ export class BridgeMessageRouter {
       return 'restarted';
     }
 
-    this.deps.tmux.typeKeysToWindow(tmuxSession, windowName, prompt.trimEnd(), 'codex');
+    const trimmedPrompt = prompt.trimEnd();
+    this.deps.tmux.typeKeysToWindow(tmuxSession, windowName, trimmedPrompt, 'codex');
     const delayMs = this.getEnvInt('AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS', 75);
     await this.sleep(delayMs);
     this.deps.tmux.sendEnterToWindow(tmuxSession, windowName, 'codex');
+
+    // Codex can occasionally miss the first Enter for very long typed payloads.
+    // Send one follow-up Enter to match the observed manual recovery (/enter).
+    const retryThreshold = this.getEnvInt('AGENT_DISCORD_CODEX_LONG_PROMPT_REENTER_THRESHOLD', 3500);
+    if (trimmedPrompt.length >= Math.max(1, retryThreshold)) {
+      const retryDelayMs = this.getEnvInt('AGENT_DISCORD_CODEX_LONG_PROMPT_REENTER_DELAY_MS', 120);
+      await this.sleep(Math.max(0, retryDelayMs));
+      this.deps.tmux.sendEnterToWindow(tmuxSession, windowName, 'codex');
+    }
     return 'sent';
   }
 

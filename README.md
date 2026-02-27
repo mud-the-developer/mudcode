@@ -64,6 +64,7 @@ mudcode stop my-app --instance codex-2
 - `mudcode daemon <start|stop|status|restart>`: daemon lifecycle
 - `mudcode list`: list projects/instances
 - `mudcode status`: show config + tmux/project status
+- `mudcode health [--json]`: run one-shot diagnostics (config/daemon/tmux/channel mapping)
 - `mudcode attach [project]`: attach to tmux session/window
 - `mudcode stop [project]`: stop project or one instance
 - `mudcode config --show`: inspect current config
@@ -108,6 +109,8 @@ bun install
 npm run typecheck
 npm test
 npm run test:e2e:tmux
+npm run ci:local
+npm run migration:check
 npm run build
 ```
 

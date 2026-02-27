@@ -64,6 +64,7 @@ mudcode stop my-app --instance codex-2
 - `mudcode daemon <start|stop|status|restart>`: 데몬 관리
 - `mudcode list`: 프로젝트/인스턴스 목록
 - `mudcode status`: 설정 + tmux/프로젝트 상태 확인
+- `mudcode health [--json]`: 설정/데몬/tmux/채널 매핑 진단 실행
 - `mudcode attach [project]`: tmux 세션/윈도우 연결
 - `mudcode stop [project]`: 프로젝트 또는 단일 인스턴스 중지
 - `mudcode config --show`: 현재 설정 확인
@@ -108,6 +109,8 @@ bun install
 npm run typecheck
 npm test
 npm run test:e2e:tmux
+npm run ci:local
+npm run migration:check
 npm run build
 ```
 

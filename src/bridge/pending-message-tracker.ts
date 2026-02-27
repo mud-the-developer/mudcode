@@ -1,26 +1,62 @@
 import type { MessagingClient } from '../messaging/interface.js';
 
-type PendingStage = 'received' | 'routed' | 'processing' | 'completed' | 'error' | 'retry';
+export type PendingStage = 'received' | 'routed' | 'processing' | 'completed' | 'error' | 'retry';
+type PendingTerminalStage = 'completed' | 'error' | 'retry';
 type RouteHint = 'reply' | 'thread' | 'memory' | 'attachment';
 
 interface PendingMessageState {
   channelId: string;
   messageId: string;
+  stage: PendingStage;
   statusEmoji: string;
+  createdAtMs: number;
+  updatedAtMs: number;
   promptTail?: string;
   stopTypingIndicator?: () => void;
+  stuckAlertTimer?: ReturnType<typeof setTimeout>;
 }
 
 type PendingQueueTarget = 'head' | 'tail';
 
+export interface PendingRuntimeSnapshot {
+  pendingDepth: number;
+  oldestStage?: PendingStage;
+  oldestAgeMs?: number;
+  oldestUpdatedAt?: string;
+  latestStage?: PendingStage;
+  latestAgeMs?: number;
+  latestUpdatedAt?: string;
+  lastTerminalStage?: PendingTerminalStage;
+  lastTerminalAgeMs?: number;
+  lastTerminalAt?: string;
+}
+
+interface PendingTerminalSnapshot {
+  stage: PendingTerminalStage;
+  atMs: number;
+}
+
 export class PendingMessageTracker {
   private static readonly PROMPT_TAIL_MAX = 240;
+  private static readonly MAX_TERMINAL_SNAPSHOTS = 4000;
   private pendingMessageByInstance: Map<string, PendingMessageState[]> = new Map();
+  private lastTerminalByInstance: Map<string, PendingTerminalSnapshot> = new Map();
+  private readonly pendingStuckAlertMs: number;
 
-  constructor(private messaging: MessagingClient) {}
+  constructor(private messaging: MessagingClient) {
+    this.pendingStuckAlertMs = this.resolvePendingStuckAlertMs();
+  }
 
   private pendingKey(projectName: string, instanceKey: string): string {
     return `${projectName}:${instanceKey}`;
+  }
+
+  private pruneOldest<K, V>(map: Map<K, V>, maxSize: number): void {
+    while (map.size > maxSize) {
+      const oldest = map.keys().next();
+      if (oldest.done) return;
+      map.delete(oldest.value);
+    }
   }
 
   getPendingChannel(projectName: string, agentType: string, instanceId?: string): string | undefined {
@@ -46,6 +82,28 @@ export class PendingMessageTracker {
     return queue
       .map((item) => item.promptTail)
       .filter((tail): tail is string => typeof tail === 'string' && tail.trim().length > 0);
+  }
+
+  getRuntimeSnapshot(projectName: string, agentType: string, instanceId?: string): PendingRuntimeSnapshot {
+    const key = this.pendingKey(projectName, instanceId || agentType);
+    const queue = this.pendingMessageByInstance.get(key) || [];
+    const now = Date.now();
+    const oldest = queue[0];
+    const latest = queue[queue.length - 1];
+    const lastTerminal = this.lastTerminalByInstance.get(key);
+
+    return {
+      pendingDepth: queue.length,
+      oldestStage: oldest?.stage,
+      oldestAgeMs: oldest ? Math.max(0, now - oldest.updatedAtMs) : undefined,
+      oldestUpdatedAt: oldest ? new Date(oldest.updatedAtMs).toISOString() : undefined,
+      latestStage: latest?.stage,
+      latestAgeMs: latest ? Math.max(0, now - latest.updatedAtMs) : undefined,
+      latestUpdatedAt: latest ? new Date(latest.updatedAtMs).toISOString() : undefined,
+      lastTerminalStage: lastTerminal?.stage,
+      lastTerminalAgeMs: lastTerminal ? Math.max(0, now - lastTerminal.atMs) : undefined,
+      lastTerminalAt: lastTerminal ? new Date(lastTerminal.atMs).toISOString() : undefined,
+    };
   }
 
   clearPendingForInstance(projectName: string, agentType: string, instanceId?: string): void {
@@ -124,6 +182,10 @@ export class PendingMessageTracker {
   }
 
   private stopTypingIndicator(pending: PendingMessageState): void {
+    if (pending.stuckAlertTimer) {
+      clearTimeout(pending.stuckAlertTimer);
+      pending.stuckAlertTimer = undefined;
+    }
     if (!pending.stopTypingIndicator) return;
     try {
       pending.stopTypingIndicator();
@@ -131,6 +193,46 @@ export class PendingMessageTracker {
       // Best-effort cleanup.
     }
     pending.stopTypingIndicator = undefined;
+  }
+
+  private resolvePendingStuckAlertMs(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_PENDING_ALERT_MS || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 5000) {
+      return Math.trunc(fromEnv);
+    }
+    return 45000;
+  }
+
+  private scheduleStuckAlert(key: string, pending: PendingMessageState): void {
+    if (this.pendingStuckAlertMs <= 0) return;
+
+    pending.stuckAlertTimer = setTimeout(() => {
+      const queue = this.pendingMessageByInstance.get(key);
+      if (!queue || !queue.includes(pending)) return;
+      pending.stuckAlertTimer = undefined;
+
+      if (!pending.stopTypingIndicator && typeof this.messaging.startTypingIndicator === 'function') {
+        void this.messaging
+          .startTypingIndicator(pending.channelId)
+          .then((stopTypingIndicator) => {
+            const latestQueue = this.pendingMessageByInstance.get(key);
+            if (!latestQueue || !latestQueue.includes(pending)) {
+              try {
+                stopTypingIndicator();
+              } catch {
+                // Best-effort cleanup.
+              }
+              return;
+            }
+            pending.stopTypingIndicator = stopTypingIndicator;
+          })
+          .catch(() => undefined);
+      }
+
+      // Continue keepalive checks while pending remains unresolved.
+      this.scheduleStuckAlert(key, pending);
+    }, this.pendingStuckAlertMs);
+    pending.stuckAlertTimer.unref?.();
   }
 
   private async transitionByKey(
@@ -153,7 +255,14 @@ export class PendingMessageTracker {
       pending.statusEmoji = nextEmoji;
     }
 
+    pending.stage = stage;
+    pending.updatedAtMs = Date.now();
+
     if (removeAfter) {
+      if (stage === 'completed' || stage === 'error' || stage === 'retry') {
+        this.lastTerminalByInstance.set(key, { stage, atMs: pending.updatedAtMs });
+        this.pruneOldest(this.lastTerminalByInstance, PendingMessageTracker.MAX_TERMINAL_SNAPSHOTS);
+      }
       this.removePendingState(key, target);
     }
   }
@@ -176,6 +285,7 @@ export class PendingMessageTracker {
   ): Promise<void> {
     const key = this.pendingKey(projectName, instanceId || agentType);
     const statusEmoji = this.emojiForStage('received');
+    const now = Date.now();
     let stopTypingIndicator: (() => void) | undefined;
     if (typeof this.messaging.startTypingIndicator === 'function') {
       try {
@@ -185,8 +295,19 @@ export class PendingMessageTracker {
       }
     }
     const queue = this.pendingMessageByInstance.get(key) || [];
-    queue.push({ channelId, messageId, statusEmoji, promptTail: this.buildPromptTail(prompt), stopTypingIndicator });
+    const pendingState: PendingMessageState = {
+      channelId,
+      messageId,
+      stage: 'received',
+      statusEmoji,
+      createdAtMs: now,
+      updatedAtMs: now,
+      promptTail: this.buildPromptTail(prompt),
+      stopTypingIndicator,
+    };
+    queue.push(pendingState);
     this.pendingMessageByInstance.set(key, queue);
+    this.scheduleStuckAlert(key, pendingState);
     await this.messaging.addReactionToMessage(channelId, messageId, statusEmoji);
   }
 

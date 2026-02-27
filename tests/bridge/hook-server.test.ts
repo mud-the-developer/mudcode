@@ -6,11 +6,12 @@ import { tmpdir } from 'os';
 import { BridgeHookServer } from '../../src/bridge/hook-server.js';
 import type { BridgeHookServerDeps } from '../../src/bridge/hook-server.js';
 
-function createMockMessaging() {
+function createMockMessaging(platform: 'discord' | 'slack' = 'slack') {
   return {
-    platform: 'slack' as const,
+    platform,
     sendToChannel: vi.fn().mockResolvedValue(undefined),
     sendToChannelWithFiles: vi.fn().mockResolvedValue(undefined),
+    sendLongOutput: vi.fn().mockResolvedValue(undefined),
     addReactionToMessage: vi.fn().mockResolvedValue(undefined),
     replaceOwnReactionOnMessage: vi.fn().mockResolvedValue(undefined),
   };
@@ -54,6 +55,21 @@ function postJSON(port: number, path: string, body: unknown): Promise<{ status: 
     );
     req.on('error', reject);
     req.write(payload);
+    req.end();
+  });
+}
+
+function getPath(port: number, path: string): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { hostname: '127.0.0.1', port, path, method: 'GET' },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => resolve({ status: res.statusCode || 0, body: data }));
+      },
+    );
+    req.on('error', reject);
     req.end();
   });
 }
@@ -104,6 +120,51 @@ describe('BridgeHookServer', () => {
       expect(res.status).toBe(200);
       expect(res.body).toBe('OK');
       expect(reloadFn).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe('GET /runtime-status', () => {
+    it('returns per-instance runtime snapshots', async () => {
+      const stateManager = createMockStateManager({
+        test: {
+          projectName: 'test',
+          projectPath: tempDir,
+          tmuxSession: 'bridge',
+          agents: { claude: true },
+          discordChannels: { claude: 'ch-123' },
+          instances: {
+            claude: { instanceId: 'claude', agentType: 'claude', channelId: 'ch-123' },
+          },
+          createdAt: new Date(),
+          lastActive: new Date(),
+        },
+      });
+      const pendingTracker = createMockPendingTracker() as any;
+      pendingTracker.getRuntimeSnapshot = vi.fn().mockReturnValue({
+        pendingDepth: 1,
+        oldestStage: 'processing',
+        oldestAgeMs: 1800,
+        latestStage: 'processing',
+      });
+      startServer({ stateManager: stateManager as any, pendingTracker });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const res = await getPath(port, '/runtime-status');
+      expect(res.status).toBe(200);
+
+      const payload = JSON.parse(res.body) as {
+        instances: Array<Record<string, unknown>>;
+      };
+      expect(Array.isArray(payload.instances)).toBe(true);
+      expect(payload.instances).toHaveLength(1);
+      expect(payload.instances[0]).toMatchObject({
+        projectName: 'test',
+        instanceId: 'claude',
+        agentType: 'claude',
+        pendingDepth: 1,
+        oldestStage: 'processing',
+      });
+      expect(pendingTracker.getRuntimeSnapshot).toHaveBeenCalledWith('test', 'claude', 'claude');
     });
   });
 
@@ -188,7 +249,11 @@ describe('BridgeHookServer', () => {
         files: [testFile],
       });
       expect(res.status).toBe(200);
-      expect(mockMessaging.sendToChannelWithFiles).toHaveBeenCalledWith('ch-123', '', [testFile]);
+      expect(mockMessaging.sendToChannelWithFiles).toHaveBeenCalledWith(
+        'ch-123',
+        expect.stringContaining('Generated file'),
+        [testFile],
+      );
     });
 
     it('falls back to default channel when multiple pending requests exist', async () => {
@@ -228,7 +293,11 @@ describe('BridgeHookServer', () => {
         files: [testFile],
       });
       expect(res.status).toBe(200);
-      expect(mockMessaging.sendToChannelWithFiles).toHaveBeenCalledWith('ch-123', '', [testFile]);
+      expect(mockMessaging.sendToChannelWithFiles).toHaveBeenCalledWith(
+        'ch-123',
+        expect.stringContaining('Generated file'),
+        [testFile],
+      );
     });
 
     it('rejects files outside the project directory', async () => {
@@ -301,6 +370,41 @@ describe('BridgeHookServer', () => {
       expect(res.status).toBe(200);
       expect(mockPendingTracker.markCompleted).toHaveBeenCalled();
       expect(mockMessaging.sendToChannel).toHaveBeenCalledWith('ch-123', 'Hello from agent');
+    });
+
+    it('formats multiline session.idle output for discord', async () => {
+      const mockMessaging = createMockMessaging('discord');
+      const mockPendingTracker = createMockPendingTracker();
+      const stateManager = createMockStateManager({
+        test: {
+          projectName: 'test',
+          projectPath: tempDir,
+          tmuxSession: 'bridge',
+          agents: { claude: true },
+          discordChannels: { claude: 'ch-123' },
+          instances: {
+            claude: { instanceId: 'claude', agentType: 'claude', channelId: 'ch-123' },
+          },
+          createdAt: new Date(),
+          lastActive: new Date(),
+        },
+      });
+      startServer({
+        messaging: mockMessaging as any,
+        stateManager: stateManager as any,
+        pendingTracker: mockPendingTracker as any,
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const res = await postJSON(port, '/opencode-event', {
+        projectName: 'test',
+        agentType: 'claude',
+        type: 'session.idle',
+        text: 'line1\nline2',
+      });
+      expect(res.status).toBe(200);
+      expect(mockMessaging.sendToChannel).toHaveBeenCalledWith('ch-123', 'line1\nline2');
+      expect(mockPendingTracker.markCompleted).toHaveBeenCalled();
     });
 
     it('marks pending as error when session.idle delivery fails', async () => {
@@ -413,6 +517,41 @@ describe('BridgeHookServer', () => {
       expect(mockPendingTracker.markCompleted).toHaveBeenCalled();
     });
 
+    it('uses threaded long-output delivery on discord for oversized session.idle text', async () => {
+      const mockMessaging = createMockMessaging('discord');
+      const stateManager = createMockStateManager({
+        test: {
+          projectName: 'test',
+          projectPath: tempDir,
+          tmuxSession: 'bridge',
+          agents: { claude: true },
+          discordChannels: { claude: 'ch-123' },
+          instances: {
+            claude: { instanceId: 'claude', agentType: 'claude', channelId: 'ch-123' },
+          },
+          createdAt: new Date(),
+          lastActive: new Date(),
+        },
+      });
+      startServer({
+        messaging: mockMessaging as any,
+        stateManager: stateManager as any,
+        pendingTracker: createMockPendingTracker() as any,
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const longText = 'x'.repeat(2400);
+      const res = await postJSON(port, '/opencode-event', {
+        projectName: 'test',
+        agentType: 'claude',
+        type: 'session.idle',
+        text: longText,
+      });
+      expect(res.status).toBe(200);
+      expect(mockMessaging.sendLongOutput).toHaveBeenCalledWith('ch-123', longText);
+      expect(mockMessaging.sendToChannel).not.toHaveBeenCalled();
+    });
+
     it('strips file paths from display text in session.idle', async () => {
       const filesDir = join(tempDir, '.mudcode', 'files');
       mkdirSync(filesDir, { recursive: true });
@@ -456,7 +595,11 @@ describe('BridgeHookServer', () => {
       expect(sentText).toContain('Here is the output:');
 
       // File should be sent separately
-      expect(mockMessaging.sendToChannelWithFiles).toHaveBeenCalledWith('ch-123', '', [testFile]);
+      expect(mockMessaging.sendToChannelWithFiles).toHaveBeenCalledWith(
+        'ch-123',
+        expect.stringContaining('Generated file'),
+        [testFile],
+      );
     });
 
     it('handles session.error', async () => {

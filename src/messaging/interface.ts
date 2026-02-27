@@ -51,6 +51,11 @@ export interface MessagingClient {
 
   sendToChannel(channelId: string, content: string): Promise<void>;
   sendToChannelWithFiles(channelId: string, content: string, filePaths: string[]): Promise<void>;
+  /**
+   * Optional long-output delivery helper.
+   * Implementations may post a short summary in the parent channel and the full text in a thread.
+   */
+  sendLongOutput?(channelId: string, content: string): Promise<void>;
 
   addReactionToMessage(channelId: string, messageId: string, emoji: string): Promise<void>;
   replaceOwnReactionOnMessage(channelId: string, messageId: string, fromEmoji: string, toEmoji: string): Promise<void>;

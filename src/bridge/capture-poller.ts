@@ -4,6 +4,7 @@ import { listProjectInstances, normalizeProjectState } from '../state/instances.
 import { TmuxManager } from '../tmux/manager.js';
 import type { IStateManager } from '../types/interfaces.js';
 import { PendingMessageTracker } from './pending-message-tracker.js';
+import { formatDiscordOutput, wrapDiscordCodeblock } from './discord-output-formatter.js';
 
 export interface BridgeCapturePollerDeps {
   messaging: MessagingClient;
@@ -17,9 +18,13 @@ export class BridgeCapturePoller {
   private readonly intervalMs: number;
   private readonly quietPendingPollThreshold: number;
   private readonly codexInitialQuietPendingPollThreshold: number;
+  private readonly longOutputThreadThreshold: number;
+  private readonly stalePendingAlertMs: number;
   private timer?: ReturnType<typeof setInterval>;
   private running = false;
   private snapshotsByInstance = new Map<string, string>();
+  private lastCaptureMutationAtByInstance = new Map<string, number>();
+  private stalePendingAlertStageByInstance = new Map<string, number>();
   private completionCandidatesByInstance = new Map<
     string,
     { projectName: string; agentType: string; instanceId: string }
@@ -33,6 +38,8 @@ export class BridgeCapturePoller {
     this.intervalMs = this.resolveIntervalMs(deps.intervalMs);
     this.quietPendingPollThreshold = this.resolveQuietPendingPollThreshold();
     this.codexInitialQuietPendingPollThreshold = this.resolveCodexInitialQuietPendingPollThreshold();
+    this.longOutputThreadThreshold = this.resolveLongOutputThreadThreshold();
+    this.stalePendingAlertMs = this.resolveStalePendingAlertMs();
   }
 
   start(): void {
@@ -51,6 +58,8 @@ export class BridgeCapturePoller {
       this.timer = undefined;
     }
     this.running = false;
+    this.lastCaptureMutationAtByInstance.clear();
+    this.stalePendingAlertStageByInstance.clear();
     this.completionCandidatesByInstance.clear();
     this.quietPendingPollsByInstance.clear();
   }
@@ -81,9 +90,126 @@ export class BridgeCapturePoller {
     if (Number.isFinite(fromEnv) && fromEnv >= 1) {
       return Math.trunc(fromEnv);
     }
-    // Keep typing/reaction pending state longer before first visible output.
-    // With default 3s polling, this is about 36 seconds.
-    return 12;
+    // Default: do not auto-complete codex pending before first visible output.
+    // This avoids showing ✅ too early when codex is still thinking silently.
+    return 0;
+  }
+
+  private resolveLongOutputThreadThreshold(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 1200) {
+      return Math.trunc(fromEnv);
+    }
+    return 2000;
+  }
+
+  private resolveStalePendingAlertMs(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_CAPTURE_STALE_ALERT_MS || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 1000) {
+      return Math.trunc(fromEnv);
+    }
+    return 60000;
+  }
+
+  private formatDuration(ms: number): string {
+    const sec = Math.max(1, Math.round(ms / 1000));
+    if (sec < 60) return `${sec}s`;
+    const min = Math.round(sec / 60);
+    return `${min}m`;
+  }
+
+  private markCaptureMutation(key: string, now: number): void {
+    this.lastCaptureMutationAtByInstance.set(key, now);
+    this.stalePendingAlertStageByInstance.delete(key);
+  }
+
+  private clearStalePendingAlertState(key: string): void {
+    this.lastCaptureMutationAtByInstance.delete(key);
+    this.stalePendingAlertStageByInstance.delete(key);
+  }
+
+  private resolveNextStalePendingAlertStage(elapsedMs: number, currentStage: number): number {
+    if (currentStage < 1 && elapsedMs >= this.stalePendingAlertMs) {
+      return 1;
+    }
+    if (currentStage < 2 && elapsedMs >= this.stalePendingAlertMs * 2) {
+      return 2;
+    }
+    return currentStage;
+  }
+
+  private async maybeSendStalePendingAlert(params: {
+    key: string;
+    pendingDepth: number;
+    channelId?: string;
+    projectName: string;
+    agentType: string;
+    instanceId: string;
+    now: number;
+  }): Promise<void> {
+    if (params.pendingDepth <= 0) {
+      this.clearStalePendingAlertState(params.key);
+      return;
+    }
+    if (!params.channelId) return;
+
+    const baseline = this.lastCaptureMutationAtByInstance.get(params.key);
+    if (typeof baseline !== 'number') {
+      this.lastCaptureMutationAtByInstance.set(params.key, params.now);
+      return;
+    }
+
+    const elapsed = params.now - baseline;
+    const currentStage = this.stalePendingAlertStageByInstance.get(params.key) ?? 0;
+    const nextStage = this.resolveNextStalePendingAlertStage(elapsed, currentStage);
+    if (nextStage === currentStage) return;
+
+    const instanceLabel = params.instanceId || params.agentType;
+    const durationLabel =
+      nextStage === 1 ? this.formatDuration(this.stalePendingAlertMs) : this.formatDuration(this.stalePendingAlertMs * 2);
+    const alertMessage =
+      nextStage === 1
+        ? `⚠️ No screen updates for ${durationLabel} on \`${params.projectName}/${instanceLabel}\`. It may be stuck. Try \`/retry\` or \`/health\`.`
+        : `🚨 Still no screen updates for ${durationLabel} on \`${params.projectName}/${instanceLabel}\`. Try \`/esc\` then \`/retry\`, and check \`/health\`.`;
+    await this.deps.messaging
+      .sendToChannel(params.channelId, alertMessage)
+      .catch(() => undefined);
+    this.stalePendingAlertStageByInstance.set(params.key, nextStage);
+  }
+
+  private shouldUseThreadedLongOutput(text: string): boolean {
+    return (
+      this.deps.messaging.platform === 'discord' &&
+      text.length >= this.longOutputThreadThreshold &&
+      typeof this.deps.messaging.sendLongOutput === 'function'
+    );
+  }
+
+  private async sendOutput(channelId: string, text: string): Promise<boolean> {
+    const discordFormatted =
+      this.deps.messaging.platform === 'discord'
+        ? formatDiscordOutput(text)
+        : { text, useCodeblock: false, language: 'text' };
+    const content = discordFormatted.text;
+    if (content.trim().length === 0) return false;
+
+    if (this.shouldUseThreadedLongOutput(content)) {
+      await this.deps.messaging.sendLongOutput!(channelId, content);
+      return true;
+    }
+
+    const split = this.deps.messaging.platform === 'slack' ? splitForSlack : splitForDiscord;
+    let sentAnyChunk = false;
+    for (const chunk of split(content)) {
+      if (chunk.trim().length === 0) continue;
+      const payload =
+        this.deps.messaging.platform === 'discord' && discordFormatted.useCodeblock
+          ? wrapDiscordCodeblock(chunk, discordFormatted.language)
+          : chunk;
+      await this.deps.messaging.sendToChannel(channelId, payload);
+      sentAnyChunk = true;
+    }
+    return sentAnyChunk;
   }
 
   private async pollOnce(): Promise<void> {
@@ -91,7 +217,6 @@ export class BridgeCapturePoller {
     this.running = true;
 
     try {
-      const keysWithOutputThisCycle = new Set<string>();
       const projects = this.deps.stateManager.listProjects();
       for (const rawProject of projects) {
         const project = normalizeProjectState(rawProject);
@@ -102,6 +227,7 @@ export class BridgeCapturePoller {
           if (!instance.channelId) continue;
 
           const key = this.captureKey(project.projectName, instance.instanceId);
+          const now = Date.now();
           const routeInfo = this.resolveOutputRoute(
             instance.channelId,
             project.projectName,
@@ -133,6 +259,15 @@ export class BridgeCapturePoller {
               instance.agentType,
               instance.instanceId,
             );
+            await this.maybeSendStalePendingAlert({
+              key,
+              pendingDepth: routeInfo.pendingDepth,
+              channelId: routeInfo.channelId || instance.channelId,
+              projectName: project.projectName,
+              agentType: instance.agentType,
+              instanceId: instance.instanceId,
+              now,
+            });
             continue;
           }
 
@@ -140,7 +275,8 @@ export class BridgeCapturePoller {
           this.snapshotsByInstance.set(key, current);
 
           // First snapshot establishes baseline and avoids sending historical backlog.
-          if (previous === undefined || previous === current) {
+          if (previous === undefined) {
+            this.markCaptureMutation(key, now);
             await this.handleQuietPending(
               key,
               routeInfo.pendingDepth,
@@ -148,8 +284,39 @@ export class BridgeCapturePoller {
               instance.agentType,
               instance.instanceId,
             );
+            await this.maybeSendStalePendingAlert({
+              key,
+              pendingDepth: routeInfo.pendingDepth,
+              channelId: routeInfo.channelId || instance.channelId,
+              projectName: project.projectName,
+              agentType: instance.agentType,
+              instanceId: instance.instanceId,
+              now,
+            });
             continue;
           }
+
+          if (previous === current) {
+            await this.handleQuietPending(
+              key,
+              routeInfo.pendingDepth,
+              project.projectName,
+              instance.agentType,
+              instance.instanceId,
+            );
+            await this.maybeSendStalePendingAlert({
+              key,
+              pendingDepth: routeInfo.pendingDepth,
+              channelId: routeInfo.channelId || instance.channelId,
+              projectName: project.projectName,
+              agentType: instance.agentType,
+              instanceId: instance.instanceId,
+              now,
+            });
+            continue;
+          }
+
+          this.markCaptureMutation(key, now);
 
           const delta = this.normalizeDeltaForAgent(
             instance.agentType,
@@ -171,9 +338,6 @@ export class BridgeCapturePoller {
               // Treat prompt-echo-only frames as activity. If we count them as quiet,
               // pending requests can complete before real assistant output arrives.
               this.quietPendingPollsByInstance.delete(key);
-              if (routeInfo.pendingDepth > 0) {
-                keysWithOutputThisCycle.add(key);
-              }
               continue;
             }
             await this.handleQuietPending(
@@ -189,20 +353,12 @@ export class BridgeCapturePoller {
           const outputChannelId = routeInfo.channelId;
           if (!outputChannelId) continue;
 
-          const split = this.deps.messaging.platform === 'slack' ? splitForSlack : splitForDiscord;
-          let sentAnyChunk = false;
-          for (const chunk of split(trimmedDelta)) {
-            if (chunk.trim().length === 0) continue;
-            await this.deps.messaging.sendToChannel(outputChannelId, chunk);
-            sentAnyChunk = true;
-          }
+          const sentAnyChunk = await this.sendOutput(outputChannelId, trimmedDelta);
 
           if (sentAnyChunk) {
             this.quietPendingPollsByInstance.delete(key);
             if (routeInfo.pendingDepth > 0) {
-              // Keep completion buffered until output goes quiet. Completing on every burst can
-              // over-advance the queue during long multi-cycle responses.
-              keysWithOutputThisCycle.add(key);
+              // Keep completion buffered until output has been quiet long enough.
               this.completionCandidatesByInstance.set(key, {
                 projectName: project.projectName,
                 agentType: instance.agentType,
@@ -211,6 +367,15 @@ export class BridgeCapturePoller {
             } else {
               this.completionCandidatesByInstance.delete(key);
             }
+            await this.maybeSendStalePendingAlert({
+              key,
+              pendingDepth: routeInfo.pendingDepth,
+              channelId: routeInfo.channelId || instance.channelId,
+              projectName: project.projectName,
+              agentType: instance.agentType,
+              instanceId: instance.instanceId,
+              now,
+            });
           } else {
             await this.handleQuietPending(
               key,
@@ -219,11 +384,18 @@ export class BridgeCapturePoller {
               instance.agentType,
               instance.instanceId,
             );
+            await this.maybeSendStalePendingAlert({
+              key,
+              pendingDepth: routeInfo.pendingDepth,
+              channelId: routeInfo.channelId || instance.channelId,
+              projectName: project.projectName,
+              agentType: instance.agentType,
+              instanceId: instance.instanceId,
+              now,
+            });
           }
         }
       }
-
-      await this.completeQuietPendingInstances(keysWithOutputThisCycle);
     } catch (error) {
       console.warn(`Capture poller iteration failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -245,10 +417,11 @@ export class BridgeCapturePoller {
     }
 
     const hasOutputCandidate = this.completionCandidatesByInstance.has(key);
-    const quietThreshold =
-      !hasOutputCandidate && agentType === 'codex'
-        ? this.codexInitialQuietPendingPollThreshold
-        : this.quietPendingPollThreshold;
+    const quietThreshold = this.resolveQuietCompletionThreshold(hasOutputCandidate, agentType);
+    if (quietThreshold <= 0) {
+      this.quietPendingPollsByInstance.delete(key);
+      return;
+    }
 
     const current = this.quietPendingPollsByInstance.get(key);
     const nextCount = (current?.count || 0) + 1;
@@ -267,14 +440,14 @@ export class BridgeCapturePoller {
     });
   }
 
-  private async completeQuietPendingInstances(keysWithOutputThisCycle: Set<string>): Promise<void> {
-    for (const [key, candidate] of this.completionCandidatesByInstance.entries()) {
-      if (keysWithOutputThisCycle.has(key)) continue;
-      await this.deps.pendingTracker
-        .markCompleted(candidate.projectName, candidate.agentType, candidate.instanceId)
-        .catch(() => undefined);
-      this.completionCandidatesByInstance.delete(key);
+  private resolveQuietCompletionThreshold(hasOutputCandidate: boolean, agentType: string): number {
+    if (hasOutputCandidate) {
+      return this.quietPendingPollThreshold;
     }
+    if (agentType === 'codex') {
+      return this.codexInitialQuietPendingPollThreshold;
+    }
+    return this.quietPendingPollThreshold;
   }
 
   private captureKey(projectName: string, instanceId: string): string {

@@ -7,6 +7,7 @@ import { getDaemonStatus } from '../../app/daemon-service.js';
 import { resolveProjectWindowName } from '../../policy/window-naming.js';
 import { applyTmuxCliOverrides } from '../common/tmux.js';
 import type { TmuxCliOptions } from '../common/types.js';
+import { cleanCapture } from '../../capture/parser.js';
 
 type HealthLevel = 'ok' | 'warn' | 'fail';
 
@@ -25,10 +26,129 @@ type InstanceHealth = {
   sessionExists: boolean;
   windowExists: boolean;
   channelId: string | undefined;
+  runtime?: RuntimeSnapshot;
+  paneWorkingHint?: boolean;
+};
+
+type RuntimeSnapshot = {
+  pendingDepth: number;
+  oldestStage?: string;
+  oldestAgeMs?: number;
+  oldestUpdatedAt?: string;
+  latestStage?: string;
+  latestAgeMs?: number;
+  latestUpdatedAt?: string;
+  lastTerminalStage?: 'completed' | 'error' | 'retry';
+  lastTerminalAgeMs?: number;
+  lastTerminalAt?: string;
+};
+
+type RuntimeStatusEntry = RuntimeSnapshot & {
+  projectName: string;
+  instanceId: string;
+  agentType: string;
+};
+
+type RuntimeStatusPayload = {
+  generatedAt?: string;
+  instances?: RuntimeStatusEntry[];
 };
 
 function pushCheck(checks: HealthCheck[], name: string, level: HealthLevel, detail: string): void {
   checks.push({ name, level, detail });
+}
+
+function runtimeKey(projectName: string, instanceId: string): string {
+  return `${projectName}:${instanceId}`;
+}
+
+function formatRuntimeAge(ageMs?: number): string {
+  if (typeof ageMs !== 'number' || !Number.isFinite(ageMs) || ageMs < 0) return 'unknown';
+  if (ageMs < 1000) return '<1s';
+  const sec = Math.round(ageMs / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min}m`;
+  const hour = Math.round(min / 60);
+  return `${hour}h`;
+}
+
+function hasEscToInterruptMarker(captureRaw: string): boolean {
+  const lines = cleanCapture(captureRaw)
+    .split('\n')
+    .map((line) => line.toLowerCase().replace(/\s+/g, ' ').trim())
+    .filter((line) => line.length > 0);
+  const tail = lines.slice(-20);
+  return tail.some((line) => {
+    if (line === 'esc to interrupt') return true;
+    if (line.includes('for shortcuts') && line.includes('esc to interrupt')) return true;
+    if (line.startsWith('esc to interrupt ') && line.length <= 48) return true;
+    return false;
+  });
+}
+
+function detectPaneWorkingHint(
+  tmux: TmuxManager,
+  sessionName: string,
+  windowName: string,
+  agentType: string,
+): boolean {
+  if (agentType !== 'codex') return false;
+  try {
+    const pane = tmux.capturePaneFromWindow(sessionName, windowName, agentType);
+    return hasEscToInterruptMarker(pane);
+  } catch {
+    return false;
+  }
+}
+
+function describeRuntime(runtime?: RuntimeSnapshot, paneWorkingHint: boolean = false): string {
+  if (paneWorkingHint) return 'working (pane shows "Esc to interrupt")';
+  if (!runtime) return 'unavailable';
+  if (runtime.pendingDepth > 0) {
+    const stage = runtime.oldestStage || runtime.latestStage || 'received';
+    return `working (${runtime.pendingDepth} queued, stage=${stage}, age=${formatRuntimeAge(runtime.oldestAgeMs)})`;
+  }
+  if (runtime.lastTerminalStage === 'completed') {
+    return `completed recently (${formatRuntimeAge(runtime.lastTerminalAgeMs)} ago)`;
+  }
+  if (runtime.lastTerminalStage === 'error') {
+    return `last request failed (${formatRuntimeAge(runtime.lastTerminalAgeMs)} ago)`;
+  }
+  if (runtime.lastTerminalStage === 'retry') {
+    return `last request needs retry (${formatRuntimeAge(runtime.lastTerminalAgeMs)} ago)`;
+  }
+  return 'idle';
+}
+
+async function fetchRuntimeStatus(port: number): Promise<Map<string, RuntimeSnapshot>> {
+  const response = await fetch(`http://127.0.0.1:${port}/runtime-status`, {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+  });
+  if (!response.ok) {
+    throw new Error(`runtime endpoint returned ${response.status}`);
+  }
+
+  const payload = (await response.json()) as RuntimeStatusPayload;
+  const entries = Array.isArray(payload.instances) ? payload.instances : [];
+  const map = new Map<string, RuntimeSnapshot>();
+  for (const entry of entries) {
+    if (!entry || typeof entry.projectName !== 'string' || typeof entry.instanceId !== 'string') continue;
+    map.set(runtimeKey(entry.projectName, entry.instanceId), {
+      pendingDepth: Number.isFinite(entry.pendingDepth) ? Math.max(0, Math.trunc(entry.pendingDepth)) : 0,
+      oldestStage: entry.oldestStage,
+      oldestAgeMs: entry.oldestAgeMs,
+      oldestUpdatedAt: entry.oldestUpdatedAt,
+      latestStage: entry.latestStage,
+      latestAgeMs: entry.latestAgeMs,
+      latestUpdatedAt: entry.latestUpdatedAt,
+      lastTerminalStage: entry.lastTerminalStage,
+      lastTerminalAgeMs: entry.lastTerminalAgeMs,
+      lastTerminalAt: entry.lastTerminalAt,
+    });
+  }
+  return map;
 }
 
 export async function healthCommand(options: TmuxCliOptions & { json?: boolean } = {}): Promise<void> {
@@ -37,6 +157,8 @@ export async function healthCommand(options: TmuxCliOptions & { json?: boolean }
 
   const checks: HealthCheck[] = [];
   const instances: InstanceHealth[] = [];
+  let daemonRunning = false;
+  const runtimeByInstance = new Map<string, RuntimeSnapshot>();
 
   try {
     validateConfig();
@@ -52,12 +174,27 @@ export async function healthCommand(options: TmuxCliOptions & { json?: boolean }
 
   try {
     const daemon = await getDaemonStatus();
+    daemonRunning = daemon.running;
     const daemonDetail = daemon.running
       ? `running on ${daemon.port} (pid file: ${daemon.pidFile})`
       : `not running (expected port ${daemon.port}, pid file: ${daemon.pidFile})`;
     pushCheck(checks, 'daemon', daemon.running ? 'ok' : 'warn', daemonDetail);
   } catch (error) {
     pushCheck(checks, 'daemon', 'fail', error instanceof Error ? error.message : String(error));
+  }
+
+  if (daemonRunning) {
+    try {
+      const runtime = await fetchRuntimeStatus(effectiveConfig.hookServerPort || 18470);
+      for (const [key, value] of runtime.entries()) {
+        runtimeByInstance.set(key, value);
+      }
+      pushCheck(checks, 'runtime', 'ok', `loaded runtime status for ${runtime.size} instance(s)`);
+    } catch (error) {
+      pushCheck(checks, 'runtime', 'warn', `runtime status unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  } else {
+    pushCheck(checks, 'runtime', 'warn', 'daemon not running; runtime status unavailable');
   }
 
   const projects = stateManager.listProjects();
@@ -93,6 +230,8 @@ export async function healthCommand(options: TmuxCliOptions & { json?: boolean }
       );
       const windowExists = sessionExists && tmux.windowExists(project.tmuxSession, windowName);
       const channelId = instance.channelId;
+      const paneWorkingHint =
+        windowExists && detectPaneWorkingHint(tmux, project.tmuxSession, windowName, instance.agentType);
       instances.push({
         projectName: project.projectName,
         instanceId: instance.instanceId,
@@ -102,6 +241,8 @@ export async function healthCommand(options: TmuxCliOptions & { json?: boolean }
         sessionExists,
         windowExists,
         channelId,
+        runtime: runtimeByInstance.get(runtimeKey(project.projectName, instance.instanceId)),
+        paneWorkingHint,
       });
 
       if (!windowExists) {
@@ -170,6 +311,9 @@ export async function healthCommand(options: TmuxCliOptions & { json?: boolean }
         );
         console.log(
           chalk.gray(`    channel: ${instance.channelId || '(none)'} (${channelStatus})`),
+        );
+        console.log(
+          chalk.gray(`    runtime: ${describeRuntime(instance.runtime, instance.paneWorkingHint === true)}`),
         );
       }
       console.log('');

@@ -83,6 +83,30 @@ describe('PendingMessageTracker', () => {
     expect(tails).toEqual([stored]);
   });
 
+  it('exposes runtime snapshot for in-flight and terminal states', async () => {
+    const messaging = {
+      platform: 'discord' as const,
+      addReactionToMessage: vi.fn().mockResolvedValue(undefined),
+      replaceOwnReactionOnMessage: vi.fn().mockResolvedValue(undefined),
+    } as any;
+    const tracker = new PendingMessageTracker(messaging);
+
+    await tracker.markPending('demo', 'codex', 'ch-1', 'msg-1', 'codex');
+    await tracker.markRouteResolved('demo', 'codex', 'codex');
+    await tracker.markDispatching('demo', 'codex', 'codex');
+
+    const active = tracker.getRuntimeSnapshot('demo', 'codex', 'codex');
+    expect(active.pendingDepth).toBe(1);
+    expect(active.oldestStage).toBe('processing');
+    expect(active.latestStage).toBe('processing');
+
+    await tracker.markCompleted('demo', 'codex', 'codex');
+
+    const terminal = tracker.getRuntimeSnapshot('demo', 'codex', 'codex');
+    expect(terminal.pendingDepth).toBe(0);
+    expect(terminal.lastTerminalStage).toBe('completed');
+  });
+
   it('clears all pending requests for an instance', async () => {
     const messaging = {
       platform: 'discord' as const,
@@ -157,5 +181,36 @@ describe('PendingMessageTracker', () => {
 
     expect(stopA).toHaveBeenCalledTimes(1);
     expect(stopB).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries typing keepalive instead of sending delayed stuck-processing text', async () => {
+    vi.useFakeTimers();
+    process.env.AGENT_DISCORD_PENDING_ALERT_MS = '5000';
+    try {
+      const stopTyping = vi.fn();
+      const messaging = {
+        platform: 'discord' as const,
+        startTypingIndicator: vi.fn().mockRejectedValueOnce(new Error('transient failure')).mockResolvedValueOnce(stopTyping),
+        sendToChannel: vi.fn().mockResolvedValue(undefined),
+        addReactionToMessage: vi.fn().mockResolvedValue(undefined),
+        replaceOwnReactionOnMessage: vi.fn().mockResolvedValue(undefined),
+      } as any;
+      const tracker = new PendingMessageTracker(messaging);
+
+      await tracker.markPending('demo', 'codex', 'ch-1', 'msg-1', 'codex');
+      expect(messaging.startTypingIndicator).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(5000);
+      await Promise.resolve();
+
+      expect(messaging.startTypingIndicator).toHaveBeenCalledTimes(2);
+      expect(messaging.sendToChannel).not.toHaveBeenCalled();
+      expect(stopTyping).not.toHaveBeenCalled();
+
+      await tracker.markCompleted('demo', 'codex', 'codex');
+      expect(stopTyping).toHaveBeenCalledTimes(1);
+    } finally {
+      delete process.env.AGENT_DISCORD_PENDING_ALERT_MS;
+      vi.useRealTimers();
+    }
   });
 });

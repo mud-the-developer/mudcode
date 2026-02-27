@@ -1,16 +1,18 @@
 import { createServer } from 'http';
 import { parse } from 'url';
 import { existsSync, realpathSync } from 'fs';
-import { resolve } from 'path';
+import { basename, resolve } from 'path';
 import { splitForDiscord, splitForSlack, extractFilePaths, stripFilePaths } from '../capture/parser.js';
 import type { MessagingClient } from '../messaging/interface.js';
 import type { IStateManager } from '../types/interfaces.js';
 import {
   getPrimaryInstanceForAgent,
   getProjectInstance,
+  listProjectInstances,
   normalizeProjectState,
 } from '../state/instances.js';
-import { PendingMessageTracker } from './pending-message-tracker.js';
+import { PendingMessageTracker, type PendingRuntimeSnapshot } from './pending-message-tracker.js';
+import { formatDiscordOutput, wrapDiscordCodeblock } from './discord-output-formatter.js';
 
 export interface BridgeHookServerDeps {
   port: number;
@@ -53,15 +55,123 @@ export class BridgeHookServer {
     return { channelId: pendingChannel || defaultChannelId, pendingDepth };
   }
 
+  private resolveLongOutputThreadThreshold(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 1200) {
+      return Math.trunc(fromEnv);
+    }
+    return 2000;
+  }
+
+  private shouldUseThreadedLongOutput(text: string): boolean {
+    return (
+      this.deps.messaging.platform === 'discord' &&
+      text.length >= this.resolveLongOutputThreadThreshold() &&
+      typeof this.deps.messaging.sendLongOutput === 'function'
+    );
+  }
+
+  private async sendEventOutput(channelId: string, text: string): Promise<void> {
+    const discordFormatted =
+      this.deps.messaging.platform === 'discord'
+        ? formatDiscordOutput(text)
+        : { text, useCodeblock: false, language: 'text' };
+    const content = discordFormatted.text;
+    if (content.trim().length === 0) return;
+
+    if (this.shouldUseThreadedLongOutput(content)) {
+      await this.deps.messaging.sendLongOutput!(channelId, content);
+      return;
+    }
+
+    const split = this.deps.messaging.platform === 'slack' ? splitForSlack : splitForDiscord;
+    for (const chunk of split(content)) {
+      if (chunk.trim().length === 0) continue;
+      const payload =
+        this.deps.messaging.platform === 'discord' && discordFormatted.useCodeblock
+          ? wrapDiscordCodeblock(chunk, discordFormatted.language)
+          : chunk;
+      await this.deps.messaging.sendToChannel(channelId, payload);
+    }
+  }
+
+  private buildFileNotice(filePaths: string[]): string {
+    const names = filePaths.map((path) => basename(path));
+    if (names.length === 0) return '📎 Generated files attached.';
+    if (names.length <= 3) {
+      return `📎 Generated file${names.length > 1 ? 's' : ''}: ${names.map((n) => `\`${n}\``).join(', ')}`;
+    }
+    const head = names.slice(0, 3).map((n) => `\`${n}\``).join(', ');
+    return `📎 Generated ${names.length} files: ${head}, …`;
+  }
+
+  private getRuntimeSnapshotForInstance(
+    projectName: string,
+    agentType: string,
+    instanceId?: string,
+  ): PendingRuntimeSnapshot {
+    const pendingTracker = this.deps.pendingTracker as unknown as {
+      getRuntimeSnapshot?: (projectName: string, agentType: string, instanceId?: string) => PendingRuntimeSnapshot;
+      getPendingDepth?: (projectName: string, agentType: string, instanceId?: string) => number;
+    };
+    if (typeof pendingTracker.getRuntimeSnapshot === 'function') {
+      return pendingTracker.getRuntimeSnapshot(projectName, agentType, instanceId);
+    }
+    const pendingDepth =
+      typeof pendingTracker.getPendingDepth === 'function'
+        ? pendingTracker.getPendingDepth(projectName, agentType, instanceId)
+        : 0;
+    return { pendingDepth };
+  }
+
+  private buildRuntimeStatusPayload(): {
+    generatedAt: string;
+    instances: Array<{
+      projectName: string;
+      instanceId: string;
+      agentType: string;
+    } & PendingRuntimeSnapshot>;
+  } {
+    const projects = this.deps.stateManager.listProjects().map((project) => normalizeProjectState(project));
+    const instances: Array<{
+      projectName: string;
+      instanceId: string;
+      agentType: string;
+    } & PendingRuntimeSnapshot> = [];
+
+    for (const project of projects) {
+      for (const instance of listProjectInstances(project)) {
+        instances.push({
+          projectName: project.projectName,
+          instanceId: instance.instanceId,
+          agentType: instance.agentType,
+          ...this.getRuntimeSnapshotForInstance(project.projectName, instance.agentType, instance.instanceId),
+        });
+      }
+    }
+
+    return {
+      generatedAt: new Date().toISOString(),
+      instances,
+    };
+  }
+
   start(): void {
     this.httpServer = createServer(async (req, res) => {
+      const { pathname } = parse(req.url || '');
+
+      if (req.method === 'GET' && pathname === '/runtime-status') {
+        const payload = this.buildRuntimeStatusPayload();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(payload));
+        return;
+      }
+
       if (req.method !== 'POST') {
         res.writeHead(405);
         res.end('Method not allowed');
         return;
       }
-
-      const { pathname } = parse(req.url || '');
 
       let body = '';
       req.on('data', (chunk) => {
@@ -193,7 +303,7 @@ export class BridgeHookServer {
       `📤 [${projectName}/${instance?.agentType || agentType}] send-files: ${validFiles.length} file(s)`,
     );
 
-    await this.deps.messaging.sendToChannelWithFiles(channelId, '', validFiles);
+    await this.deps.messaging.sendToChannelWithFiles(channelId, this.buildFileNotice(validFiles), validFiles);
     return { status: 200, message: 'OK' };
   }
 
@@ -262,16 +372,10 @@ export class BridgeHookServer {
           // Strip file paths from the display text to avoid leaking absolute paths
           const displayText = filePaths.length > 0 ? stripFilePaths(trimmed, filePaths) : trimmed;
 
-          const split = this.deps.messaging.platform === 'slack' ? splitForSlack : splitForDiscord;
-          const chunks = split(displayText);
-          for (const chunk of chunks) {
-            if (chunk.trim().length > 0) {
-              await this.deps.messaging.sendToChannel(channelId, chunk);
-            }
-          }
+          await this.sendEventOutput(channelId, displayText);
 
           if (filePaths.length > 0) {
-            await this.deps.messaging.sendToChannelWithFiles(channelId, '', filePaths);
+            await this.deps.messaging.sendToChannelWithFiles(channelId, this.buildFileNotice(filePaths), filePaths);
           }
         }
 

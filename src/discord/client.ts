@@ -19,8 +19,16 @@ import type { AgentMessage, MessageAttachment } from '../types/index.js';
 import { agentRegistry as defaultAgentRegistry, type AgentConfig, type AgentRegistry } from '../agents/index.js';
 import { normalizeDiscordToken } from '../config/token.js';
 import type { MessagingClient, MessageCallback, ChannelInfo, MessageContext } from '../messaging/interface.js';
+import { splitForDiscord } from '../capture/parser.js';
 
 export type { MessageCallback, ChannelInfo };
+
+const CONTROL_BUTTON_PREFIX = 'mudcode:control:';
+const SUPPRESS_NOTIFICATIONS_FLAG = 1 << 12;
+const DEFAULT_DISCORD_SEND_MAX_RETRIES = 2;
+const DISCORD_SEND_BASE_BACKOFF_MS = 600;
+const DISCORD_SEND_MAX_BACKOFF_MS = 10000;
+const DISCORD_MAX_MESSAGE_LENGTH = 2000;
 
 export class DiscordClient implements MessagingClient {
   readonly platform = 'discord' as const;
@@ -30,6 +38,7 @@ export class DiscordClient implements MessagingClient {
   private messageCallback?: MessageCallback;
   private channelMapping: Map<string, ChannelInfo> = new Map();
   private typingIndicators: Map<string, { timer: ReturnType<typeof setInterval>; refs: number }> = new Map();
+  private sendQueues: Map<string, Promise<void>> = new Map();
   private registry: AgentRegistry;
 
   constructor(token: string, registry?: AgentRegistry) {
@@ -104,13 +113,28 @@ export class DiscordClient implements MessagingClient {
     });
 
     this.client.on('interactionCreate', async (interaction) => {
+      if (interaction.user?.bot) return;
+
+      if (interaction.isButton()) {
+        await this.handleControlButtonInteraction(interaction);
+        return;
+      }
+
       if (!interaction.isChatInputCommand()) return;
 
       const commandName = interaction.commandName.toLowerCase();
       const sessionCommands = new Set(['q', 'qw']);
       const keyCommands = new Set(['enter', 'tab', 'esc', 'up', 'down']);
-      if (!sessionCommands.has(commandName) && !keyCommands.has(commandName)) return;
-      if (interaction.user.bot) return;
+      const utilityCommands = new Set(['retry', 'health', 'snapshot']);
+      const panelCommands = new Set(['controls']);
+      if (
+        !sessionCommands.has(commandName) &&
+        !keyCommands.has(commandName) &&
+        !utilityCommands.has(commandName) &&
+        !panelCommands.has(commandName)
+      ) {
+        return;
+      }
 
       const route = this.resolveRouteForIncomingMessage(interaction.channelId, interaction.channel as unknown);
       if (!route || !this.messageCallback) {
@@ -123,6 +147,29 @@ export class DiscordClient implements MessagingClient {
         return;
       }
 
+      if (commandName === 'controls') {
+        try {
+          await interaction.deferReply({ ephemeral: true });
+          const posted = await this.sendControlPanelToChannel(interaction.channelId);
+          if (posted) {
+            await interaction.editReply('✅ Control panel posted.');
+          } else {
+            await interaction.editReply('⚠️ Could not post control panel in this channel.');
+          }
+        } catch (error) {
+          console.error(
+            `Discord controls command error [${route.channelInfo.projectName}/${route.channelInfo.agentType}] channel=${interaction.channelId}:`,
+            error,
+          );
+          if (interaction.deferred || interaction.replied) {
+            await interaction.editReply('⚠️ Failed to post control panel. Try again.').catch(() => {});
+          } else {
+            await interaction.reply({ content: '⚠️ Failed to post control panel. Try again.', ephemeral: true }).catch(() => {});
+          }
+        }
+        return;
+      }
+
       const { channelInfo, routeChannelId, threadId } = route;
       const context = this.buildMessageContext({
         sourceChannelId: interaction.channelId,
@@ -130,7 +177,7 @@ export class DiscordClient implements MessagingClient {
         authorId: interaction.user.id,
         threadId,
       });
-      const count = interaction.options.getInteger('count') || 1;
+      const count = keyCommands.has(commandName) ? interaction.options.getInteger('count') || 1 : 1;
       const commandPayload =
         keyCommands.has(commandName) && count > 1
           ? `/${commandName} ${count}`
@@ -166,6 +213,131 @@ export class DiscordClient implements MessagingClient {
     });
   }
 
+  private controlCommandFromButtonId(customId: string): string | null {
+    if (!customId.startsWith(CONTROL_BUTTON_PREFIX)) return null;
+    const action = customId.slice(CONTROL_BUTTON_PREFIX.length);
+    switch (action) {
+      case 'retry':
+        return '/retry';
+      case 'enter':
+        return '/enter';
+      case 'esc':
+        return '/esc';
+      case 'q':
+        return '/q';
+      case 'qw':
+        return '/qw';
+      default:
+        return null;
+    }
+  }
+
+  private buildControlPanelRows(): ActionRowBuilder<ButtonBuilder>[] {
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`${CONTROL_BUTTON_PREFIX}retry`)
+        .setLabel('Retry')
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId(`${CONTROL_BUTTON_PREFIX}enter`)
+        .setLabel('Enter')
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(`${CONTROL_BUTTON_PREFIX}esc`)
+        .setLabel('Esc')
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(`${CONTROL_BUTTON_PREFIX}q`)
+        .setLabel('Close')
+        .setStyle(ButtonStyle.Danger),
+      new ButtonBuilder()
+        .setCustomId(`${CONTROL_BUTTON_PREFIX}qw`)
+        .setLabel('Archive')
+        .setStyle(ButtonStyle.Success),
+    );
+
+    return [row];
+  }
+
+  private async sendControlPanelToChannel(channelId: string): Promise<boolean> {
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel?.isTextBased()) return false;
+
+      await (channel as TextChannel).send({
+        content:
+          '🎛️ **Mudcode Controls**\n' +
+          'Use these quick actions for the mapped agent in this channel.',
+        components: this.buildControlPanelRows(),
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async handleControlButtonInteraction(interaction: any): Promise<void> {
+    const commandPayload = this.controlCommandFromButtonId(String(interaction.customId || ''));
+    if (!commandPayload) return;
+
+    if (!this.messageCallback) {
+      if (!interaction.deferred && !interaction.replied) {
+        await interaction.reply({
+          content: '⚠️ Bridge callback is not ready. Try again in a moment.',
+          ephemeral: true,
+        }).catch(() => {});
+      }
+      return;
+    }
+
+    const route = this.resolveRouteForIncomingMessage(interaction.channelId, interaction.channel as unknown);
+    if (!route) {
+      if (!interaction.deferred && !interaction.replied) {
+        await interaction.reply({
+          content: '⚠️ This channel is not mapped to an active agent instance.',
+          ephemeral: true,
+        }).catch(() => {});
+      }
+      return;
+    }
+
+    const { channelInfo, routeChannelId, threadId } = route;
+    const context = this.buildMessageContext({
+      sourceChannelId: interaction.channelId,
+      routeChannelId,
+      authorId: interaction.user.id,
+      threadId,
+    });
+
+    try {
+      await interaction.deferReply({ ephemeral: true });
+      await this.messageCallback(
+        channelInfo.agentType,
+        commandPayload,
+        channelInfo.projectName,
+        interaction.channelId,
+        undefined,
+        channelInfo.instanceId,
+        undefined,
+        context,
+      );
+      await interaction.editReply(`✅ \`${commandPayload}\` request submitted.`);
+    } catch (error) {
+      console.error(
+        `Discord control button error [${channelInfo.projectName}/${channelInfo.agentType}] channel=${interaction.channelId}:`,
+        error,
+      );
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply('⚠️ Failed to process the control action. Try again.').catch(() => {});
+      } else {
+        await interaction.reply({
+          content: '⚠️ Failed to process the control action. Try again.',
+          ephemeral: true,
+        }).catch(() => {});
+      }
+    }
+  }
+
   private async registerSessionControlCommands(): Promise<void> {
     const commands = [
       {
@@ -175,6 +347,22 @@ export class DiscordClient implements MessagingClient {
       {
         name: 'qw',
         description: 'Stop the current agent pane and save this channel.',
+      },
+      {
+        name: 'retry',
+        description: 'Resend the last prompt for the active agent instance.',
+      },
+      {
+        name: 'health',
+        description: 'Show bridge/session health for this mapped instance.',
+      },
+      {
+        name: 'snapshot',
+        description: 'Post the current tmux pane snapshot for this instance.',
+      },
+      {
+        name: 'controls',
+        description: 'Post a button control panel in this channel.',
       },
       {
         name: 'enter',
@@ -746,6 +934,228 @@ export class DiscordClient implements MessagingClient {
     }
   }
 
+  private buildLongOutputPreview(content: string, maxLength: number = 180): string {
+    const compact = content.replace(/\s+/g, ' ').trim();
+    if (compact.length <= maxLength) return compact;
+    return `${compact.slice(0, maxLength - 1)}…`;
+  }
+
+  private resolveBooleanEnv(name: string, fallback: boolean): boolean {
+    const raw = process.env[name];
+    if (!raw) return fallback;
+    const normalized = raw.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+    return fallback;
+  }
+
+  private shouldSuppressNotifications(): boolean {
+    return this.resolveBooleanEnv('AGENT_DISCORD_SUPPRESS_NOTIFICATIONS', true);
+  }
+
+  private resolveSendMaxRetries(): number {
+    const rawValue = process.env.AGENT_DISCORD_SEND_MAX_RETRIES;
+    if (!rawValue || rawValue.trim().length === 0) {
+      return DEFAULT_DISCORD_SEND_MAX_RETRIES;
+    }
+    const raw = Number(rawValue);
+    if (Number.isFinite(raw) && raw >= 0 && raw <= 10) {
+      return Math.trunc(raw);
+    }
+    return DEFAULT_DISCORD_SEND_MAX_RETRIES;
+  }
+
+  private buildBaseSendOptions(): {
+    allowedMentions: { parse: []; repliedUser: boolean };
+    flags?: number;
+  } {
+    const payload: {
+      allowedMentions: { parse: []; repliedUser: boolean };
+      flags?: number;
+    } = {
+      allowedMentions: {
+        parse: [],
+        repliedUser: false,
+      },
+    };
+    if (this.shouldSuppressNotifications()) {
+      payload.flags = SUPPRESS_NOTIFICATIONS_FLAG;
+    }
+    return payload;
+  }
+
+  private buildTextSendPayload(content: string): {
+    content: string;
+    allowedMentions: { parse: []; repliedUser: boolean };
+    flags?: number;
+  } {
+    return {
+      content,
+      ...this.buildBaseSendOptions(),
+    };
+  }
+
+  private buildFileSendPayload(
+    content: string | undefined,
+    files: AttachmentBuilder[],
+  ): {
+    content?: string;
+    files: AttachmentBuilder[];
+    allowedMentions: { parse: []; repliedUser: boolean };
+    flags?: number;
+  } {
+    return {
+      content,
+      files,
+      ...this.buildBaseSendOptions(),
+    };
+  }
+
+  private extractRetryAfterMs(error: unknown): number | null {
+    const payload = error as {
+      retryAfter?: unknown;
+      retry_after?: unknown;
+      data?: { retry_after?: unknown };
+      rawError?: { retry_after?: unknown };
+    };
+    const fromCamel = Number(payload.retryAfter);
+    if (Number.isFinite(fromCamel) && fromCamel > 0) {
+      // discord.js retryAfter is already in milliseconds.
+      return Math.round(fromCamel);
+    }
+
+    // Discord API retry_after is provided in seconds.
+    const fromSnake = Number(payload.retry_after ?? payload.data?.retry_after ?? payload.rawError?.retry_after);
+    if (!Number.isFinite(fromSnake) || fromSnake <= 0) return null;
+    return Math.round(fromSnake * 1000);
+  }
+
+  private isRetriableSendError(error: unknown): boolean {
+    const payload = error as { status?: unknown; code?: unknown; rawError?: { status?: unknown }; message?: unknown };
+    const status = Number(payload.status ?? payload.code ?? payload.rawError?.status);
+    if ([429, 500, 502, 503, 504].includes(status)) return true;
+
+    const message = typeof payload.message === 'string' ? payload.message : '';
+    return /rate limit|timed out|timeout|econnreset|socket hang up|eai_again|service unavailable/i.test(message);
+  }
+
+  private computeRetryDelayMs(attempt: number, error: unknown): number {
+    const retryAfter = this.extractRetryAfterMs(error);
+    if (retryAfter !== null) {
+      return Math.max(50, Math.min(retryAfter, DISCORD_SEND_MAX_BACKOFF_MS));
+    }
+    const base = DISCORD_SEND_BASE_BACKOFF_MS * Math.pow(2, Math.max(0, attempt - 1));
+    const jitter = Math.floor(Math.random() * 120);
+    return Math.min(base + jitter, DISCORD_SEND_MAX_BACKOFF_MS);
+  }
+
+  private async sleep(ms: number): Promise<void> {
+    if (ms <= 0) return;
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private async sendWithRetry<T>(context: string, operation: () => Promise<T>): Promise<T> {
+    const maxRetries = this.resolveSendMaxRetries();
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await operation();
+      } catch (error) {
+        if (attempt >= maxRetries || !this.isRetriableSendError(error)) {
+          throw error;
+        }
+        const delay = this.computeRetryDelayMs(attempt + 1, error);
+        console.warn(`Discord send retry ${attempt + 1}/${maxRetries} (${context}) in ${delay}ms`);
+        await this.sleep(delay);
+      }
+    }
+  }
+
+  private async enqueueSend(queueKey: string, task: () => Promise<void>): Promise<void> {
+    const previous = this.sendQueues.get(queueKey) || Promise.resolve();
+    const next = previous.catch(() => undefined).then(task);
+    this.sendQueues.set(queueKey, next);
+    try {
+      await next;
+    } finally {
+      if (this.sendQueues.get(queueKey) === next) {
+        this.sendQueues.delete(queueKey);
+      }
+    }
+  }
+
+  private splitForSend(content: string): string[] {
+    if (content.length <= DISCORD_MAX_MESSAGE_LENGTH) {
+      return [content];
+    }
+    return splitForDiscord(content);
+  }
+
+  private annotatePagedChunks(chunks: string[], label: string): string[] {
+    if (chunks.length <= 1) return chunks;
+    return chunks.map((chunk, index) => `**${label} ${index + 1}/${chunks.length}**\n${chunk}`);
+  }
+
+  private async sendSplitText(
+    queueKey: string,
+    target: { send: (payload: unknown) => Promise<unknown> },
+    content: string,
+    label: 'Part' | 'Page',
+  ): Promise<void> {
+    const chunks = this.splitForSend(content).map((chunk) => chunk.trimEnd()).filter((chunk) => chunk.trim().length > 0);
+    if (chunks.length === 0) return;
+    const decorated = this.annotatePagedChunks(chunks, label);
+    await this.enqueueSend(queueKey, async () => {
+      for (const chunk of decorated) {
+        await this.sendWithRetry(`text:${queueKey}`, async () => {
+          await target.send(this.buildTextSendPayload(chunk));
+        });
+      }
+    });
+  }
+
+  async sendLongOutput(channelId: string, content: string): Promise<void> {
+    const full = content.trim();
+    if (full.length === 0) return;
+
+    try {
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel?.isTextBased()) {
+        return;
+      }
+
+      const textChannel = channel as TextChannel;
+      const preview = this.buildLongOutputPreview(full);
+      let anchor: unknown;
+      await this.enqueueSend(channelId, async () => {
+        anchor = await this.sendWithRetry(`long-output-anchor:${channelId}`, async () =>
+          textChannel.send(
+            this.buildTextSendPayload(
+              `🧾 **Long response received**\n` +
+              `Full output was posted in a thread.\n` +
+              `Preview: ${preview}`,
+            ),
+          ),
+        );
+      });
+
+      try {
+        const threadName = `output-${new Date().toISOString().slice(11, 19).replace(/:/g, '')}`;
+        const thread = await (anchor as any)?.startThread({
+          name: threadName,
+          autoArchiveDuration: 60,
+          reason: 'mudcode long response overflow',
+        });
+        const threadId = typeof thread?.id === 'string' && thread.id.length > 0 ? thread.id : `${channelId}:long-output-thread`;
+        await this.sendSplitText(threadId, thread as { send: (payload: unknown) => Promise<unknown> }, full, 'Page');
+      } catch (threadError) {
+        console.warn(`Failed to create thread for long output on ${channelId}:`, threadError);
+        await this.sendSplitText(channelId, textChannel as { send: (payload: unknown) => Promise<unknown> }, full, 'Part');
+      }
+    } catch (error) {
+      console.error(`Failed to send long output to channel ${channelId}:`, error);
+    }
+  }
+
   /**
    * Send a message to a specific channel by ID
    */
@@ -756,7 +1166,7 @@ export class DiscordClient implements MessagingClient {
         console.warn(`Channel ${channelId} is not a text channel`);
         return;
       }
-      await (channel as TextChannel).send(content);
+      await this.sendSplitText(channelId, channel as { send: (payload: unknown) => Promise<unknown> }, content, 'Part');
     } catch (error) {
       console.error(`Failed to send message to channel ${channelId}:`, error);
     }
@@ -774,9 +1184,10 @@ export class DiscordClient implements MessagingClient {
         return;
       }
       const files = filePaths.map((fp) => new AttachmentBuilder(fp));
-      await (channel as TextChannel).send({
-        content: content || undefined,
-        files,
+      await this.enqueueSend(channelId, async () => {
+        await this.sendWithRetry(`files:${channelId}`, async () =>
+          (channel as TextChannel).send(this.buildFileSendPayload(content || undefined, files)),
+        );
       });
     } catch (error) {
       console.error(`Failed to send message with files to channel ${channelId}:`, error);

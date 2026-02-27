@@ -237,6 +237,7 @@ describe('DiscordClient', () => {
       )?.[1];
 
       const interaction = {
+        isButton: () => false,
         isChatInputCommand: () => true,
         commandName: 'q',
         user: { bot: false, id: 'u-1' },
@@ -283,6 +284,7 @@ describe('DiscordClient', () => {
       )?.[1];
 
       const interaction = {
+        isButton: () => false,
         isChatInputCommand: () => true,
         commandName: 'qw',
         user: { bot: false, id: 'u-1' },
@@ -321,7 +323,11 @@ describe('DiscordClient', () => {
       await client.sendToChannel('ch-123', 'test message');
 
       expect(mockClient.channels.fetch).toHaveBeenCalledWith('ch-123');
-      expect(mockChannel.send).toHaveBeenCalledWith('test message');
+      expect(mockChannel.send).toHaveBeenCalledWith({
+        content: 'test message',
+        allowedMentions: { parse: [], repliedUser: false },
+        flags: 4096,
+      });
     });
 
     it('sendToChannel handles non-text channel gracefully', async () => {
@@ -336,6 +342,102 @@ describe('DiscordClient', () => {
 
       // Should not throw
       await expect(client.sendToChannel('ch-123', 'test message')).resolves.toBeUndefined();
+    });
+
+    it('sendLongOutput posts summary and full text in a thread', async () => {
+      const client = new DiscordClient('test-token');
+      const threadSend = vi.fn().mockResolvedValue(undefined);
+      const mockMessage = {
+        id: 'm-anchor',
+        startThread: vi.fn().mockResolvedValue({
+          id: 'th-1',
+          send: threadSend,
+        }),
+      };
+      const mockChannel = {
+        isTextBased: () => true,
+        send: vi.fn().mockResolvedValue(mockMessage),
+      };
+
+      const mockClient = getMockClient();
+      mockClient.channels.fetch.mockResolvedValue(mockChannel);
+
+      await client.sendLongOutput('ch-123', 'x'.repeat(2400));
+
+      expect(mockChannel.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          content: expect.stringContaining('Long response received'),
+          allowedMentions: { parse: [], repliedUser: false },
+          flags: 4096,
+        }),
+      );
+      expect(mockMessage.startThread).toHaveBeenCalled();
+      expect(threadSend).toHaveBeenCalled();
+      const firstThreadPayload = threadSend.mock.calls[0]?.[0];
+      expect(String(firstThreadPayload?.content || '')).toContain('Page');
+    });
+
+    it('retries sendToChannel when the first send is rate-limited', async () => {
+      vi.useFakeTimers();
+      try {
+        const client = new DiscordClient('test-token');
+        const rateLimitedError = Object.assign(new Error('429 rate limited'), {
+          status: 429,
+          retry_after: 0.01,
+        });
+
+        const mockChannel = {
+          isTextBased: () => true,
+          send: vi
+            .fn()
+            .mockRejectedValueOnce(rateLimitedError)
+            .mockResolvedValue(undefined),
+        };
+
+        const mockClient = getMockClient();
+        mockClient.channels.fetch.mockResolvedValue(mockChannel);
+
+        const sending = client.sendToChannel('ch-123', 'retry test');
+        await vi.runAllTimersAsync();
+        await sending;
+
+        expect(mockChannel.send).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('treats retry_after as seconds (not milliseconds) for retry delay', async () => {
+      vi.useFakeTimers();
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const client = new DiscordClient('test-token');
+        const rateLimitedError = Object.assign(new Error('429 rate limited'), {
+          status: 429,
+          retry_after: 55,
+        });
+
+        const mockChannel = {
+          isTextBased: () => true,
+          send: vi
+            .fn()
+            .mockRejectedValueOnce(rateLimitedError)
+            .mockResolvedValue(undefined),
+        };
+
+        const mockClient = getMockClient();
+        mockClient.channels.fetch.mockResolvedValue(mockChannel);
+
+        const sending = client.sendToChannel('ch-123', 'retry seconds test');
+        await vi.runAllTimersAsync();
+        await sending;
+
+        expect(mockChannel.send).toHaveBeenCalledTimes(2);
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('in 10000ms'));
+      } finally {
+        warnSpy.mockRestore();
+        vi.useRealTimers();
+      }
     });
 
     it('archiveChannel renames channel to saved timestamp format', async () => {
@@ -472,6 +574,22 @@ describe('DiscordClient', () => {
           description: 'Stop the current agent pane and save this channel.',
         },
         {
+          name: 'retry',
+          description: 'Resend the last prompt for the active agent instance.',
+        },
+        {
+          name: 'health',
+          description: 'Show bridge/session health for this mapped instance.',
+        },
+        {
+          name: 'snapshot',
+          description: 'Post the current tmux pane snapshot for this instance.',
+        },
+        {
+          name: 'controls',
+          description: 'Post a button control panel in this channel.',
+        },
+        {
           name: 'enter',
           description: 'Send Enter key to the active agent pane.',
           options: [
@@ -558,6 +676,7 @@ describe('DiscordClient', () => {
       )?.[1];
 
       const interaction = {
+        isButton: () => false,
         isChatInputCommand: () => true,
         commandName: 'down',
         user: { bot: false, id: 'u-1' },
@@ -584,6 +703,135 @@ describe('DiscordClient', () => {
         expect.any(Object),
       );
       expect(interaction.editReply).toHaveBeenCalledWith('✅ `/down 3` request submitted.');
+    });
+
+    it('routes /snapshot slash command to message callback', async () => {
+      const client = new DiscordClient('test-token');
+      const callback = vi.fn();
+      client.onMessage(callback);
+      client.registerChannelMappings([
+        { channelId: 'ch-1', projectName: 'proj', agentType: 'claude', instanceId: 'claude' },
+      ]);
+
+      const mockClient = getMockClient();
+      const interactionHandler = mockClient.on.mock.calls.find(
+        (call: any[]) => call[0] === 'interactionCreate',
+      )?.[1];
+
+      const interaction = {
+        isButton: () => false,
+        isChatInputCommand: () => true,
+        commandName: 'snapshot',
+        user: { bot: false, id: 'u-1' },
+        channelId: 'ch-1',
+        channel: { isTextBased: () => true },
+        options: { getInteger: vi.fn().mockReturnValue(null) },
+        deferred: false,
+        replied: false,
+        deferReply: vi.fn().mockResolvedValue(undefined),
+        editReply: vi.fn().mockResolvedValue(undefined),
+        reply: vi.fn().mockResolvedValue(undefined),
+      };
+
+      await interactionHandler(interaction);
+
+      expect(callback).toHaveBeenCalledWith(
+        'claude',
+        '/snapshot',
+        'proj',
+        'ch-1',
+        undefined,
+        'claude',
+        undefined,
+        expect.any(Object),
+      );
+      expect(interaction.editReply).toHaveBeenCalledWith('✅ `/snapshot` request submitted.');
+    });
+
+    it('posts control panel for /controls slash command', async () => {
+      const client = new DiscordClient('test-token');
+      const callback = vi.fn();
+      client.onMessage(callback);
+      client.registerChannelMappings([
+        { channelId: 'ch-1', projectName: 'proj', agentType: 'claude', instanceId: 'claude' },
+      ]);
+
+      const mockClient = getMockClient();
+      const mockChannel = {
+        isTextBased: () => true,
+        send: vi.fn().mockResolvedValue(undefined),
+      };
+      mockClient.channels.fetch.mockResolvedValue(mockChannel);
+      const interactionHandler = mockClient.on.mock.calls.find(
+        (call: any[]) => call[0] === 'interactionCreate',
+      )?.[1];
+
+      const interaction = {
+        isButton: () => false,
+        isChatInputCommand: () => true,
+        commandName: 'controls',
+        user: { bot: false, id: 'u-1' },
+        channelId: 'ch-1',
+        channel: { isTextBased: () => true },
+        options: { getInteger: vi.fn().mockReturnValue(null) },
+        deferred: false,
+        replied: false,
+        deferReply: vi.fn().mockResolvedValue(undefined),
+        editReply: vi.fn().mockResolvedValue(undefined),
+        reply: vi.fn().mockResolvedValue(undefined),
+      };
+
+      await interactionHandler(interaction);
+
+      expect(mockChannel.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          content: expect.stringContaining('Mudcode Controls'),
+        }),
+      );
+      expect(interaction.editReply).toHaveBeenCalledWith('✅ Control panel posted.');
+      expect(callback).not.toHaveBeenCalled();
+    });
+
+    it('routes control-panel retry button to message callback', async () => {
+      const client = new DiscordClient('test-token');
+      const callback = vi.fn();
+      client.onMessage(callback);
+      client.registerChannelMappings([
+        { channelId: 'ch-1', projectName: 'proj', agentType: 'claude', instanceId: 'claude' },
+      ]);
+
+      const mockClient = getMockClient();
+      const interactionHandler = mockClient.on.mock.calls.find(
+        (call: any[]) => call[0] === 'interactionCreate',
+      )?.[1];
+
+      const buttonInteraction = {
+        isButton: () => true,
+        isChatInputCommand: () => false,
+        customId: 'mudcode:control:retry',
+        user: { bot: false, id: 'u-1' },
+        channelId: 'ch-1',
+        channel: { isTextBased: () => true },
+        deferred: false,
+        replied: false,
+        deferReply: vi.fn().mockResolvedValue(undefined),
+        editReply: vi.fn().mockResolvedValue(undefined),
+        reply: vi.fn().mockResolvedValue(undefined),
+      };
+
+      await interactionHandler(buttonInteraction);
+
+      expect(callback).toHaveBeenCalledWith(
+        'claude',
+        '/retry',
+        'proj',
+        'ch-1',
+        undefined,
+        'claude',
+        undefined,
+        expect.any(Object),
+      );
+      expect(buttonInteraction.editReply).toHaveBeenCalledWith('✅ `/retry` request submitted.');
     });
   });
 

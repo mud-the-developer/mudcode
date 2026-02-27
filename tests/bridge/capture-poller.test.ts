@@ -11,6 +11,7 @@ function createMessaging(platform: 'discord' | 'slack' = 'discord') {
   return {
     platform,
     sendToChannel: vi.fn().mockResolvedValue(undefined),
+    sendLongOutput: vi.fn().mockResolvedValue(undefined),
   } as any;
 }
 
@@ -32,11 +33,13 @@ describe('BridgeCapturePoller', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     delete process.env.AGENT_DISCORD_CAPTURE_PENDING_INITIAL_QUIET_POLLS_CODEX;
+    delete process.env.AGENT_DISCORD_CAPTURE_STALE_ALERT_MS;
   });
 
   afterEach(() => {
     vi.useRealTimers();
     delete process.env.AGENT_DISCORD_CAPTURE_PENDING_INITIAL_QUIET_POLLS_CODEX;
+    delete process.env.AGENT_DISCORD_CAPTURE_STALE_ALERT_MS;
   });
 
   it('sends delta output for non-hook instances', async () => {
@@ -89,6 +92,90 @@ describe('BridgeCapturePoller', () => {
     poller.stop();
   });
 
+  it('formats multiline delta output for discord', async () => {
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'ch-1',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const tmux = createTmux([
+      'boot line',
+      'boot line\nline one\nline two',
+    ]);
+    const pendingTracker = createPendingTracker();
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      intervalMs: 500,
+    });
+
+    poller.start();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(messaging.sendToChannel).toHaveBeenCalledWith('ch-1', 'line one\nline two');
+
+    poller.stop();
+  });
+
+  it('uses discord long-output threading helper for oversized deltas', async () => {
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'ch-1',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const longOutput = 'y'.repeat(2400);
+    const tmux = createTmux([
+      'boot line',
+      `boot line\n${longOutput}`,
+    ]);
+    const pendingTracker = createPendingTracker();
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      intervalMs: 500,
+    });
+
+    poller.start();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(messaging.sendLongOutput).toHaveBeenCalledWith('ch-1', longOutput);
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
+
+    poller.stop();
+  });
+
   it('prefers pending message channel for output delivery', async () => {
     const stateManager = createStateManager([
       {
@@ -132,7 +219,7 @@ describe('BridgeCapturePoller', () => {
     poller.stop();
   });
 
-  it('keeps pending route until output goes quiet for one poll', async () => {
+  it('keeps pending route until output stays quiet for threshold polls', async () => {
     const stateManager = createStateManager([
       {
         projectName: 'demo',
@@ -184,7 +271,11 @@ describe('BridgeCapturePoller', () => {
     expect(messaging.sendToChannel).toHaveBeenNthCalledWith(2, 'thread-ch', 'second chunk');
     expect(pendingTracker.markCompleted).not.toHaveBeenCalled();
 
-    // Quiet cycle finalizes pending state.
+    // First quiet cycle should not complete yet.
+    await vi.advanceTimersByTimeAsync(300);
+    expect(pendingTracker.markCompleted).not.toHaveBeenCalled();
+
+    // Second quiet cycle finalizes pending state.
     await vi.advanceTimersByTimeAsync(300);
     expect(pendingTracker.markCompleted).toHaveBeenCalledWith('demo', 'codex', 'codex');
 
@@ -240,12 +331,15 @@ describe('BridgeCapturePoller', () => {
     expect(pendingTracker.markCompleted).not.toHaveBeenCalled();
 
     await vi.advanceTimersByTimeAsync(300);
+    expect(pendingTracker.markCompleted).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(300);
     expect(pendingTracker.markCompleted).toHaveBeenCalledWith('demo', 'codex', 'codex');
 
     poller.stop();
   });
 
-  it('keeps codex pending during short initial quiet period before first output', async () => {
+  it('does not auto-complete codex pending before first output by default', async () => {
     const stateManager = createStateManager([
       {
         projectName: 'demo',
@@ -284,8 +378,9 @@ describe('BridgeCapturePoller', () => {
 
     poller.start();
     await Promise.resolve();
-    await vi.advanceTimersByTimeAsync(300);
-    await vi.advanceTimersByTimeAsync(300);
+    for (let i = 0; i < 20; i += 1) {
+      await vi.advanceTimersByTimeAsync(300);
+    }
 
     expect(messaging.sendToChannel).not.toHaveBeenCalled();
     expect(pendingTracker.markCompleted).not.toHaveBeenCalled();
@@ -339,6 +434,91 @@ describe('BridgeCapturePoller', () => {
 
     expect(messaging.sendToChannel).not.toHaveBeenCalled();
     expect(pendingTracker.markCompleted).toHaveBeenCalledWith('demo', 'codex', 'codex');
+
+    poller.stop();
+  });
+
+  it('sends staged stale-screen warnings when pending has no pane changes beyond thresholds', async () => {
+    process.env.AGENT_DISCORD_CAPTURE_STALE_ALERT_MS = '1000';
+
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'parent-ch',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const tmux = createTmux([
+      'same screen',
+      'same screen',
+      'same screen',
+      'same screen',
+    ]);
+    const pendingTracker = {
+      getPendingChannel: vi.fn().mockReturnValue('thread-ch'),
+      getPendingDepth: vi.fn().mockReturnValue(1),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      intervalMs: 300,
+    });
+
+    poller.start();
+    await Promise.resolve();
+
+    // 1st timed poll: no warning yet (300ms)
+    await vi.advanceTimersByTimeAsync(300);
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
+
+    // 2nd timed poll: still below threshold (600ms)
+    await vi.advanceTimersByTimeAsync(300);
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
+
+    // 3rd timed poll: still may be below threshold (900ms from baseline)
+    await vi.advanceTimersByTimeAsync(300);
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
+
+    // 4th timed poll: stage-1 threshold exceeded (~1200ms)
+    await vi.advanceTimersByTimeAsync(300);
+    expect(messaging.sendToChannel).toHaveBeenCalledTimes(1);
+    expect(messaging.sendToChannel).toHaveBeenCalledWith(
+      'thread-ch',
+      expect.stringContaining('No screen updates'),
+    );
+
+    // Between thresholds, stage-1 must not repeat.
+    await vi.advanceTimersByTimeAsync(300);
+    expect(messaging.sendToChannel).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(messaging.sendToChannel).toHaveBeenCalledTimes(1);
+
+    // 7th timed poll: stage-2 threshold exceeded (~2100ms from baseline).
+    await vi.advanceTimersByTimeAsync(300);
+    expect(messaging.sendToChannel).toHaveBeenCalledTimes(2);
+    expect(messaging.sendToChannel).toHaveBeenNthCalledWith(
+      2,
+      'thread-ch',
+      expect.stringContaining('Still no screen updates'),
+    );
+
+    // Further quiet polls should not spam duplicate stage-2 warnings.
+    await vi.advanceTimersByTimeAsync(300);
+    expect(messaging.sendToChannel).toHaveBeenCalledTimes(2);
 
     poller.stop();
   });

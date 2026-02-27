@@ -90,7 +90,18 @@ export async function configCommand(options: {
   }
 
   if (options.port) {
-    const port = parseInt(String(options.port), 10);
+    const portRaw = String(options.port).trim();
+    if (!/^\d+$/.test(portRaw)) {
+      console.error(chalk.red(`Invalid hook port: ${options.port}`));
+      console.log(chalk.gray('Hook port must be an integer between 1 and 65535.'));
+      process.exit(1);
+    }
+    const port = parseInt(portRaw, 10);
+    if (port < 1 || port > 65535) {
+      console.error(chalk.red(`Invalid hook port: ${options.port}`));
+      console.log(chalk.gray('Hook port must be an integer between 1 and 65535.'));
+      process.exit(1);
+    }
     saveConfig({ hookServerPort: port });
     console.log(chalk.green(`✅ Hook port saved: ${port}`));
     updated = true;
