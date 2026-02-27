@@ -7,7 +7,7 @@
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 import type { Argv } from 'yargs';
-import { readFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { resolve } from 'path';
 import { execSync } from 'child_process';
 import chalk from 'chalk';
@@ -154,6 +154,10 @@ type UpgradeInstallPlan = {
   command: string;
 };
 
+function shellEscapeArg(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 function detectUpgradeInstallPlan(): UpgradeInstallPlan | null {
   if (hasCommand('npm')) {
     return { label: 'npm', command: `npm install -g ${CLI_PACKAGE_NAME}@latest` };
@@ -181,6 +185,75 @@ async function performSelfUpgrade(): Promise<boolean> {
   } catch (error) {
     console.log(chalk.yellow(`⚠️ Auto-upgrade failed: ${error instanceof Error ? error.message : String(error)}`));
     console.log(chalk.gray(`   You can retry manually: npm install -g ${CLI_PACKAGE_NAME}@latest`));
+    return false;
+  }
+}
+
+function detectLocalUpgradeInstallPlan(repoPath: string): UpgradeInstallPlan | null {
+  const escapedRepoPath = shellEscapeArg(repoPath);
+  if (hasCommand('npm')) {
+    return {
+      label: 'npm',
+      command: `npm install -g ${escapedRepoPath}`,
+    };
+  }
+  if (hasCommand('bun')) {
+    return {
+      label: 'bun',
+      command: `bun add -g ${escapedRepoPath}`,
+    };
+  }
+  return null;
+}
+
+function isGitRepository(repoPath: string): boolean {
+  try {
+    execSync(`git -C ${shellEscapeArg(repoPath)} rev-parse --is-inside-work-tree`, {
+      stdio: ['ignore', 'ignore', 'ignore'],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function performGitUpgrade(options: { repo?: string }): Promise<boolean> {
+  const repoPath = resolve(options.repo?.trim() || process.env.MUDCODE_GIT_REPO_PATH?.trim() || process.cwd());
+  if (!isGitRepository(repoPath)) {
+    console.log(chalk.yellow(`⚠️ Not a git repository: ${repoPath}`));
+    console.log(chalk.gray(`   Run from your mudcode repo, or pass: ${CLI_COMMAND_NAME} update --git --repo /path/to/mudcode`));
+    return false;
+  }
+  if (!existsSync(resolve(repoPath, 'package.json'))) {
+    console.log(chalk.yellow(`⚠️ package.json not found in repo path: ${repoPath}`));
+    return false;
+  }
+
+  try {
+    console.log(chalk.gray(`   Pulling latest code from git: ${repoPath}`));
+    execSync(`git -C ${shellEscapeArg(repoPath)} pull --rebase --autostash`, { stdio: 'inherit' });
+  } catch (error) {
+    console.log(chalk.yellow(`⚠️ Git pull failed: ${error instanceof Error ? error.message : String(error)}`));
+    return false;
+  }
+
+  const plan = detectLocalUpgradeInstallPlan(repoPath);
+  if (!plan) {
+    console.log(chalk.yellow('⚠️ No supported package manager found for local install.'));
+    console.log(chalk.gray(`   Install manually: npm install -g ${shellEscapeArg(repoPath)}`));
+    return false;
+  }
+
+  try {
+    console.log(chalk.gray(`   Installing from local git checkout via ${plan.label}...`));
+    console.log(chalk.gray(`   Running: ${plan.command}`));
+    execSync(plan.command, { stdio: 'inherit' });
+    console.log(chalk.green(`✅ Updated from git checkout: ${repoPath}`));
+    await restartDaemonIfRunningForUpgrade();
+    return true;
+  } catch (error) {
+    console.log(chalk.yellow(`⚠️ Local install failed: ${error instanceof Error ? error.message : String(error)}`));
+    console.log(chalk.gray(`   Retry manually: ${plan.command}`));
     return false;
   }
 }
@@ -314,7 +387,12 @@ async function maybePromptForUpgrade(rawArgs: string[]): Promise<void> {
   await performSelfUpgrade();
 }
 
-async function runUpdateCommand(options: { check?: boolean }): Promise<void> {
+async function runUpdateCommand(options: { check?: boolean; git?: boolean; repo?: string }): Promise<void> {
+  if (options.git) {
+    await performGitUpgrade({ repo: options.repo });
+    return;
+  }
+
   const latestVersion = await fetchLatestCliVersion(4000);
   if (!latestVersion) {
     console.log(chalk.yellow('⚠️ Could not fetch the latest version from npm registry.'));
@@ -530,8 +608,12 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
     .command(
       'update',
       'Update mudcode to the latest version',
-      (y: Argv) => y.option('check', { type: 'boolean', default: false, describe: 'Only check for updates' }),
-      async (argv: any) => runUpdateCommand({ check: argv.check })
+      (y: Argv) =>
+        y
+          .option('check', { type: 'boolean', default: false, describe: 'Only check for updates (npm registry)' })
+          .option('git', { type: 'boolean', default: false, describe: 'Update from a local git checkout (git pull + global reinstall)' })
+          .option('repo', { type: 'string', describe: 'Repo path for --git (default: $MUDCODE_GIT_REPO_PATH or current directory)' }),
+      async (argv: any) => runUpdateCommand({ check: argv.check, git: argv.git, repo: argv.repo })
     )
     .command(
       'daemon-runner',
