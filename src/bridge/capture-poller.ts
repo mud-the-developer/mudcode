@@ -758,15 +758,62 @@ export class BridgeCapturePoller {
 
   private stripCodexBootstrapNoise(text: string): string {
     const lines = text.split('\n');
+    const compactNonEmpty = lines
+      .map((line) => line.replace(/\s+/g, ' ').trim())
+      .filter((line) => line.length > 0);
+    if (this.isLikelyCodexDraftLeak(compactNonEmpty)) {
+      return '';
+    }
+
     const filtered = lines.filter((line) => {
       const trimmed = line.trim();
       if (trimmed.length === 0) return false;
       if (/^export AGENT_DISCORD_[A-Z_]+=/.test(trimmed)) return false;
       if (/^\$?\s*cd\s+".*"\s*&&\s*codex\b/.test(trimmed)) return false;
+      if (this.isCodexUiProgressNoiseLine(trimmed)) return false;
       if (this.isCodexUiStatusNoiseLine(trimmed)) return false;
       return true;
     });
     return filtered.join('\n');
+  }
+
+  private isLikelyCodexDraftLeak(compactLines: string[]): boolean {
+    if (compactLines.length === 0) return false;
+
+    const hasProgressNoise = compactLines.some((line) => this.isCodexUiProgressNoiseLine(line));
+    const hasInteractivePromptEcho = compactLines.some((line) => /\bSelect action \[\d+-\d+\]/i.test(line));
+    const diffStyleCount = compactLines.filter((line) => this.isCodexDiffLikeLine(line)).length;
+    const numberedCodeLikeCount = compactLines.filter((line) => /^\d+\s{2,}\S/.test(line)).length;
+    const hasPatchHeader = compactLines.some((line) => /^(diff --git|@@\s|(?:\+\+\+|---)\s)/.test(line));
+
+    if (hasProgressNoise && (diffStyleCount >= 2 || hasInteractivePromptEcho || numberedCodeLikeCount >= 6 || hasPatchHeader)) {
+      return true;
+    }
+    if (hasInteractivePromptEcho && diffStyleCount >= 2 && numberedCodeLikeCount >= 4) {
+      return true;
+    }
+    return false;
+  }
+
+  private isCodexDiffLikeLine(line: string): boolean {
+    if (/^\d+\s+[+-]\s+/.test(line)) return true;
+    if (/^(?:\+\+\+|---)\s+\S/.test(line)) return true;
+    if (/^@@\s+/.test(line)) return true;
+    if (/^diff --git\b/.test(line)) return true;
+    return false;
+  }
+
+  private isCodexUiProgressNoiseLine(line: string): boolean {
+    const compact = line.replace(/\s+/g, ' ').trim();
+    if (compact.length === 0) return false;
+
+    // Codex often renders transient progress lines while drafting.
+    // These are not final user-facing output and should not be bridged.
+    if (/^[•·]\s*(crafting|thinking|analyzing|analysis|planning|preparing|reviewing|searching|reading|writing|editing|running|checking|executing|building|debugging|investigating|summarizing|drafting)\b/i.test(compact)) {
+      return true;
+    }
+    if (/^esc to interrupt\b/i.test(compact)) return true;
+    return false;
   }
 
   private isCodexUiStatusNoiseLine(line: string): boolean {

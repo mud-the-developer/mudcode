@@ -699,6 +699,100 @@ describe('BridgeCapturePoller', () => {
     poller.stop();
   });
 
+  it('suppresses codex transient draft frames that include progress + diff artifacts', async () => {
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'ch-1',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const tmux = createTmux([
+      'boot line',
+      [
+        'boot line',
+        '635    while (true) {',
+        '636      printInteractiveMenu();',
+        "566 -    const choiceRaw = await prompt(chalk.white('\\nSelect action [1-9]: '));",
+        "637 +    const choiceRaw = await prompt(chalk.white('\\nSelect action [1-9] (q to quit): '));",
+        "639 +    if (normalized === 'q' || normalized === 'quit' || normalized === 'exit') {",
+        '• Crafting comprehensive interactive launcher response',
+      ].join('\n'),
+    ]);
+    const pendingTracker = createPendingTracker();
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      intervalMs: 300,
+    });
+
+    poller.start();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
+
+    poller.stop();
+  });
+
+  it('strips codex transient progress lines but keeps assistant content', async () => {
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'ch-1',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const tmux = createTmux([
+      'boot line',
+      [
+        'boot line',
+        '• Crafting comprehensive interactive launcher response',
+        'assistant: final answer ready',
+      ].join('\n'),
+    ]);
+    const pendingTracker = createPendingTracker();
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      intervalMs: 300,
+    });
+
+    poller.start();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(messaging.sendToChannel).toHaveBeenCalledWith('ch-1', 'assistant: final answer ready');
+
+    poller.stop();
+  });
+
   it('does not drop codex output when only bottom status line anchors the redraw', async () => {
     const stateManager = createStateManager([
       {

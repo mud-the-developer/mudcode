@@ -419,20 +419,74 @@ type InteractiveLauncherOptions = {
   tmuxSharedSessionName?: string;
 };
 
+type InteractiveMenuItem = {
+  id: number;
+  icon: string;
+  title: string;
+  summary: string;
+  accent: (value: string) => string;
+};
+
+const INTERACTIVE_MENU: InteractiveMenuItem[] = [
+  { id: 1, icon: '🚀', title: 'New/Resume project', summary: 'Create or continue a project workspace with channel + tmux.', accent: chalk.cyanBright },
+  { id: 2, icon: '📺', title: 'Attach to project', summary: 'Jump back into an existing project window quickly.', accent: chalk.blueBright },
+  { id: 3, icon: '🛑', title: 'Stop project', summary: 'Stop one instance or entire project safely.', accent: chalk.redBright },
+  { id: 4, icon: '🩺', title: 'Health check', summary: 'Inspect daemon/tmux/capture status with optional probe.', accent: chalk.greenBright },
+  { id: 5, icon: '🧰', title: 'Daemon control', summary: 'Start, stop, restart, or inspect daemon state.', accent: chalk.yellowBright },
+  { id: 6, icon: '🖥️', title: 'Open TUI', summary: 'Open terminal UI for realtime project management.', accent: chalk.magentaBright },
+  { id: 7, icon: '⚙️', title: 'Show config', summary: 'Print current configuration and key runtime values.', accent: chalk.whiteBright },
+  { id: 8, icon: '🔄', title: 'Update from git', summary: 'Pull latest repo and reinstall global CLI from local path.', accent: chalk.hex('#ff9f43') },
+  { id: 9, icon: '🧪', title: 'Output test', summary: 'Run capture-output probe presets to verify live delivery.', accent: chalk.hex('#2dd4bf') },
+  { id: 10, icon: '👋', title: 'Exit', summary: 'Close interactive launcher.', accent: chalk.gray },
+];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function playInteractiveLauncherIntro(): Promise<void> {
+  const title = `${chalk.bold.hex('#22d3ee')('Mud')} ${chalk.bold.hex('#60a5fa')('code')} ${chalk.bold.white('Interactive Launcher')}`;
+  if (!process.stdout.isTTY || process.env.MUDCODE_DISABLE_ANIMATION === '1' || process.env.CI === 'true') {
+    console.log(`\n${title}`);
+    console.log(chalk.gray('Friendly mode: choose an action by number and press Enter.\n'));
+    return;
+  }
+
+  const frames = ['◜', '◠', '◝', '◞', '◡', '◟'];
+  const message = 'Preparing friendly launcher';
+  const durationMs = 600;
+  const frameDelayMs = 80;
+  const startedAt = Date.now();
+  let index = 0;
+  while ((Date.now() - startedAt) < durationMs) {
+    process.stdout.write(`\r${chalk.cyan(frames[index % frames.length] || '•')} ${chalk.gray(message)}   `);
+    await sleep(frameDelayMs);
+    index += 1;
+  }
+  process.stdout.write(`\r${chalk.green('●')} ${chalk.gray('Launcher ready')}            \n`);
+  console.log(`\n${title}`);
+  console.log(chalk.gray('Friendly mode: choose an action by number and press Enter.\n'));
+}
+
 function printInteractiveMenu(): void {
-  console.log(chalk.cyan('\n🧭 Mudcode Interactive Launcher\n'));
-  console.log(chalk.gray('  1) New/Resume project'));
-  console.log(chalk.gray('  2) Attach to project'));
-  console.log(chalk.gray('  3) Stop project'));
-  console.log(chalk.gray('  4) Health check'));
-  console.log(chalk.gray('  5) Daemon control'));
-  console.log(chalk.gray('  6) Open TUI'));
-  console.log(chalk.gray('  7) Show config'));
-  console.log(chalk.gray('  8) Update from git'));
-  console.log(chalk.gray('  9) Exit'));
+  console.log(chalk.cyan('╭──────────────────────────────────────────────────────────────────────╮'));
+  console.log(chalk.cyan('│') + chalk.white('  What would you like to do?') + chalk.gray(' (q = quit)') + chalk.cyan('                         │'));
+  console.log(chalk.cyan('╰──────────────────────────────────────────────────────────────────────╯'));
+  for (const item of INTERACTIVE_MENU) {
+    const key = item.accent(`[${item.id}]`);
+    console.log(` ${item.icon} ${key} ${chalk.white(item.title)}`);
+    console.log(chalk.gray(`     ${item.summary}`));
+  }
+  console.log(chalk.gray('\nTip: press Enter on prompts to use recommended defaults.'));
+}
+
+function printInteractiveSection(icon: string, title: string, description: string): void {
+  console.log(chalk.cyan(`\n${icon} ${chalk.bold(title)}`));
+  console.log(chalk.gray(description));
 }
 
 async function runInteractiveNew(options: InteractiveLauncherOptions): Promise<void> {
+  printInteractiveSection('🚀', 'New / Resume Project', 'This creates or resumes your project and can auto-attach tmux.');
   const defaultProjectName = basename(process.cwd());
   const projectNameInput = await prompt(chalk.white(`Project name [${defaultProjectName}]: `));
   const projectName = projectNameInput || defaultProjectName;
@@ -468,6 +522,7 @@ async function runInteractiveNew(options: InteractiveLauncherOptions): Promise<v
 }
 
 async function runInteractiveAttach(options: InteractiveLauncherOptions): Promise<void> {
+  printInteractiveSection('📺', 'Attach', 'Select a project and optional instance to attach immediately.');
   stateManager.reload();
   const projects = stateManager.listProjects();
   if (projects.length === 0) {
@@ -500,6 +555,7 @@ async function runInteractiveAttach(options: InteractiveLauncherOptions): Promis
 }
 
 async function runInteractiveStop(options: InteractiveLauncherOptions): Promise<void> {
+  printInteractiveSection('🛑', 'Stop', 'Stop an instance or project and optionally keep the channel.');
   stateManager.reload();
   const projects = stateManager.listProjects();
   if (projects.length === 0) {
@@ -529,6 +585,7 @@ async function runInteractiveStop(options: InteractiveLauncherOptions): Promise<
 }
 
 async function runInteractiveDaemonControl(): Promise<void> {
+  printInteractiveSection('🧰', 'Daemon Control', 'Manage daemon lifecycle. Restart can also clear stale tmux sessions.');
   console.log(chalk.white('\nDaemon actions:'));
   console.log(chalk.gray('  1) status'));
   console.log(chalk.gray('  2) start'));
@@ -554,6 +611,31 @@ async function runInteractiveDaemonControl(): Promise<void> {
   await daemonCommand(action, { clearSession });
 }
 
+async function runInteractiveOutputTest(options: InteractiveLauncherOptions): Promise<void> {
+  printInteractiveSection('🧪', 'Output Test', 'Run a live capture probe preset to validate output flow stability.');
+  console.log(chalk.white('\nProbe presets:'));
+  console.log(chalk.gray('  1) Quick    (polls=3, interval=300ms)'));
+  console.log(chalk.gray('  2) Standard (polls=6, interval=700ms) [recommended]'));
+  console.log(chalk.gray('  3) Deep     (polls=10, interval=1000ms)'));
+  const answer = await prompt(chalk.white('Select preset [1-3] (default 2): '));
+  const index = Number((answer || '2').trim());
+
+  const presetMap: Record<number, { polls: number; intervalMs: number }> = {
+    1: { polls: 3, intervalMs: 300 },
+    2: { polls: 6, intervalMs: 700 },
+    3: { polls: 10, intervalMs: 1000 },
+  };
+  const preset = presetMap[index] || presetMap[2];
+  if (!preset) return;
+
+  await healthCommand({
+    tmuxSharedSessionName: options.tmuxSharedSessionName,
+    captureTest: true,
+    captureTestPolls: preset.polls,
+    captureTestIntervalMs: preset.intervalMs,
+  });
+}
+
 async function runInteractiveLauncher(options: InteractiveLauncherOptions = {}): Promise<void> {
   if (!isInteractiveShell()) {
     console.log(chalk.yellow('⚠️ Interactive launcher requires a TTY.'));
@@ -561,12 +643,19 @@ async function runInteractiveLauncher(options: InteractiveLauncherOptions = {}):
     return;
   }
 
+  await playInteractiveLauncherIntro();
+
   while (true) {
     printInteractiveMenu();
-    const choiceRaw = await prompt(chalk.white('\nSelect action [1-9]: '));
-    const choice = Number(choiceRaw.trim());
+    const choiceRaw = await prompt(chalk.white('\nSelect action [1-10] (q to quit): '));
+    const normalized = choiceRaw.trim().toLowerCase();
+    if (normalized === 'q' || normalized === 'quit' || normalized === 'exit') {
+      console.log(chalk.gray('Bye.'));
+      return;
+    }
+    const choice = Number(normalized);
 
-    if (!Number.isFinite(choice) || choice < 1 || choice > 9) {
+    if (!Number.isFinite(choice) || choice < 1 || choice > 10) {
       console.log(chalk.yellow('⚠️ Invalid selection.'));
       continue;
     }
@@ -607,6 +696,10 @@ async function runInteractiveLauncher(options: InteractiveLauncherOptions = {}):
       continue;
     }
     if (choice === 9) {
+      await runInteractiveOutputTest(options);
+      continue;
+    }
+    if (choice === 10) {
       console.log(chalk.gray('Bye.'));
       return;
     }
