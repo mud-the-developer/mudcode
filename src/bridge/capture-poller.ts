@@ -20,6 +20,8 @@ export class BridgeCapturePoller {
   private readonly codexInitialQuietPendingPollThreshold: number;
   private readonly longOutputThreadThreshold: number;
   private readonly stalePendingAlertMs: number;
+  private readonly promptEchoFilterEnabled: boolean;
+  private readonly promptEchoSuppressionMaxPolls: number;
   private timer?: ReturnType<typeof setInterval>;
   private running = false;
   private snapshotsByInstance = new Map<string, string>();
@@ -33,6 +35,7 @@ export class BridgeCapturePoller {
     string,
     { count: number; projectName: string; agentType: string; instanceId: string }
   >();
+  private promptEchoSuppressedPollsByInstance = new Map<string, number>();
 
   constructor(private deps: BridgeCapturePollerDeps) {
     this.intervalMs = this.resolveIntervalMs(deps.intervalMs);
@@ -40,6 +43,8 @@ export class BridgeCapturePoller {
     this.codexInitialQuietPendingPollThreshold = this.resolveCodexInitialQuietPendingPollThreshold();
     this.longOutputThreadThreshold = this.resolveLongOutputThreadThreshold();
     this.stalePendingAlertMs = this.resolveStalePendingAlertMs();
+    this.promptEchoFilterEnabled = this.resolvePromptEchoFilterEnabled();
+    this.promptEchoSuppressionMaxPolls = this.resolvePromptEchoSuppressionMaxPolls();
   }
 
   start(): void {
@@ -62,6 +67,7 @@ export class BridgeCapturePoller {
     this.stalePendingAlertStageByInstance.clear();
     this.completionCandidatesByInstance.clear();
     this.quietPendingPollsByInstance.clear();
+    this.promptEchoSuppressedPollsByInstance.clear();
   }
 
   private resolveIntervalMs(configured?: number): number {
@@ -109,6 +115,23 @@ export class BridgeCapturePoller {
       return Math.trunc(fromEnv);
     }
     return 60000;
+  }
+
+  private resolvePromptEchoFilterEnabled(): boolean {
+    const raw = process.env.AGENT_DISCORD_CAPTURE_FILTER_PROMPT_ECHO;
+    if (!raw) return true;
+    const normalized = raw.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+    return true;
+  }
+
+  private resolvePromptEchoSuppressionMaxPolls(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_CAPTURE_PROMPT_ECHO_MAX_POLLS || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 1 && fromEnv <= 20) {
+      return Math.trunc(fromEnv);
+    }
+    return 4;
   }
 
   private formatDuration(ms: number): string {
@@ -252,6 +275,7 @@ export class BridgeCapturePoller {
           if (typeof captureRaw !== 'string') continue;
           const current = cleanCapture(captureRaw);
           if (!current || current.trim().length === 0) {
+            this.promptEchoSuppressedPollsByInstance.delete(key);
             await this.handleQuietPending(
               key,
               routeInfo.pendingDepth,
@@ -277,6 +301,7 @@ export class BridgeCapturePoller {
           // First snapshot establishes baseline and avoids sending historical backlog.
           if (previous === undefined) {
             this.markCaptureMutation(key, now);
+            this.promptEchoSuppressedPollsByInstance.delete(key);
             await this.handleQuietPending(
               key,
               routeInfo.pendingDepth,
@@ -297,6 +322,7 @@ export class BridgeCapturePoller {
           }
 
           if (previous === current) {
+            this.promptEchoSuppressedPollsByInstance.delete(key);
             await this.handleQuietPending(
               key,
               routeInfo.pendingDepth,
@@ -324,22 +350,95 @@ export class BridgeCapturePoller {
             previous,
             current,
           );
-          const normalizedForPendingPrompt = this.stripPendingPromptEcho(
-            project.projectName,
-            instance.agentType,
-            instance.instanceId,
-            routeInfo.pendingDepth,
-            delta,
-          );
+          const normalizedForPendingPrompt = this.promptEchoFilterEnabled
+            ? this.stripPendingPromptEcho(
+                project.projectName,
+                instance.agentType,
+                instance.instanceId,
+                routeInfo.pendingDepth,
+                delta,
+              )
+            : delta;
           const trimmedDelta = normalizedForPendingPrompt.trim();
           if (trimmedDelta.length === 0) {
             const suppressedByPromptEcho = delta.trim().length > 0;
             if (suppressedByPromptEcho) {
-              // Treat prompt-echo-only frames as activity. If we count them as quiet,
-              // pending requests can complete before real assistant output arrives.
-              this.quietPendingPollsByInstance.delete(key);
+              const nextSuppressedCount = (this.promptEchoSuppressedPollsByInstance.get(key) || 0) + 1;
+              this.promptEchoSuppressedPollsByInstance.set(key, nextSuppressedCount);
+
+              if (nextSuppressedCount <= this.promptEchoSuppressionMaxPolls) {
+                // Treat prompt-echo-only frames as activity for a short buffer.
+                // This avoids premature completion before real assistant output.
+                this.quietPendingPollsByInstance.delete(key);
+                continue;
+              }
+
+              // Failsafe: after repeated suppressions, stop swallowing deltas.
+              // This avoids "typing forever" when filtering is too aggressive.
+              this.promptEchoSuppressedPollsByInstance.delete(key);
+              const outputChannelId = routeInfo.channelId;
+              if (!outputChannelId) {
+                await this.handleQuietPending(
+                  key,
+                  routeInfo.pendingDepth,
+                  project.projectName,
+                  instance.agentType,
+                  instance.instanceId,
+                );
+                await this.maybeSendStalePendingAlert({
+                  key,
+                  pendingDepth: routeInfo.pendingDepth,
+                  channelId: routeInfo.channelId || instance.channelId,
+                  projectName: project.projectName,
+                  agentType: instance.agentType,
+                  instanceId: instance.instanceId,
+                  now,
+                });
+                continue;
+              }
+
+              const fallbackSent = await this.sendOutput(outputChannelId, delta.trim());
+              if (fallbackSent) {
+                this.quietPendingPollsByInstance.delete(key);
+                if (routeInfo.pendingDepth > 0) {
+                  this.completionCandidatesByInstance.set(key, {
+                    projectName: project.projectName,
+                    agentType: instance.agentType,
+                    instanceId: instance.instanceId,
+                  });
+                } else {
+                  this.completionCandidatesByInstance.delete(key);
+                }
+                await this.maybeSendStalePendingAlert({
+                  key,
+                  pendingDepth: routeInfo.pendingDepth,
+                  channelId: routeInfo.channelId || instance.channelId,
+                  projectName: project.projectName,
+                  agentType: instance.agentType,
+                  instanceId: instance.instanceId,
+                  now,
+                });
+              } else {
+                await this.handleQuietPending(
+                  key,
+                  routeInfo.pendingDepth,
+                  project.projectName,
+                  instance.agentType,
+                  instance.instanceId,
+                );
+                await this.maybeSendStalePendingAlert({
+                  key,
+                  pendingDepth: routeInfo.pendingDepth,
+                  channelId: routeInfo.channelId || instance.channelId,
+                  projectName: project.projectName,
+                  agentType: instance.agentType,
+                  instanceId: instance.instanceId,
+                  now,
+                });
+              }
               continue;
             }
+            this.promptEchoSuppressedPollsByInstance.delete(key);
             await this.handleQuietPending(
               key,
               routeInfo.pendingDepth,
@@ -350,6 +449,7 @@ export class BridgeCapturePoller {
             continue;
           }
 
+          this.promptEchoSuppressedPollsByInstance.delete(key);
           const outputChannelId = routeInfo.channelId;
           if (!outputChannelId) continue;
 

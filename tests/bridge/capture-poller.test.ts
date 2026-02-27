@@ -34,12 +34,16 @@ describe('BridgeCapturePoller', () => {
     vi.useFakeTimers();
     delete process.env.AGENT_DISCORD_CAPTURE_PENDING_INITIAL_QUIET_POLLS_CODEX;
     delete process.env.AGENT_DISCORD_CAPTURE_STALE_ALERT_MS;
+    delete process.env.AGENT_DISCORD_CAPTURE_FILTER_PROMPT_ECHO;
+    delete process.env.AGENT_DISCORD_CAPTURE_PROMPT_ECHO_MAX_POLLS;
   });
 
   afterEach(() => {
     vi.useRealTimers();
     delete process.env.AGENT_DISCORD_CAPTURE_PENDING_INITIAL_QUIET_POLLS_CODEX;
     delete process.env.AGENT_DISCORD_CAPTURE_STALE_ALERT_MS;
+    delete process.env.AGENT_DISCORD_CAPTURE_FILTER_PROMPT_ECHO;
+    delete process.env.AGENT_DISCORD_CAPTURE_PROMPT_ECHO_MAX_POLLS;
   });
 
   it('sends delta output for non-hook instances', async () => {
@@ -1107,6 +1111,110 @@ describe('BridgeCapturePoller', () => {
     await vi.advanceTimersByTimeAsync(300);
 
     expect(messaging.sendToChannel).toHaveBeenCalledWith('ch-1', assistantLine);
+
+    poller.stop();
+  });
+
+  it('can disable codex prompt-echo filtering via env', async () => {
+    process.env.AGENT_DISCORD_CAPTURE_FILTER_PROMPT_ECHO = 'false';
+
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'ch-1',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const echoedPromptTail = 'this is an intentionally long prompt suffix for pending echo filtering';
+    const tmux = createTmux([
+      'boot line',
+      ['boot line', echoedPromptTail].join('\n'),
+    ]);
+    const pendingTracker = {
+      getPendingChannel: vi.fn().mockReturnValue('ch-1'),
+      getPendingDepth: vi.fn().mockReturnValue(1),
+      getPendingPromptTail: vi.fn().mockReturnValue(echoedPromptTail),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      intervalMs: 300,
+    });
+
+    poller.start();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(messaging.sendToChannel).toHaveBeenCalledWith('ch-1', echoedPromptTail);
+
+    poller.stop();
+  });
+
+  it('falls back to sending delta after repeated prompt-echo suppressions', async () => {
+    process.env.AGENT_DISCORD_CAPTURE_PROMPT_ECHO_MAX_POLLS = '2';
+
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'ch-1',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const echoedLine1 = 'this is an intentionally long prompt suffix for pending echo filtering frame one 1234567890';
+    const echoedLine2 = 'this is an intentionally long prompt suffix for pending echo filtering frame two 1234567890';
+    const echoedLine3 = 'this is an intentionally long prompt suffix for pending echo filtering frame three 1234567890';
+    const tmux = createTmux([
+      'boot line',
+      ['boot line', echoedLine1].join('\n'),
+      ['boot line', echoedLine2].join('\n'),
+      ['boot line', echoedLine3].join('\n'),
+    ]);
+    const pendingTracker = {
+      getPendingChannel: vi.fn().mockReturnValue('ch-1'),
+      getPendingDepth: vi.fn().mockReturnValue(2),
+      getPendingPromptTails: vi.fn().mockReturnValue([echoedLine1, echoedLine2, echoedLine3]),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      intervalMs: 300,
+    });
+
+    poller.start();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(messaging.sendToChannel).toHaveBeenCalledWith('ch-1', echoedLine3);
 
     poller.stop();
   });
