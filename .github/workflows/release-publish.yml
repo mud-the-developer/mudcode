@@ -51,8 +51,6 @@ jobs:
           - name: windows-x64
             runs_on: windows-latest
             full_only: true
-    if: ${{ matrix.full_only != true || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.profile == 'full') }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -66,12 +64,14 @@ jobs:
         run: bun install
 
       - name: Build host release binaries
+        if: ${{ matrix.full_only != true || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.profile == 'full') }}
         env:
           MUDCODE_NPM_SCOPE: ${{ github.event_name == 'workflow_dispatch' && inputs.scope || '@mudramo' }}
           MUDCODE_RS_SKIP_LOCAL_BUILD: "1"
         run: bun run build:release:binaries:host
 
       - name: Upload release fragment
+        if: ${{ matrix.full_only != true || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.profile == 'full') }}
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.name }}
