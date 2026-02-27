@@ -40,6 +40,7 @@ export class BridgeCapturePoller {
   >();
   private promptEchoSuppressedPollsByInstance = new Map<string, number>();
   private bufferedOutputByInstance = new Map<string, string>();
+  private bufferedOutputChannelByInstance = new Map<string, string>();
 
   constructor(private deps: BridgeCapturePollerDeps) {
     this.intervalMs = this.resolveIntervalMs(deps.intervalMs);
@@ -75,6 +76,7 @@ export class BridgeCapturePoller {
     this.quietPendingPollsByInstance.clear();
     this.promptEchoSuppressedPollsByInstance.clear();
     this.bufferedOutputByInstance.clear();
+    this.bufferedOutputChannelByInstance.clear();
   }
 
   private resolveIntervalMs(configured?: number): number {
@@ -262,13 +264,20 @@ export class BridgeCapturePoller {
     return sentAnyChunk;
   }
 
-  private shouldBufferUntilCompletion(agentType: string, pendingDepth: number): boolean {
-    return this.codexFinalOnlyModeEnabled && agentType === 'codex' && pendingDepth > 0;
+  private shouldBufferUntilCompletion(key: string, agentType: string, pendingDepth: number): boolean {
+    return (
+      this.codexFinalOnlyModeEnabled &&
+      agentType === 'codex' &&
+      (pendingDepth > 0 || this.bufferedOutputByInstance.has(key))
+    );
   }
 
-  private appendBufferedOutput(key: string, text: string): void {
+  private appendBufferedOutput(key: string, text: string, channelId?: string): void {
     const trimmed = text.trim();
     if (trimmed.length === 0) return;
+    if (channelId && !this.bufferedOutputChannelByInstance.has(key)) {
+      this.bufferedOutputChannelByInstance.set(key, channelId);
+    }
     const previous = this.bufferedOutputByInstance.get(key);
     if (!previous) {
       this.bufferedOutputByInstance.set(key, trimmed);
@@ -306,12 +315,15 @@ export class BridgeCapturePoller {
     const buffered = this.bufferedOutputByInstance.get(key);
     if (!buffered || buffered.trim().length === 0) {
       this.bufferedOutputByInstance.delete(key);
+      this.bufferedOutputChannelByInstance.delete(key);
       return false;
     }
-    if (!channelId) return false;
+    const targetChannelId = this.bufferedOutputChannelByInstance.get(key) || channelId;
+    if (!targetChannelId) return false;
 
-    const sent = await this.sendOutput(channelId, buffered);
+    const sent = await this.sendOutput(targetChannelId, buffered);
     this.bufferedOutputByInstance.delete(key);
+    this.bufferedOutputChannelByInstance.delete(key);
     return sent;
   }
 
@@ -325,8 +337,8 @@ export class BridgeCapturePoller {
     const trimmed = params.deltaText.trim();
     if (trimmed.length === 0) return false;
 
-    if (this.shouldBufferUntilCompletion(params.agentType, params.pendingDepth)) {
-      this.appendBufferedOutput(params.key, trimmed);
+    if (this.shouldBufferUntilCompletion(params.key, params.agentType, params.pendingDepth)) {
+      this.appendBufferedOutput(params.key, trimmed, params.channelId);
       return true;
     }
 
@@ -482,7 +494,10 @@ export class BridgeCapturePoller {
               // This avoids "typing forever" when filtering is too aggressive.
               this.promptEchoSuppressedPollsByInstance.delete(key);
               const outputChannelId = routeInfo.channelId;
-              if (!outputChannelId && !this.shouldBufferUntilCompletion(instance.agentType, routeInfo.pendingDepth)) {
+              if (
+                !outputChannelId &&
+                !this.shouldBufferUntilCompletion(key, instance.agentType, routeInfo.pendingDepth)
+              ) {
                 await this.handleQuietPending(
                   key,
                   routeInfo.pendingDepth,
@@ -568,7 +583,7 @@ export class BridgeCapturePoller {
 
           this.promptEchoSuppressedPollsByInstance.delete(key);
           const outputChannelId = routeInfo.channelId;
-          if (!outputChannelId && !this.shouldBufferUntilCompletion(instance.agentType, routeInfo.pendingDepth)) {
+          if (!outputChannelId && !this.shouldBufferUntilCompletion(key, instance.agentType, routeInfo.pendingDepth)) {
             continue;
           }
 
@@ -656,9 +671,6 @@ export class BridgeCapturePoller {
       this.isLikelyCodexReadyForInput(captureSnapshot)
     ) {
       await this.deps.pendingTracker.markCompleted(projectName, agentType, instanceId).catch(() => undefined);
-      if (this.codexFinalOnlyModeEnabled) {
-        await this.flushBufferedOutput(key, channelId);
-      }
       this.quietPendingPollsByInstance.delete(key);
       this.completionCandidatesByInstance.delete(key);
       return;
@@ -674,9 +686,6 @@ export class BridgeCapturePoller {
     const nextCount = (current?.count || 0) + 1;
     if (nextCount >= quietThreshold) {
       await this.deps.pendingTracker.markCompleted(projectName, agentType, instanceId).catch(() => undefined);
-      if (this.codexFinalOnlyModeEnabled && agentType === 'codex') {
-        await this.flushBufferedOutput(key, channelId);
-      }
       this.quietPendingPollsByInstance.delete(key);
       this.completionCandidatesByInstance.delete(key);
       return;

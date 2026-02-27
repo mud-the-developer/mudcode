@@ -253,6 +253,8 @@ describe('BridgeCapturePoller', () => {
       'boot line\nstep one\nstep two',
       'boot line\nstep one\nstep two',
       'boot line\nstep one\nstep two',
+      'boot line\nstep one\nstep two\nstep three',
+      'boot line\nstep one\nstep two\nstep three',
     ]);
 
     let pendingDepth = 1;
@@ -280,13 +282,22 @@ describe('BridgeCapturePoller', () => {
     await vi.advanceTimersByTimeAsync(300);
     expect(messaging.sendToChannel).not.toHaveBeenCalled();
 
-    // Two quiet polls trigger completion and final flush.
+    // Two quiet polls trigger completion only.
     await vi.advanceTimersByTimeAsync(300);
     await vi.advanceTimersByTimeAsync(300);
 
     expect(pendingTracker.markCompleted).toHaveBeenCalledWith('demo', 'codex', 'codex');
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
+
+    // Trailing redraw delta after completion is still buffered.
+    await vi.advanceTimersByTimeAsync(300);
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
+
+    // Final quiet poll flushes buffered output once.
+    await vi.advanceTimersByTimeAsync(300);
+
     expect(messaging.sendToChannel).toHaveBeenCalledTimes(1);
-    expect(messaging.sendToChannel).toHaveBeenCalledWith('thread-ch', 'step one\nstep two');
+    expect(messaging.sendToChannel).toHaveBeenCalledWith('thread-ch', 'step one\nstep two\nstep three');
 
     poller.stop();
   });
