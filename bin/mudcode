@@ -114,6 +114,30 @@ function needsBaselineX64() {
   return false;
 }
 
+function findMissingSharedLibraries(binaryPath) {
+  if (os.platform() !== 'linux') return [];
+
+  const result = childProcess.spawnSync('ldd', [binaryPath], {
+    encoding: 'utf-8',
+  });
+  if (result.error) return [];
+
+  const output = `${result.stdout || ''}\n${result.stderr || ''}`;
+  if (/not a dynamic executable|statically linked/i.test(output)) {
+    return [];
+  }
+
+  const missing = [];
+  for (const line of output.split('\n')) {
+    if (!/=>\s*not found/.test(line)) continue;
+    const match = line.match(/^\s*([^\s]+)\s+=>\s+not found/);
+    if (match && match[1]) {
+      missing.push(match[1]);
+    }
+  }
+  return missing;
+}
+
 function packageCandidates() {
   const platformMap = {
     darwin: 'darwin',
@@ -129,11 +153,31 @@ function packageCandidates() {
   const scopedBase = `${packageScope}/mudcode-${platform}-${arch}`;
 
   const candidates = [];
-  if (platform === 'linux' && isMuslLinux()) {
-    if (arch === 'x64' && needsBaselineX64()) candidates.push(`${scopedBase}-baseline-musl`);
-    candidates.push(`${scopedBase}-musl`);
+
+  if (platform === 'linux') {
+    const useMuslFirst = isMuslLinux();
+    const nativeCandidates = [];
+    const muslCandidates = [];
+
+    if (arch === 'x64' && needsBaselineX64()) {
+      nativeCandidates.push(`${scopedBase}-baseline`);
+      muslCandidates.push(`${scopedBase}-baseline-musl`);
+    }
+
+    nativeCandidates.push(scopedBase);
+    muslCandidates.push(`${scopedBase}-musl`);
+
+    if (useMuslFirst) {
+      candidates.push(...muslCandidates, ...nativeCandidates);
+    } else {
+      candidates.push(...nativeCandidates, ...muslCandidates);
+    }
+    return candidates;
   }
-  if (arch === 'x64' && needsBaselineX64()) candidates.push(`${scopedBase}-baseline`);
+
+  if (arch === 'x64' && needsBaselineX64()) {
+    candidates.push(`${scopedBase}-baseline`);
+  }
   candidates.push(scopedBase);
   return candidates;
 }
@@ -146,6 +190,13 @@ function findPlatformBinary() {
       const packageDir = path.dirname(packageJsonPath);
       const binaryPath = path.join(packageDir, 'bin', binaryName);
       if (fs.existsSync(binaryPath)) {
+        const missingLibs = findMissingSharedLibraries(binaryPath);
+        if (missingLibs.length > 0) {
+          console.warn(
+            `[mudcode] Skipping ${pkg}: missing shared libraries (${missingLibs.join(', ')}). Trying next candidate...`,
+          );
+          continue;
+        }
         return { binaryPath, packageDir };
       }
     } catch {
