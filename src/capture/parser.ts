@@ -17,7 +17,9 @@ export function stripAnsi(text: string): string {
  * Clean capture output: strip ANSI, trim trailing whitespace/blank lines
  */
 export function cleanCapture(text: string): string {
-  const stripped = stripAnsi(text);
+  const stripped = stripAnsi(text)
+    .replace(/\r\n?/g, '\n')
+    .replace(/\u0000/g, '');
   // Remove trailing blank lines but keep content structure
   const lines = stripped.split('\n');
   while (lines.length > 0 && lines[lines.length - 1].trim() === '') {

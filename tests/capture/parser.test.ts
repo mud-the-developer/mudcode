@@ -71,6 +71,11 @@ describe('cleanCapture', () => {
     const input = '\x1B[1mbold\x1B[0m\n\x1B[31mred\x1B[0m\n\n';
     expect(cleanCapture(input)).toBe('bold\nred');
   });
+
+  it('normalizes CRLF/CR line endings and strips NUL bytes', () => {
+    const input = 'line1\r\nline2\rline3\u0000\r\n\r\n';
+    expect(cleanCapture(input)).toBe('line1\nline2\nline3');
+  });
 });
 
 describe('splitForDiscord', () => {

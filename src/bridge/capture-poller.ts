@@ -22,6 +22,7 @@ export class BridgeCapturePoller {
   private readonly stalePendingAlertMs: number;
   private readonly promptEchoFilterEnabled: boolean;
   private readonly promptEchoSuppressionMaxPolls: number;
+  private readonly redrawFallbackTailLines: number;
   private timer?: ReturnType<typeof setInterval>;
   private running = false;
   private snapshotsByInstance = new Map<string, string>();
@@ -45,6 +46,7 @@ export class BridgeCapturePoller {
     this.stalePendingAlertMs = this.resolveStalePendingAlertMs();
     this.promptEchoFilterEnabled = this.resolvePromptEchoFilterEnabled();
     this.promptEchoSuppressionMaxPolls = this.resolvePromptEchoSuppressionMaxPolls();
+    this.redrawFallbackTailLines = this.resolveRedrawFallbackTailLines();
   }
 
   start(): void {
@@ -132,6 +134,14 @@ export class BridgeCapturePoller {
       return Math.trunc(fromEnv);
     }
     return 4;
+  }
+
+  private resolveRedrawFallbackTailLines(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_CAPTURE_REDRAW_TAIL_LINES || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 10 && fromEnv <= 400) {
+      return Math.trunc(fromEnv);
+    }
+    return 60;
   }
 
   private formatDuration(ms: number): string {
@@ -714,11 +724,11 @@ export class BridgeCapturePoller {
     }
 
     if (foundTailAnchorOnly) {
-      return currLines.slice(Math.max(0, currLines.length - 20)).join('\n');
+      return currLines.slice(Math.max(0, currLines.length - this.redrawFallbackTailLines)).join('\n');
     }
 
     // As a last resort for full-screen redraws, send only the tail.
-    return currLines.slice(Math.max(0, currLines.length - 20)).join('\n');
+    return currLines.slice(Math.max(0, currLines.length - this.redrawFallbackTailLines)).join('\n');
   }
 
   private normalizeDeltaForAgent(

@@ -36,6 +36,7 @@ describe('BridgeCapturePoller', () => {
     delete process.env.AGENT_DISCORD_CAPTURE_STALE_ALERT_MS;
     delete process.env.AGENT_DISCORD_CAPTURE_FILTER_PROMPT_ECHO;
     delete process.env.AGENT_DISCORD_CAPTURE_PROMPT_ECHO_MAX_POLLS;
+    delete process.env.AGENT_DISCORD_CAPTURE_REDRAW_TAIL_LINES;
   });
 
   afterEach(() => {
@@ -44,6 +45,7 @@ describe('BridgeCapturePoller', () => {
     delete process.env.AGENT_DISCORD_CAPTURE_STALE_ALERT_MS;
     delete process.env.AGENT_DISCORD_CAPTURE_FILTER_PROMPT_ECHO;
     delete process.env.AGENT_DISCORD_CAPTURE_PROMPT_ECHO_MAX_POLLS;
+    delete process.env.AGENT_DISCORD_CAPTURE_REDRAW_TAIL_LINES;
   });
 
   it('sends delta output for non-hook instances', async () => {
@@ -735,6 +737,52 @@ describe('BridgeCapturePoller', () => {
     await vi.advanceTimersByTimeAsync(300);
 
     expect(messaging.sendToChannel).toHaveBeenCalledWith('ch-1', 'assistant: render from full-screen redraw');
+
+    poller.stop();
+  });
+
+  it('keeps assistant lines in redraw fallback tail when no anchor matches', async () => {
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        instances: {
+          claude: {
+            instanceId: 'claude',
+            agentType: 'claude',
+            tmuxWindow: 'demo-claude',
+            channelId: 'ch-1',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const previous = Array.from({ length: 120 }, (_, i) => `old-line-${i}`).join('\n');
+    const currentLines = [
+      ...Array.from({ length: 30 }, (_, i) => `new-head-${i}`),
+      'assistant: ubuntu redraw fallback should include this line',
+      ...Array.from({ length: 45 }, (_, i) => `new-tail-${i}`),
+    ];
+    const current = currentLines.join('\n');
+    const tmux = createTmux([previous, current]);
+    const pendingTracker = createPendingTracker();
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      intervalMs: 300,
+    });
+
+    poller.start();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(300);
+
+    const joinedPayload = messaging.sendToChannel.mock.calls.map((args: any[]) => String(args[1] ?? '')).join('\n');
+    expect(joinedPayload).toContain('assistant: ubuntu redraw fallback should include this line');
 
     poller.stop();
   });
