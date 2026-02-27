@@ -337,6 +337,17 @@ export class BridgeCapturePoller {
     return footerNearBottom;
   }
 
+  private hasCodexWorkingMarker(captureSnapshot: string): boolean {
+    const lines = captureSnapshot
+      .split('\n')
+      .map((line) => line.replace(/\s+/g, ' ').trim().toLowerCase())
+      .filter((line) => line.length > 0);
+    if (lines.length === 0) return false;
+
+    const tail = lines.slice(-24);
+    return tail.some((line) => /\besc to interrupt\b/.test(line));
+  }
+
   private async flushBufferedOutput(key: string, channelId?: string): Promise<boolean> {
     const buffered = this.bufferedOutputByInstance.get(key);
     if (!buffered || buffered.trim().length === 0) {
@@ -357,13 +368,21 @@ export class BridgeCapturePoller {
     key: string;
     agentType: string;
     pendingDepth: number;
+    codexWorkingHint?: boolean;
     channelId?: string;
     deltaText: string;
   }): Promise<boolean> {
     const trimmed = params.deltaText.trim();
     if (trimmed.length === 0) return false;
 
-    if (this.shouldBufferUntilCompletion(params.key, params.agentType, params.pendingDepth)) {
+    const shouldBuffer =
+      this.shouldBufferUntilCompletion(params.key, params.agentType, params.pendingDepth) ||
+      (
+        this.codexFinalOnlyModeEnabled &&
+        params.agentType === 'codex' &&
+        params.codexWorkingHint === true
+      );
+    if (shouldBuffer) {
       this.appendBufferedOutput(params.key, trimmed, params.channelId);
       return true;
     }
@@ -493,6 +512,8 @@ export class BridgeCapturePoller {
             previous,
             current,
           );
+          const codexWorkingHint =
+            instance.agentType === 'codex' && this.hasCodexWorkingMarker(current);
           const normalizedForPendingPrompt = this.promptEchoFilterEnabled
             ? this.stripPendingPromptEcho(
                 project.projectName,
@@ -549,6 +570,7 @@ export class BridgeCapturePoller {
                 key,
                 agentType: instance.agentType,
                 pendingDepth: routeInfo.pendingDepth,
+                codexWorkingHint,
                 channelId: outputChannelId,
                 deltaText: delta,
               });
@@ -617,6 +639,7 @@ export class BridgeCapturePoller {
             key,
             agentType: instance.agentType,
             pendingDepth: routeInfo.pendingDepth,
+            codexWorkingHint,
             channelId: outputChannelId,
             deltaText: trimmedDelta,
           });
@@ -681,6 +704,16 @@ export class BridgeCapturePoller {
     captureSnapshot?: string,
   ): Promise<void> {
     if (pendingDepth <= 0) {
+      if (
+        this.codexFinalOnlyModeEnabled &&
+        agentType === 'codex' &&
+        typeof captureSnapshot === 'string' &&
+        this.hasCodexWorkingMarker(captureSnapshot)
+      ) {
+        // Tracker may temporarily desync to depth=0 while Codex is still working.
+        // Keep final-only buffer until the working marker disappears.
+        return;
+      }
       this.quietPendingPollsByInstance.delete(key);
       this.completionCandidatesByInstance.delete(key);
       if (this.codexFinalOnlyModeEnabled && agentType === 'codex') {
@@ -690,6 +723,15 @@ export class BridgeCapturePoller {
     }
 
     const hasOutputCandidate = this.completionCandidatesByInstance.has(key);
+    const codexStillWorking =
+      agentType === 'codex' &&
+      typeof captureSnapshot === 'string' &&
+      this.hasCodexWorkingMarker(captureSnapshot);
+    if (codexStillWorking) {
+      // Do not auto-complete while Codex still indicates active processing.
+      this.quietPendingPollsByInstance.delete(key);
+      return;
+    }
     if (
       agentType === 'codex' &&
       hasOutputCandidate &&

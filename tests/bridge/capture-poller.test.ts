@@ -302,6 +302,199 @@ describe('BridgeCapturePoller', () => {
     poller.stop();
   });
 
+  it('does not complete codex pending while Esc-to-interrupt marker is visible', async () => {
+    process.env.AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY = '1';
+
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'parent-ch',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const workingFrame = [
+      'boot line',
+      'assistant: partial answer',
+      '• Working (12s • esc to interrupt)',
+    ].join('\n');
+    const tmux = createTmux([
+      'boot line',
+      'boot line\nassistant: partial answer',
+      workingFrame,
+      workingFrame,
+      workingFrame,
+    ]);
+
+    let pendingDepth = 1;
+    const pendingTracker = {
+      getPendingChannel: vi.fn().mockImplementation(() => (pendingDepth > 0 ? 'thread-ch' : undefined)),
+      getPendingDepth: vi.fn().mockImplementation(() => pendingDepth),
+      markCompleted: vi.fn().mockImplementation(async () => {
+        pendingDepth = 0;
+      }),
+    } as any;
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      intervalMs: 300,
+    });
+
+    poller.start();
+    await Promise.resolve();
+
+    // First visible assistant output gets buffered.
+    await vi.advanceTimersByTimeAsync(300);
+    // Working-marker quiet polls should not complete pending.
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(pendingTracker.markCompleted).not.toHaveBeenCalled();
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
+
+    poller.stop();
+  });
+
+  it('buffers codex output in final-only mode even when pending depth is 0 while working marker is present', async () => {
+    process.env.AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY = '1';
+
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'parent-ch',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const tmux = createTmux([
+      'boot line',
+      ['boot line', 'assistant: step one', '• Working (2s • esc to interrupt)'].join('\n'),
+      ['boot line', 'assistant: step one', '• Working (3s • esc to interrupt)'].join('\n'),
+      ['boot line', 'assistant: step one', 'assistant: step two', '• Working (4s • esc to interrupt)'].join('\n'),
+      ['boot line', 'assistant: step one', 'assistant: step two', '›'].join('\n'),
+      ['boot line', 'assistant: step one', 'assistant: step two', '›'].join('\n'),
+    ]);
+    const pendingTracker = {
+      getPendingChannel: vi.fn().mockReturnValue(undefined),
+      getPendingDepth: vi.fn().mockReturnValue(0),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      intervalMs: 300,
+    });
+
+    poller.start();
+    await Promise.resolve();
+
+    // While working marker is visible, no output should leak.
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
+
+    // Marker disappears; buffered final content is flushed once.
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(messaging.sendToChannel).toHaveBeenCalledTimes(1);
+    expect(messaging.sendToChannel).toHaveBeenCalledWith('parent-ch', 'assistant: step one\nassistant: step two');
+
+    poller.stop();
+  });
+
+  it('does not flush buffered final-only output when pending drops to 0 but working marker remains', async () => {
+    process.env.AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY = '1';
+
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'parent-ch',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const tmux = createTmux([
+      'boot line',
+      'boot line\nassistant: intro',
+      ['boot line', 'assistant: intro', '• Working (5s • esc to interrupt)'].join('\n'),
+      ['boot line', 'assistant: intro', '• Working (6s • esc to interrupt)'].join('\n'),
+      ['boot line', 'assistant: intro', 'assistant: final', '›'].join('\n'),
+      ['boot line', 'assistant: intro', 'assistant: final', '›'].join('\n'),
+    ]);
+
+    let pendingDepth = 1;
+    let depthReads = 0;
+    const pendingTracker = {
+      getPendingChannel: vi.fn().mockImplementation(() => (pendingDepth > 0 ? 'thread-ch' : undefined)),
+      getPendingDepth: vi.fn().mockImplementation(() => {
+        depthReads += 1;
+        if (depthReads >= 3) pendingDepth = 0; // simulate tracker desync/drop during processing
+        return pendingDepth;
+      }),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      intervalMs: 300,
+    });
+
+    poller.start();
+    await Promise.resolve();
+
+    await vi.advanceTimersByTimeAsync(300); // buffer intro
+    await vi.advanceTimersByTimeAsync(300); // pending drops to 0 + working marker
+    await vi.advanceTimersByTimeAsync(300); // still working marker
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(300); // marker removed, delta buffered
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(300); // quiet flush
+
+    expect(messaging.sendToChannel).toHaveBeenCalledTimes(1);
+    expect(messaging.sendToChannel).toHaveBeenCalledWith('thread-ch', 'assistant: intro\nassistant: final');
+
+    poller.stop();
+  });
+
   it('keeps pending route until output stays quiet for threshold polls', async () => {
     const stateManager = createStateManager([
       {
