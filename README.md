@@ -1,17 +1,17 @@
 # Mudcode
 
-Bridge AI agent CLIs to Discord/Slack using tmux.
+Run AI agent CLIs in `tmux` and bridge them to Discord or Slack.
 
 [한국어](README.ko.md)
 
-## What Mudcode Does
+## What It Does
 
-- Runs your AI CLI in tmux (one window per project instance)
-- Relays agent output to Discord/Slack via hook server
-- Routes chat input back to the tmux pane
-- Manages project/channel/session lifecycle from one CLI
+- Runs one agent instance per `tmux` window
+- Sends agent output to Discord/Slack
+- Routes chat input back into the correct pane
+- Manages project/instance lifecycle from one CLI
 
-Supported agent adapters:
+Supported adapters:
 
 - Claude Code
 - Gemini CLI
@@ -20,99 +20,108 @@ Supported agent adapters:
 
 ## Requirements
 
-- Bun `>=1.3`
-- tmux `>=3.0`
+- Bun `>= 1.3`
+- tmux `>= 3.0`
 - Discord bot token (or Slack bot/app tokens)
 - At least one supported agent CLI installed locally
 
 ## Install
 
+Recommended (global install with Bun):
+
 ```bash
-npm install -g @mudramo/mudcode
-# or
 bun add -g @mudramo/mudcode
 ```
 
-Binary installer:
+Alternative (npm):
 
 ```bash
-curl -fsSL https://mudcode.chat/install | bash
+npm install -g @mudramo/mudcode
 ```
 
-## Quick Start
+Verify:
+
+```bash
+mudcode --version
+```
+
+## First-Time Setup
+
+1. Configure platform tokens:
 
 ```bash
 mudcode onboard
-cd ~/projects/my-app
-mudcode new
 ```
 
-Useful variants:
+2. Move to your project and create an instance:
 
 ```bash
-mudcode new claude
-mudcode new codex --instance codex-2
-mudcode attach my-app --instance codex-2
-mudcode stop my-app --instance codex-2
+cd ~/projects/my-app
+mudcode new codex
+```
+
+3. Attach when needed:
+
+```bash
+mudcode attach my-app --instance codex
 ```
 
 ## Core Commands
 
-- `mudcode tui`: interactive terminal UI (default command)
-- `mudcode onboard`: one-time onboarding
-- `mudcode new [agent]`: create/resume project instance quickly
-- `mudcode daemon <start|stop|status|restart>`: daemon lifecycle
-- `mudcode list`: list projects/instances
-- `mudcode status`: show config + tmux/project status
-- `mudcode health [--json]`: run one-shot diagnostics (config/daemon/tmux/channel mapping)
-- `mudcode attach [project]`: attach to tmux session/window
-- `mudcode stop [project]`: stop project or one instance
-- `mudcode config --show`: inspect current config
-- `mudcode agents`: list detected agent adapters
+- `mudcode tui`: open interactive UI
+- `mudcode new [agent]`: create/resume an instance quickly
+- `mudcode list`: list projects and instances
+- `mudcode status`: show config + runtime status
+- `mudcode health [--json]`: run diagnostics
+- `mudcode daemon <start|stop|status|restart>`: manage daemon
+- `mudcode stop [project] --instance <id>`: stop one instance
+- `mudcode config --show`: print current config
 - `mudcode uninstall`: remove mudcode from machine
 
-Run help for full options:
+## Discord Runtime Commands
+
+Use these inside mapped channels/threads:
+
+- `/retry`
+- `/health`
+- `/snapshot`
+- `/enter [count]`, `/tab [count]`, `/esc [count]`, `/up [count]`, `/down [count]`
+- `/q` (close session + channel)
+- `/qw` (archive channel + close session)
+
+## Upgrade / Remove
+
+Upgrade:
 
 ```bash
-mudcode --help
-mudcode new --help
-mudcode config --help
+bun add -g @mudramo/mudcode@latest
+# or
+npm install -g @mudramo/mudcode@latest
 ```
 
-## Bun Release Flow
-
-From `mudcode/`:
+Remove:
 
 ```bash
-npm run release:verify:bun
-npm run release:publish:bun
+mudcode uninstall
 ```
 
-Linux profile only:
+## Installation Troubleshooting
 
-```bash
-npm run release:verify:bun:linux
-npm run release:publish:bun:linux
-```
+- `mudcode: command not found`: ensure Bun global bin is in PATH (`~/.bun/bin`) or reinstall globally.
+- `tmux not found`: install tmux first (`brew install tmux` on macOS, `sudo apt install tmux` on Ubuntu).
+- Platform binary missing: update to latest package; if still missing, run from source on that machine.
 
-Host-only (single target on current machine):
+## Release Automation
 
-```bash
-npm run release:verify:bun:single
-npm run release:publish:bun:single
-```
+Release is automated in GitHub Actions.
 
-## Development
+- Push to `main`: auto patch version bump + tag creation
+- Tag push (`v*`): publish workflow runs with `full` profile (Linux/macOS/Windows targets)
 
-```bash
-bun install
-npm run typecheck
-npm test
-npm run test:e2e:tmux
-npm run ci:local
-npm run migration:check
-npm run build
-```
+Workflow files:
+
+- `.github/workflows/auto-version-bump.yml`
+- `.github/workflows/release-publish.yml`
 
 ## Docs
 

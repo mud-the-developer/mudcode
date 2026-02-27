@@ -1,17 +1,17 @@
 # Mudcode
 
-AI 에이전트 CLI를 tmux 기반으로 Discord/Slack에 연결하는 브리지입니다.
+AI 에이전트 CLI를 `tmux`에서 실행하고 Discord/Slack과 연결하는 브리지입니다.
 
 English: [README.md](README.md)
 
 ## Mudcode가 하는 일
 
-- AI CLI를 tmux에서 실행 (프로젝트 인스턴스별 윈도우)
-- 훅 서버를 통해 에이전트 출력을 Discord/Slack으로 전달
-- 채팅 입력을 tmux pane으로 다시 라우팅
-- 프로젝트/채널/세션 수명주기를 CLI에서 관리
+- 인스턴스별로 `tmux` 윈도우를 운영
+- 에이전트 출력을 Discord/Slack으로 전달
+- 채팅 입력을 올바른 pane으로 다시 라우팅
+- 프로젝트/인스턴스 수명주기를 단일 CLI로 관리
 
-지원 에이전트:
+지원 어댑터:
 
 - Claude Code
 - Gemini CLI
@@ -20,99 +20,108 @@ English: [README.md](README.md)
 
 ## 요구 사항
 
-- Bun `>=1.3`
-- tmux `>=3.0`
+- Bun `>= 1.3`
+- tmux `>= 3.0`
 - Discord 봇 토큰(또는 Slack bot/app 토큰)
-- 지원되는 AI CLI 중 최소 1개 로컬 설치
+- 지원되는 에이전트 CLI 최소 1개 로컬 설치
 
 ## 설치
 
+권장 (Bun 글로벌 설치):
+
 ```bash
-npm install -g @mudramo/mudcode
-# 또는
 bun add -g @mudramo/mudcode
 ```
 
-바이너리 설치:
+대안 (npm):
 
 ```bash
-curl -fsSL https://mudcode.chat/install | bash
+npm install -g @mudramo/mudcode
 ```
 
-## 빠른 시작
+설치 확인:
+
+```bash
+mudcode --version
+```
+
+## 최초 설정
+
+1. 플랫폼 토큰 설정:
 
 ```bash
 mudcode onboard
-cd ~/projects/my-app
-mudcode new
 ```
 
-자주 쓰는 변형:
+2. 프로젝트 디렉토리에서 인스턴스 생성:
 
 ```bash
-mudcode new claude
-mudcode new codex --instance codex-2
-mudcode attach my-app --instance codex-2
-mudcode stop my-app --instance codex-2
+cd ~/projects/my-app
+mudcode new codex
+```
+
+3. 필요할 때 세션 연결:
+
+```bash
+mudcode attach my-app --instance codex
 ```
 
 ## 핵심 명령어
 
-- `mudcode tui`: 인터랙티브 터미널 UI (기본 명령)
-- `mudcode onboard`: 초기 1회 설정
-- `mudcode new [agent]`: 프로젝트 인스턴스 생성/재개
-- `mudcode daemon <start|stop|status|restart>`: 데몬 관리
+- `mudcode tui`: 인터랙티브 UI 실행
+- `mudcode new [agent]`: 인스턴스 생성/재개
 - `mudcode list`: 프로젝트/인스턴스 목록
-- `mudcode status`: 설정 + tmux/프로젝트 상태 확인
-- `mudcode health [--json]`: 설정/데몬/tmux/채널 매핑 진단 실행
-- `mudcode attach [project]`: tmux 세션/윈도우 연결
-- `mudcode stop [project]`: 프로젝트 또는 단일 인스턴스 중지
-- `mudcode config --show`: 현재 설정 확인
-- `mudcode agents`: 감지된 에이전트 어댑터 목록
+- `mudcode status`: 설정 + 런타임 상태
+- `mudcode health [--json]`: 진단 실행
+- `mudcode daemon <start|stop|status|restart>`: 데몬 관리
+- `mudcode stop [project] --instance <id>`: 특정 인스턴스 중지
+- `mudcode config --show`: 현재 설정 출력
 - `mudcode uninstall`: mudcode 제거
 
-상세 옵션은 도움말에서 확인:
+## Discord 런타임 명령
+
+매핑된 채널/스레드에서 사용:
+
+- `/retry`
+- `/health`
+- `/snapshot`
+- `/enter [count]`, `/tab [count]`, `/esc [count]`, `/up [count]`, `/down [count]`
+- `/q` (세션 + 채널 종료)
+- `/qw` (채널 아카이브 + 세션 종료)
+
+## 업그레이드 / 제거
+
+업그레이드:
 
 ```bash
-mudcode --help
-mudcode new --help
-mudcode config --help
+bun add -g @mudramo/mudcode@latest
+# 또는
+npm install -g @mudramo/mudcode@latest
 ```
 
-## Bun 배포 플로우
-
-`mudcode/` 디렉토리에서 실행:
+제거:
 
 ```bash
-npm run release:verify:bun
-npm run release:publish:bun
+mudcode uninstall
 ```
 
-Linux 전용 프로파일:
+## 설치 트러블슈팅
 
-```bash
-npm run release:verify:bun:linux
-npm run release:publish:bun:linux
-```
+- `mudcode: command not found`: Bun 글로벌 경로(`~/.bun/bin`)를 PATH에 추가하거나 글로벌 재설치
+- `tmux not found`: tmux 먼저 설치 (`brew install tmux`, `sudo apt install tmux`)
+- 플랫폼 바이너리 누락: 최신 버전으로 업데이트 후 재시도, 계속 실패하면 해당 머신에서 소스 실행
 
-현재 머신 단일 타깃 배포:
+## 릴리즈 자동화
 
-```bash
-npm run release:verify:bun:single
-npm run release:publish:bun:single
-```
+GitHub Actions로 릴리즈 자동화가 구성되어 있습니다.
 
-## 개발
+- `main` 푸시: patch 버전 자동 증가 + 태그 생성
+- 태그(`v*`) 푸시: `full` 프로필 배포 실행 (Linux/macOS/Windows 타깃)
 
-```bash
-bun install
-npm run typecheck
-npm test
-npm run test:e2e:tmux
-npm run ci:local
-npm run migration:check
-npm run build
-```
+워크플로 파일:
+
+- `.github/workflows/auto-version-bump.yml`
+- `.github/workflows/release-publish.yml`
 
 ## 문서
 
