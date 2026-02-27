@@ -19,6 +19,7 @@ export class BridgeCapturePoller {
   private readonly intervalMs: number;
   private readonly quietPendingPollThreshold: number;
   private readonly codexInitialQuietPendingPollThreshold: number;
+  private readonly codexFinalOnlyModeEnabled: boolean;
   private readonly longOutputThreadThreshold: number;
   private readonly stalePendingAlertMs: number;
   private readonly promptEchoFilterEnabled: boolean;
@@ -38,11 +39,13 @@ export class BridgeCapturePoller {
     { count: number; projectName: string; agentType: string; instanceId: string }
   >();
   private promptEchoSuppressedPollsByInstance = new Map<string, number>();
+  private bufferedOutputByInstance = new Map<string, string>();
 
   constructor(private deps: BridgeCapturePollerDeps) {
     this.intervalMs = this.resolveIntervalMs(deps.intervalMs);
     this.quietPendingPollThreshold = this.resolveQuietPendingPollThreshold();
     this.codexInitialQuietPendingPollThreshold = this.resolveCodexInitialQuietPendingPollThreshold();
+    this.codexFinalOnlyModeEnabled = this.resolveCodexFinalOnlyModeEnabled();
     this.longOutputThreadThreshold = this.resolveLongOutputThreadThreshold();
     this.stalePendingAlertMs = this.resolveStalePendingAlertMs();
     this.promptEchoFilterEnabled = this.resolvePromptEchoFilterEnabled();
@@ -71,6 +74,7 @@ export class BridgeCapturePoller {
     this.completionCandidatesByInstance.clear();
     this.quietPendingPollsByInstance.clear();
     this.promptEchoSuppressedPollsByInstance.clear();
+    this.bufferedOutputByInstance.clear();
   }
 
   private resolveIntervalMs(configured?: number): number {
@@ -102,6 +106,15 @@ export class BridgeCapturePoller {
     // Default: do not auto-complete codex pending before first visible output.
     // This avoids showing ✅ too early when codex is still thinking silently.
     return 0;
+  }
+
+  private resolveCodexFinalOnlyModeEnabled(): boolean {
+    const raw = process.env.AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY;
+    if (!raw) return false;
+    const normalized = raw.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+    return false;
   }
 
   private resolveLongOutputThreadThreshold(): number {
@@ -249,6 +262,78 @@ export class BridgeCapturePoller {
     return sentAnyChunk;
   }
 
+  private shouldBufferUntilCompletion(agentType: string, pendingDepth: number): boolean {
+    return this.codexFinalOnlyModeEnabled && agentType === 'codex' && pendingDepth > 0;
+  }
+
+  private appendBufferedOutput(key: string, text: string): void {
+    const trimmed = text.trim();
+    if (trimmed.length === 0) return;
+    const previous = this.bufferedOutputByInstance.get(key);
+    if (!previous) {
+      this.bufferedOutputByInstance.set(key, trimmed);
+      return;
+    }
+    this.bufferedOutputByInstance.set(key, `${previous}\n${trimmed}`);
+  }
+
+  private isLikelyCodexReadyForInput(captureSnapshot: string): boolean {
+    if (!captureSnapshot || captureSnapshot.trim().length === 0) return false;
+
+    const lines = captureSnapshot
+      .split('\n')
+      .map((line) => line.replace(/\s+/g, ' ').trim())
+      .filter((line) => line.length > 0);
+    if (lines.length === 0) return false;
+
+    const tail = lines.slice(-24);
+    if (tail.some((line) => /^esc to interrupt\b/i.test(line))) return false;
+
+    const promptPattern = /^›(?:\s.*)?$/;
+    const bottomSlice = tail.slice(-4);
+    const promptNearBottom = bottomSlice.some((line) => promptPattern.test(line));
+    if (!promptNearBottom) return false;
+
+    const lastLine = tail[tail.length - 1] || '';
+    if (promptPattern.test(lastLine)) return true;
+
+    // In Codex full-screen UI, footer often sits below the input prompt.
+    const footerNearBottom = bottomSlice.some((line) => this.isCodexUiStatusNoiseLine(line));
+    return footerNearBottom;
+  }
+
+  private async flushBufferedOutput(key: string, channelId?: string): Promise<boolean> {
+    const buffered = this.bufferedOutputByInstance.get(key);
+    if (!buffered || buffered.trim().length === 0) {
+      this.bufferedOutputByInstance.delete(key);
+      return false;
+    }
+    if (!channelId) return false;
+
+    const sent = await this.sendOutput(channelId, buffered);
+    this.bufferedOutputByInstance.delete(key);
+    return sent;
+  }
+
+  private async deliverDelta(params: {
+    key: string;
+    agentType: string;
+    pendingDepth: number;
+    channelId?: string;
+    deltaText: string;
+  }): Promise<boolean> {
+    const trimmed = params.deltaText.trim();
+    if (trimmed.length === 0) return false;
+
+    if (this.shouldBufferUntilCompletion(params.agentType, params.pendingDepth)) {
+      this.appendBufferedOutput(params.key, trimmed);
+      return true;
+    }
+
+    if (!params.channelId) return false;
+    return this.sendOutput(params.channelId, trimmed);
+  }
+
   private async pollOnce(): Promise<void> {
     if (this.running) return;
     this.running = true;
@@ -296,6 +381,8 @@ export class BridgeCapturePoller {
               project.projectName,
               instance.agentType,
               instance.instanceId,
+              routeInfo.channelId || instance.channelId,
+              current,
             );
             await this.maybeSendStalePendingAlert({
               key,
@@ -322,6 +409,8 @@ export class BridgeCapturePoller {
               project.projectName,
               instance.agentType,
               instance.instanceId,
+              routeInfo.channelId || instance.channelId,
+              current,
             );
             await this.maybeSendStalePendingAlert({
               key,
@@ -343,6 +432,8 @@ export class BridgeCapturePoller {
               project.projectName,
               instance.agentType,
               instance.instanceId,
+              routeInfo.channelId || instance.channelId,
+              current,
             );
             await this.maybeSendStalePendingAlert({
               key,
@@ -360,7 +451,7 @@ export class BridgeCapturePoller {
 
           const delta = this.normalizeDeltaForAgent(
             instance.agentType,
-            this.extractDelta(previous, current),
+            this.extractDelta(instance.agentType, previous, current),
             previous,
             current,
           );
@@ -391,13 +482,15 @@ export class BridgeCapturePoller {
               // This avoids "typing forever" when filtering is too aggressive.
               this.promptEchoSuppressedPollsByInstance.delete(key);
               const outputChannelId = routeInfo.channelId;
-              if (!outputChannelId) {
+              if (!outputChannelId && !this.shouldBufferUntilCompletion(instance.agentType, routeInfo.pendingDepth)) {
                 await this.handleQuietPending(
                   key,
                   routeInfo.pendingDepth,
                   project.projectName,
                   instance.agentType,
                   instance.instanceId,
+                  routeInfo.channelId || instance.channelId,
+                  current,
                 );
                 await this.maybeSendStalePendingAlert({
                   key,
@@ -411,7 +504,13 @@ export class BridgeCapturePoller {
                 continue;
               }
 
-              const fallbackSent = await this.sendOutput(outputChannelId, delta.trim());
+              const fallbackSent = await this.deliverDelta({
+                key,
+                agentType: instance.agentType,
+                pendingDepth: routeInfo.pendingDepth,
+                channelId: outputChannelId,
+                deltaText: delta,
+              });
               if (fallbackSent) {
                 this.quietPendingPollsByInstance.delete(key);
                 if (routeInfo.pendingDepth > 0) {
@@ -439,6 +538,8 @@ export class BridgeCapturePoller {
                   project.projectName,
                   instance.agentType,
                   instance.instanceId,
+                  routeInfo.channelId || instance.channelId,
+                  current,
                 );
                 await this.maybeSendStalePendingAlert({
                   key,
@@ -459,15 +560,25 @@ export class BridgeCapturePoller {
               project.projectName,
               instance.agentType,
               instance.instanceId,
+              routeInfo.channelId || instance.channelId,
+              current,
             );
             continue;
           }
 
           this.promptEchoSuppressedPollsByInstance.delete(key);
           const outputChannelId = routeInfo.channelId;
-          if (!outputChannelId) continue;
+          if (!outputChannelId && !this.shouldBufferUntilCompletion(instance.agentType, routeInfo.pendingDepth)) {
+            continue;
+          }
 
-          const sentAnyChunk = await this.sendOutput(outputChannelId, trimmedDelta);
+          const sentAnyChunk = await this.deliverDelta({
+            key,
+            agentType: instance.agentType,
+            pendingDepth: routeInfo.pendingDepth,
+            channelId: outputChannelId,
+            deltaText: trimmedDelta,
+          });
 
           if (sentAnyChunk) {
             this.quietPendingPollsByInstance.delete(key);
@@ -497,6 +608,8 @@ export class BridgeCapturePoller {
               project.projectName,
               instance.agentType,
               instance.instanceId,
+              routeInfo.channelId || instance.channelId,
+              current,
             );
             await this.maybeSendStalePendingAlert({
               key,
@@ -523,14 +636,34 @@ export class BridgeCapturePoller {
     projectName: string,
     agentType: string,
     instanceId: string,
+    channelId?: string,
+    captureSnapshot?: string,
   ): Promise<void> {
     if (pendingDepth <= 0) {
+      this.quietPendingPollsByInstance.delete(key);
+      this.completionCandidatesByInstance.delete(key);
+      if (this.codexFinalOnlyModeEnabled && agentType === 'codex') {
+        await this.flushBufferedOutput(key, channelId);
+      }
+      return;
+    }
+
+    const hasOutputCandidate = this.completionCandidatesByInstance.has(key);
+    if (
+      agentType === 'codex' &&
+      hasOutputCandidate &&
+      typeof captureSnapshot === 'string' &&
+      this.isLikelyCodexReadyForInput(captureSnapshot)
+    ) {
+      await this.deps.pendingTracker.markCompleted(projectName, agentType, instanceId).catch(() => undefined);
+      if (this.codexFinalOnlyModeEnabled) {
+        await this.flushBufferedOutput(key, channelId);
+      }
       this.quietPendingPollsByInstance.delete(key);
       this.completionCandidatesByInstance.delete(key);
       return;
     }
 
-    const hasOutputCandidate = this.completionCandidatesByInstance.has(key);
     const quietThreshold = this.resolveQuietCompletionThreshold(hasOutputCandidate, agentType);
     if (quietThreshold <= 0) {
       this.quietPendingPollsByInstance.delete(key);
@@ -541,6 +674,9 @@ export class BridgeCapturePoller {
     const nextCount = (current?.count || 0) + 1;
     if (nextCount >= quietThreshold) {
       await this.deps.pendingTracker.markCompleted(projectName, agentType, instanceId).catch(() => undefined);
+      if (this.codexFinalOnlyModeEnabled && agentType === 'codex') {
+        await this.flushBufferedOutput(key, channelId);
+      }
       this.quietPendingPollsByInstance.delete(key);
       this.completionCandidatesByInstance.delete(key);
       return;
@@ -646,7 +782,10 @@ export class BridgeCapturePoller {
   }
 
   private normalizePromptFragment(text: string): string {
-    return text.replace(/\s+/g, ' ').trim();
+    const compact = text.replace(/\s+/g, ' ').trim();
+    // Codex renders the input row with a leading prompt marker.
+    // Normalize it away so pending echo matching can use raw prompt text.
+    return compact.replace(/^›\s+/, '');
   }
 
   private isLikelyPromptEchoLine(promptNorm: string, normalizedLine: string): boolean {
@@ -699,7 +838,7 @@ export class BridgeCapturePoller {
     return [];
   }
 
-  private extractDelta(previous: string, current: string): string {
+  private extractDelta(agentType: string, previous: string, current: string): string {
     if (current.startsWith(previous)) {
       return current.slice(previous.length);
     }
@@ -709,7 +848,7 @@ export class BridgeCapturePoller {
       return current.slice(overlap);
     }
 
-    return this.extractDeltaByLineAnchor(previous, current);
+    return this.extractDeltaByLineAnchor(agentType, previous, current);
   }
 
   private longestSuffixPrefix(left: string, right: string): number {
@@ -724,7 +863,29 @@ export class BridgeCapturePoller {
     return 0;
   }
 
-  private extractDeltaByLineAnchor(previous: string, current: string): string {
+  private isTailAnchorLikelyUnstableForAgent(
+    agentType: string,
+    line: string,
+    anchorIndex: number,
+    totalLines: number,
+  ): boolean {
+    if (agentType !== 'codex') return false;
+
+    const distanceFromBottom = Math.max(0, totalLines - 1 - anchorIndex);
+    // The very last line in Codex is commonly HUD/footer noise.
+    if (distanceFromBottom === 0) return true;
+    if (distanceFromBottom > 3) return false;
+
+    const compact = line.replace(/\s+/g, ' ').trim();
+    if (compact.length === 0) return true;
+    if (this.isCodexUiStatusNoiseLine(compact)) return true;
+    if (/^esc to interrupt\b/i.test(compact)) return true;
+    if (/^›\s+/.test(compact)) return true;
+
+    return false;
+  }
+
+  private extractDeltaByLineAnchor(agentType: string, previous: string, current: string): string {
     const prevLines = previous.split('\n');
     const currLines = current.split('\n');
     if (currLines.length === 0) return '';
@@ -736,6 +897,10 @@ export class BridgeCapturePoller {
       if (line.trim().length === 0) continue;
       const anchor = currLines.lastIndexOf(line);
       if (anchor >= 0 && anchor < currLines.length - 1) {
+        if (this.isTailAnchorLikelyUnstableForAgent(agentType, line, anchor, currLines.length)) {
+          foundTailAnchorOnly = true;
+          continue;
+        }
         return currLines.slice(anchor + 1).join('\n');
       }
       if (anchor === currLines.length - 1) {
@@ -790,6 +955,8 @@ export class BridgeCapturePoller {
       if (trimmed.length === 0) return false;
       if (/^export AGENT_DISCORD_[A-Z_]+=/.test(trimmed)) return false;
       if (/^\$?\s*cd\s+".*"\s*&&\s*codex\b/.test(trimmed)) return false;
+      // Codex input row echo (e.g. "› Write tests for @filename") is not output.
+      if (/^›(?:\s.*)?$/.test(trimmed)) return false;
       if (this.isCodexUiProgressNoiseLine(trimmed)) return false;
       if (this.isCodexUiStatusNoiseLine(trimmed)) return false;
       return true;
@@ -830,6 +997,17 @@ export class BridgeCapturePoller {
     // Codex often renders transient progress lines while drafting.
     // These are not final user-facing output and should not be bridged.
     if (/^[•·]\s*(crafting|thinking|analyzing|analysis|planning|preparing|reviewing|searching|reading|writing|editing|running|checking|executing|building|debugging|investigating|summarizing|drafting)\b/i.test(compact)) {
+      return true;
+    }
+    if (/^[•·]\s*.+\([0-9smh\s]+\s*[•·]\s*esc to interrupt\)$/i.test(compact)) {
+      return true;
+    }
+    if (/^(?:[•·]\s*)?working\s*\(\d+\s*[smh]\s*[•·]\s*esc to interrupt\)$/i.test(compact)) {
+      return true;
+    }
+    // Strong fallback: any transient UI row that still contains this marker
+    // should be filtered, except explicit role-prefixed model messages.
+    if (/\besc to interrupt\b/i.test(compact) && !/^(assistant|system|user)\s*:/i.test(compact)) {
       return true;
     }
     if (/^esc to interrupt\b/i.test(compact)) return true;

@@ -586,30 +586,29 @@ async function runInteractiveStop(options: InteractiveLauncherOptions): Promise<
 }
 
 async function runInteractiveDaemonControl(): Promise<void> {
-  printInteractiveSection('🧰', 'Daemon Control', 'Manage daemon lifecycle. Restart can also clear stale tmux sessions.');
+  printInteractiveSection('🧰', 'Daemon Control', 'Manage daemon lifecycle. Restart keeps sessions by default.');
   console.log(chalk.white('\nDaemon actions:'));
   console.log(chalk.gray('  1) status'));
   console.log(chalk.gray('  2) start'));
-  console.log(chalk.gray('  3) restart'));
-  console.log(chalk.gray('  4) stop'));
-  const answer = await prompt(chalk.white('Select action [1-4]: '));
+  console.log(chalk.gray('  3) restart (keep sessions)'));
+  console.log(chalk.gray('  4) restart + clear managed tmux sessions'));
+  console.log(chalk.gray('  5) stop'));
+  const answer = await prompt(chalk.white('Select action [1-5]: '));
   const index = Number(answer.trim());
-  const actionMap: Record<number, 'status' | 'start' | 'restart' | 'stop'> = {
-    1: 'status',
-    2: 'start',
-    3: 'restart',
-    4: 'stop',
+  const actionMap: Record<number, { action: 'status' | 'start' | 'restart' | 'stop'; clearSession: boolean }> = {
+    1: { action: 'status', clearSession: false },
+    2: { action: 'start', clearSession: false },
+    3: { action: 'restart', clearSession: false },
+    4: { action: 'restart', clearSession: true },
+    5: { action: 'stop', clearSession: false },
   };
-  const action = actionMap[index];
-  if (!action) {
+  const selected = actionMap[index];
+  if (!selected) {
     console.log(chalk.yellow('⚠️ Invalid selection.'));
     return;
   }
 
-  const clearSession = action === 'restart'
-    ? await confirmYesNo(chalk.white('Clear managed tmux sessions before restart? [y/N]: '), false)
-    : false;
-  await daemonCommand(action, { clearSession });
+  await daemonCommand(selected.action, { clearSession: selected.clearSession });
 }
 
 function parseInteractiveBoundedInt(raw: string, fallback: number, min: number, max: number): number {
