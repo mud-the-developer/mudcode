@@ -23,7 +23,7 @@ on:
         description: release target profile
         required: true
         type: choice
-        default: linux
+        default: full
         options:
           - linux
           - full
@@ -51,7 +51,7 @@ jobs:
           - name: windows-x64
             runs_on: windows-latest
             full_only: true
-    if: ${{ matrix.full_only != true || (github.event_name == 'workflow_dispatch' && inputs.profile == 'full') }}
+    if: ${{ matrix.full_only != true || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.profile == 'full') }}
 
     steps:
       - name: Checkout
@@ -151,10 +151,10 @@ jobs:
       - name: Publish release packages (bun)
         env:
           MUDCODE_NPM_SCOPE: ${{ github.event_name == 'workflow_dispatch' && inputs.scope || '@mudramo' }}
-          MUDCODE_RELEASE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.profile || 'linux' }}
+          MUDCODE_RELEASE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.profile || 'full' }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          ARGS="--pm bun --skip-build --access public --tag ${{ github.event_name == 'workflow_dispatch' && inputs.tag || 'latest' }} --profile ${{ github.event_name == 'workflow_dispatch' && inputs.profile || 'linux' }}"
+          ARGS="--pm bun --skip-build --access public --tag ${{ github.event_name == 'workflow_dispatch' && inputs.tag || 'latest' }} --profile ${{ github.event_name == 'workflow_dispatch' && inputs.profile || 'full' }}"
           if [ "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}" = "true" ]; then
             ARGS="$ARGS --dry-run"
           fi
