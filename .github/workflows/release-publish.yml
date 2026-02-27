@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       scope:
-        description: npm scope (example: @your-npm-id)
+        description: "npm scope (example: @your-npm-id)"
         required: true
         default: "@mudramo"
       tag:
