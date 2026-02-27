@@ -78,6 +78,41 @@ mudcode attach my-app --instance codex
 - `mudcode config --show`: 현재 설정 출력
 - `mudcode uninstall`: mudcode 제거
 
+## 프롬프트 정제기 (Shadow 모드)
+
+강제 적용 전에 프롬프트 정제 효과를 안전하게 검증할 때 사용합니다.
+
+1. Shadow 모드 활성화:
+
+```bash
+mudcode config --prompt-refiner-mode shadow
+```
+
+2. (선택) 로그 경로 지정:
+
+```bash
+mudcode config --prompt-refiner-log-path ~/.mudcode/prompt-refiner-shadow.jsonl
+```
+
+3. 요약 리포트 생성:
+
+```bash
+bun run prompt-refiner:report
+```
+
+4. GEPA용 train/val 데이터셋 생성:
+
+```bash
+bun run prompt-refiner:export-gepa
+# 옵션 예시:
+# bun run prompt-refiner:export-gepa -- --val-ratio 0.2 --all
+```
+
+모드:
+- `off` (기본값): 비활성화
+- `shadow`: 정제 후보를 로그로만 저장, 실제 전송은 원문
+- `enforce`: 정제 결과를 실제 전송
+
 ## Discord 런타임 명령
 
 매핑된 채널/스레드에서 사용:

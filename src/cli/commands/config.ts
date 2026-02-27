@@ -12,6 +12,8 @@ export async function configCommand(options: {
   port?: string | number;
   defaultAgent?: string;
   opencodePermission?: 'allow' | 'default';
+  promptRefinerMode?: 'off' | 'shadow' | 'enforce';
+  promptRefinerLogPath?: string;
   slackBotToken?: string;
   slackAppToken?: string;
   platform?: string;
@@ -28,6 +30,8 @@ export async function configCommand(options: {
     console.log(chalk.gray(`   Hook Port: ${config.hookServerPort || 18470}`));
     console.log(chalk.gray(`   Default AI CLI: ${config.defaultAgentCli || '(not set)'}`));
     console.log(chalk.gray(`   OpenCode Permission Mode: ${config.opencode?.permissionMode || '(not set)'}`));
+    console.log(chalk.gray(`   Prompt Refiner Mode: ${config.promptRefiner?.mode || '(off)'}`));
+    console.log(chalk.gray(`   Prompt Refiner Log Path: ${config.promptRefiner?.logPath || '(default)'}`));
     console.log(chalk.gray(`   Keep Channel On Stop: ${getConfigValue('keepChannelOnStop') ? 'on' : 'off'}`));
     console.log(chalk.cyan('\n🤖 Registered Agents:\n'));
     for (const adapter of agentRegistry.getAll()) {
@@ -126,6 +130,24 @@ export async function configCommand(options: {
     updated = true;
   }
 
+  if (options.promptRefinerMode) {
+    saveConfig({ promptRefinerMode: options.promptRefinerMode });
+    console.log(chalk.green(`✅ Prompt refiner mode saved: ${options.promptRefinerMode}`));
+    updated = true;
+  }
+
+  if (options.promptRefinerLogPath !== undefined) {
+    const path = options.promptRefinerLogPath.trim();
+    if (!path || path.toLowerCase() === 'default') {
+      saveConfig({ promptRefinerLogPath: undefined });
+      console.log(chalk.green('✅ Prompt refiner log path reset to default'));
+    } else {
+      saveConfig({ promptRefinerLogPath: path });
+      console.log(chalk.green(`✅ Prompt refiner log path saved: ${path}`));
+    }
+    updated = true;
+  }
+
   if (!updated) {
     console.log(chalk.yellow('No options provided. Use --help to see available options.'));
     console.log(chalk.gray('\nExample:'));
@@ -137,6 +159,8 @@ export async function configCommand(options: {
     console.log(chalk.gray('  mudcode config --slack-bot-token xoxb-...'));
     console.log(chalk.gray('  mudcode config --slack-app-token xapp-...'));
     console.log(chalk.gray('  mudcode config --opencode-permission allow'));
+    console.log(chalk.gray('  mudcode config --prompt-refiner-mode shadow'));
+    console.log(chalk.gray('  mudcode config --prompt-refiner-log-path ~/.mudcode/prompt-refiner-shadow.jsonl'));
     console.log(chalk.gray('  mudcode config --show'));
   }
 }

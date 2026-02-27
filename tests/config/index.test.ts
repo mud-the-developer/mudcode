@@ -84,6 +84,7 @@ describe('ConfigManager', () => {
       expect(config.tmux.sessionPrefix).toBe('');
       expect(config.defaultAgentCli).toBeUndefined();
       expect(config.hookServerPort).toBe(18470);
+      expect(config.promptRefiner).toBeUndefined();
     });
 
     it('loads token from stored config file', () => {
@@ -96,6 +97,9 @@ describe('ConfigManager', () => {
         hookServerPort: 9999,
         defaultAgentCli: 'gemini',
         opencodePermissionMode: 'allow',
+        promptRefinerMode: 'shadow',
+        promptRefinerLogPath: '/tmp/shadow-log.jsonl',
+        promptRefinerMaxLogChars: 9000,
       };
       storage.setFile(configFile, JSON.stringify(storedConfig));
 
@@ -108,6 +112,9 @@ describe('ConfigManager', () => {
       expect(config.hookServerPort).toBe(9999);
       expect(config.defaultAgentCli).toBe('gemini');
       expect(config.opencode?.permissionMode).toBe('allow');
+      expect(config.promptRefiner?.mode).toBe('shadow');
+      expect(config.promptRefiner?.logPath).toBe('/tmp/shadow-log.jsonl');
+      expect(config.promptRefiner?.maxLogChars).toBe(9000);
     });
 
     it('falls back to env var when no stored config', () => {
@@ -117,6 +124,9 @@ describe('ConfigManager', () => {
       env.set('DISCORD_CHANNEL_ID', 'env-channel-789');
       env.set('DISCORD_GUILD_ID', 'env-guild-abc');
       env.set('HOOK_SERVER_PORT', '7777');
+      env.set('MUDCODE_PROMPT_REFINER_MODE', 'shadow');
+      env.set('MUDCODE_PROMPT_REFINER_LOG_PATH', '/tmp/env-shadow-log.jsonl');
+      env.set('MUDCODE_PROMPT_REFINER_MAX_LOG_CHARS', '7000');
 
       const manager = new ConfigManager(storage, env, configDir);
       const config = manager.config;
@@ -125,6 +135,9 @@ describe('ConfigManager', () => {
       expect(config.discord.channelId).toBe('env-channel-789');
       expect(config.discord.guildId).toBe('env-guild-abc');
       expect(config.hookServerPort).toBe(7777);
+      expect(config.promptRefiner?.mode).toBe('shadow');
+      expect(config.promptRefiner?.logPath).toBe('/tmp/env-shadow-log.jsonl');
+      expect(config.promptRefiner?.maxLogChars).toBe(7000);
     });
 
     it('stored config takes priority over env vars', () => {
@@ -207,6 +220,7 @@ describe('ConfigManager', () => {
         serverId: 'my-server',
         hookServerPort: 8888,
         opencodePermissionMode: 'default',
+        promptRefinerMode: 'enforce',
       };
       storage.setFile(configFile, JSON.stringify(storedConfig));
 
@@ -217,6 +231,7 @@ describe('ConfigManager', () => {
       expect(manager.getConfigValue('serverId')).toBe('my-server');
       expect(manager.getConfigValue('hookServerPort')).toBe(8888);
       expect(manager.getConfigValue('opencodePermissionMode')).toBe('default');
+      expect(manager.getConfigValue('promptRefinerMode')).toBe('enforce');
     });
   });
 
@@ -259,6 +274,17 @@ describe('ConfigManager', () => {
       const manager = new ConfigManager(storage, env, configDir);
 
       expect(() => manager.validateConfig()).toThrow(/OPENCODE_PERMISSION_MODE/);
+    });
+
+    it('validateConfig throws for invalid MUDCODE_PROMPT_REFINER_MODE value', () => {
+      const storage = new MockStorage();
+      const env = new MockEnvironment();
+      env.set('DISCORD_BOT_TOKEN', 'valid-token');
+      env.set('MUDCODE_PROMPT_REFINER_MODE', 'enabled');
+
+      const manager = new ConfigManager(storage, env, configDir);
+
+      expect(() => manager.validateConfig()).toThrow(/MUDCODE_PROMPT_REFINER_MODE/);
     });
 
     it('validateConfig throws for invalid HOOK_SERVER_PORT value', () => {

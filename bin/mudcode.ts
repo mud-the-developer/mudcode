@@ -425,6 +425,15 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
           choices: ['allow', 'default'],
           describe: 'Set OpenCode permission mode',
         })
+        .option('prompt-refiner-mode', {
+          type: 'string',
+          choices: ['off', 'shadow', 'enforce'],
+          describe: 'Set prompt refiner mode',
+        })
+        .option('prompt-refiner-log-path', {
+          type: 'string',
+          describe: 'Set prompt refiner JSONL log path (use "default" to reset)',
+        })
         .option('show', { type: 'boolean', describe: 'Show current configuration' }),
       async (argv: any) =>
         configCommand({
@@ -435,6 +444,8 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
           port: argv.port,
           defaultAgent: argv.defaultAgent,
           opencodePermission: argv.opencodePermission,
+          promptRefinerMode: argv.promptRefinerMode,
+          promptRefinerLogPath: argv.promptRefinerLogPath,
           platform: argv.platform,
           slackBotToken: argv.slackBotToken,
           slackAppToken: argv.slackAppToken,

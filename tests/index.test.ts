@@ -24,6 +24,9 @@ import { AgentBridge } from '../src/index.js';
 import type { IStateManager } from '../src/types/interfaces.js';
 import type { BridgeConfig, ProjectState } from '../src/types/index.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, readFileSync, rmSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
 
 // Mock helpers
 function createMockConfig(): BridgeConfig {
@@ -179,6 +182,54 @@ describe('AgentBridge', () => {
 
       const validContent = 'This is valid content with unicode 한글 emojis 🚀';
       expect(bridge.sanitizeInput(validContent)).toBe(validContent);
+    });
+
+    it('shadow mode logs refined candidate but keeps original sanitized output', () => {
+      const tempDir = mkdtempSync(join(tmpdir(), 'mudcode-shadow-'));
+      const logPath = join(tempDir, 'prompt-refiner-shadow.jsonl');
+      const bridge = new AgentBridge({
+        messaging: createMockMessaging(),
+        tmux: createMockTmux(),
+        stateManager: createMockStateManager(),
+        registry: createMockRegistry(),
+        config: {
+          ...createMockConfig(),
+          promptRefiner: {
+            mode: 'shadow',
+            logPath,
+          },
+        },
+      });
+
+      const input = 'line one  \r\n\r\n\r\nline two\t';
+      expect(bridge.sanitizeInput(input)).toBe(input);
+
+      const line = readFileSync(logPath, 'utf-8').trim();
+      const entry = JSON.parse(line);
+      expect(entry.mode).toBe('shadow');
+      expect(entry.changed).toBe(true);
+      expect(entry.baseline).toBe(input);
+      expect(entry.candidate).toBe('line one\n\nline two');
+
+      rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    it('enforce mode returns refined candidate output', () => {
+      const bridge = new AgentBridge({
+        messaging: createMockMessaging(),
+        tmux: createMockTmux(),
+        stateManager: createMockStateManager(),
+        registry: createMockRegistry(),
+        config: {
+          ...createMockConfig(),
+          promptRefiner: {
+            mode: 'enforce',
+          },
+        },
+      });
+
+      const input = 'line one  \r\n\r\n\r\nline two\t';
+      expect(bridge.sanitizeInput(input)).toBe('line one\n\nline two');
     });
   });
 

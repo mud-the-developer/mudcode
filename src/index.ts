@@ -27,6 +27,7 @@ import { BridgeProjectBootstrap } from './bridge/project-bootstrap.js';
 import { BridgeMessageRouter } from './bridge/message-router.js';
 import { BridgeHookServer } from './bridge/hook-server.js';
 import { BridgeCapturePoller } from './bridge/capture-poller.js';
+import { PromptRefiner } from './prompt/refiner.js';
 
 export interface AgentBridgeDeps {
   messaging?: MessagingClient;
@@ -44,6 +45,7 @@ export class AgentBridge {
   private messageRouter: BridgeMessageRouter;
   private hookServer: BridgeHookServer;
   private capturePoller: BridgeCapturePoller;
+  private promptRefiner: PromptRefiner;
   private stateManager: IStateManager;
   private registry: AgentRegistry;
   private bridgeConfig: BridgeConfig;
@@ -54,6 +56,7 @@ export class AgentBridge {
     this.tmux = deps?.tmux || new TmuxManager(this.bridgeConfig.tmux.sessionPrefix);
     this.stateManager = deps?.stateManager || defaultStateManager;
     this.registry = deps?.registry || defaultAgentRegistry;
+    this.promptRefiner = new PromptRefiner(this.bridgeConfig.promptRefiner);
     this.pendingTracker = new PendingMessageTracker(this.messaging);
     this.projectBootstrap = new BridgeProjectBootstrap(this.stateManager, this.messaging, this.bridgeConfig.hookServerPort || 18470);
     this.messageRouter = new BridgeMessageRouter({
@@ -104,8 +107,7 @@ export class AgentBridge {
 
     // Strip null bytes
     const sanitized = content.replace(/\0/g, '');
-
-    return sanitized;
+    return this.promptRefiner.process(sanitized).output;
   }
 
   /**

@@ -41,6 +41,8 @@
     "publish:release:bun:single:dry-run": "node scripts/publish-release.mjs --pm bun --single --dry-run",
     "publish:release:bun:linux": "node scripts/publish-release.mjs --pm bun --profile linux",
     "publish:release:bun:linux:dry-run": "node scripts/publish-release.mjs --pm bun --profile linux --dry-run",
+    "prompt-refiner:report": "node scripts/prompt-refiner-shadow-report.mjs",
+    "prompt-refiner:export-gepa": "node scripts/prompt-refiner-shadow-to-gepa.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e:tmux": "MUDCODE_E2E_TMUX=1 vitest run tests/tmux/manager.integration.test.ts",

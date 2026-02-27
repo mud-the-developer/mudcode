@@ -37,6 +37,23 @@ export interface BridgeConfig {
   slack?: SlackConfig;
   /** Which messaging platform to use. Defaults to 'discord'. */
   messagingPlatform?: MessagingPlatform;
+  promptRefiner?: {
+    /**
+     * Prompt refiner execution mode.
+     * - off: disable refiner and keep raw sanitized input
+     * - shadow: compute refined candidate and log it, but send raw input
+     * - enforce: send refined candidate
+     */
+    mode?: 'off' | 'shadow' | 'enforce';
+    /**
+     * JSONL output path for shadow/enforce refinement logs.
+     */
+    logPath?: string;
+    /**
+     * Maximum characters saved for baseline/candidate in each log entry.
+     */
+    maxLogChars?: number;
+  };
   tmux: {
     sessionPrefix: string;
     /**

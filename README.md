@@ -78,6 +78,41 @@ mudcode attach my-app --instance codex
 - `mudcode config --show`: print current config
 - `mudcode uninstall`: remove mudcode from machine
 
+## Prompt Refiner (Shadow Mode)
+
+Use this to evaluate prompt cleanup safely before enforcing it.
+
+1. Enable shadow mode:
+
+```bash
+mudcode config --prompt-refiner-mode shadow
+```
+
+2. (Optional) set custom log path:
+
+```bash
+mudcode config --prompt-refiner-log-path ~/.mudcode/prompt-refiner-shadow.jsonl
+```
+
+3. Generate a quick report:
+
+```bash
+bun run prompt-refiner:report
+```
+
+4. Export a GEPA-ready train/val dataset:
+
+```bash
+bun run prompt-refiner:export-gepa
+# optional:
+# bun run prompt-refiner:export-gepa -- --val-ratio 0.2 --all
+```
+
+Modes:
+- `off` (default): disabled
+- `shadow`: logs refined candidate, sends original input
+- `enforce`: sends refined candidate
+
 ## Discord Runtime Commands
 
 Use these inside mapped channels/threads:

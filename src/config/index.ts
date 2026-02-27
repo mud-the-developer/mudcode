@@ -17,6 +17,9 @@ export interface StoredConfig {
   hookServerPort?: number;
   defaultAgentCli?: string;
   opencodePermissionMode?: 'allow' | 'default';
+  promptRefinerMode?: 'off' | 'shadow' | 'enforce';
+  promptRefinerLogPath?: string;
+  promptRefinerMaxLogChars?: number;
   keepChannelOnStop?: boolean;
   slackBotToken?: string;
   slackAppToken?: string;
@@ -60,6 +63,23 @@ export class ConfigManager {
       const platformRaw = storedConfig.messagingPlatform || this.env.get('MESSAGING_PLATFORM');
       const messagingPlatform: MessagingPlatform | undefined =
         platformRaw === 'slack' ? 'slack' : platformRaw === 'discord' ? 'discord' : undefined;
+      const envPromptRefinerModeRaw = this.env.get('MUDCODE_PROMPT_REFINER_MODE');
+      const envPromptRefinerMode = this.parsePromptRefinerModeCandidate(envPromptRefinerModeRaw);
+      const promptRefinerMode =
+        this.parsePromptRefinerModeCandidate(storedConfig.promptRefinerMode) || envPromptRefinerMode;
+      const promptRefinerLogPath = storedConfig.promptRefinerLogPath || this.env.get('MUDCODE_PROMPT_REFINER_LOG_PATH');
+      const promptRefinerMaxLogChars = this.resolvePromptRefinerMaxLogChars(
+        storedConfig.promptRefinerMaxLogChars,
+        this.env.get('MUDCODE_PROMPT_REFINER_MAX_LOG_CHARS'),
+      );
+      const promptRefiner =
+        promptRefinerMode || promptRefinerLogPath || promptRefinerMaxLogChars !== undefined
+          ? {
+              ...(promptRefinerMode ? { mode: promptRefinerMode } : {}),
+              ...(promptRefinerLogPath ? { logPath: promptRefinerLogPath } : {}),
+              ...(promptRefinerMaxLogChars !== undefined ? { maxLogChars: promptRefinerMaxLogChars } : {}),
+            }
+          : undefined;
 
       const slackBotToken = storedConfig.slackBotToken || this.env.get('SLACK_BOT_TOKEN');
       const slackAppToken = storedConfig.slackAppToken || this.env.get('SLACK_APP_TOKEN');
@@ -85,6 +105,7 @@ export class ConfigManager {
         },
         hookServerPort: resolvedHookPort,
         ...(defaultAgentCli ? { defaultAgentCli } : {}),
+        ...(promptRefiner ? { promptRefiner } : {}),
         opencode: opencodePermissionMode
           ? { permissionMode: opencodePermissionMode }
           : undefined,
@@ -185,6 +206,29 @@ export class ConfigManager {
     return undefined;
   }
 
+  private resolvePromptRefinerMaxLogChars(storedValue: unknown, envValue: string | undefined): number | undefined {
+    const storedCandidate = this.parsePromptRefinerMaxLogCharsCandidate(storedValue);
+    if (storedCandidate !== undefined) return storedCandidate;
+    return this.parsePromptRefinerMaxLogCharsCandidate(envValue);
+  }
+
+  private parsePromptRefinerModeCandidate(raw: unknown): 'off' | 'shadow' | 'enforce' | undefined {
+    if (typeof raw !== 'string') return undefined;
+    const normalized = raw.trim().toLowerCase();
+    if (normalized === 'off' || normalized === 'shadow' || normalized === 'enforce') {
+      return normalized;
+    }
+    return undefined;
+  }
+
+  private parsePromptRefinerMaxLogCharsCandidate(raw: unknown): number | undefined {
+    if (raw === undefined || raw === null || raw === '') return undefined;
+    const value = Number(raw);
+    if (!Number.isInteger(value)) return undefined;
+    if (value < 500 || value > 200000) return undefined;
+    return value;
+  }
+
   private validateRawInputs(): void {
     const errors: string[] = [];
     const storedConfig = this.loadStoredConfig();
@@ -200,6 +244,39 @@ export class ConfigManager {
     if (envPermissionMode && envPermissionMode !== 'allow' && envPermissionMode !== 'default') {
       errors.push(
         `OPENCODE_PERMISSION_MODE must be "allow" or "default" (received: ${envPermissionMode})`,
+      );
+    }
+
+    const envPromptRefinerMode = this.env.get('MUDCODE_PROMPT_REFINER_MODE');
+    if (envPromptRefinerMode && this.parsePromptRefinerModeCandidate(envPromptRefinerMode) === undefined) {
+      errors.push(
+        `MUDCODE_PROMPT_REFINER_MODE must be "off", "shadow", or "enforce" (received: ${envPromptRefinerMode})`,
+      );
+    }
+
+    if (
+      storedConfig.promptRefinerMode !== undefined &&
+      this.parsePromptRefinerModeCandidate(storedConfig.promptRefinerMode) === undefined
+    ) {
+      errors.push(
+        `Stored promptRefinerMode must be "off", "shadow", or "enforce" (received: ${String(storedConfig.promptRefinerMode)})`,
+      );
+    }
+
+    const rawStoredRefinerMax = storedConfig.promptRefinerMaxLogChars;
+    if (
+      rawStoredRefinerMax !== undefined &&
+      this.parsePromptRefinerMaxLogCharsCandidate(rawStoredRefinerMax) === undefined
+    ) {
+      errors.push(
+        `Stored promptRefinerMaxLogChars must be an integer between 500 and 200000 (received: ${String(rawStoredRefinerMax)})`,
+      );
+    }
+
+    const rawEnvRefinerMax = this.env.get('MUDCODE_PROMPT_REFINER_MAX_LOG_CHARS');
+    if (rawEnvRefinerMax !== undefined && this.parsePromptRefinerMaxLogCharsCandidate(rawEnvRefinerMax) === undefined) {
+      errors.push(
+        `MUDCODE_PROMPT_REFINER_MAX_LOG_CHARS must be an integer between 500 and 200000 (received: ${rawEnvRefinerMax})`,
       );
     }
 
