@@ -33,58 +33,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node <<'NODE'
-          const fs = require('fs');
-
-          const pkgPath = 'package.json';
-          const lockPath = 'package-lock.json';
-          const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-
-          const parts = String(pkg.version || '').split('.');
-          if (parts.length !== 3) {
-            throw new Error(`Unsupported semver format: ${pkg.version}`);
-          }
-          const major = Number(parts[0]);
-          const minor = Number(parts[1]);
-          const patch = Number(parts[2]);
-          if (![major, minor, patch].every(Number.isInteger)) {
-            throw new Error(`Invalid semver numbers: ${pkg.version}`);
-          }
-
-          const next = `${major}.${minor}.${patch + 1}`;
-          pkg.version = next;
-
-          if (pkg.optionalDependencies && typeof pkg.optionalDependencies === 'object') {
-            for (const key of Object.keys(pkg.optionalDependencies)) {
-              if (/\/mudcode-/.test(key)) {
-                pkg.optionalDependencies[key] = next;
-              }
-            }
-          }
-
-          fs.writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
-
-          if (fs.existsSync(lockPath)) {
-            const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
-            lock.version = next;
-
-            if (lock.packages && lock.packages['']) {
-              lock.packages[''].version = next;
-              const rootOptional = lock.packages[''].optionalDependencies;
-              if (rootOptional && typeof rootOptional === 'object') {
-                for (const key of Object.keys(rootOptional)) {
-                  if (/\/mudcode-/.test(key)) {
-                    rootOptional[key] = next;
-                  }
-                }
-              }
-            }
-
-            fs.writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`);
-          }
-          NODE
-
-          NEXT_VERSION="$(node -p \"require('./package.json').version\")"
+          NEXT_VERSION="$(node scripts/auto-bump-version.mjs)"
           echo "next_version=${NEXT_VERSION}" >> "${GITHUB_OUTPUT}"
           echo "Next version: ${NEXT_VERSION}"
 
