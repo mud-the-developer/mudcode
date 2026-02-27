@@ -83,10 +83,31 @@ export function autoTuneCaptureSettings(): CaptureAutoTuneResult {
   }
 
   const recommended = recommendCaptureTuning(maxObservedLines);
-  const historyLines = clampInt(recommended.historyLines, 300, 4000);
-  const redrawTailLines = clampInt(recommended.redrawTailLines, 40, 300);
-  const currentHistoryLines = Number(getConfigValue('captureHistoryLines') || 0);
-  const currentRedrawTailLines = Number(getConfigValue('captureRedrawTailLines') || 0);
+  const recommendedHistoryLines = clampInt(recommended.historyLines, 300, 4000);
+  const recommendedRedrawTailLines = clampInt(recommended.redrawTailLines, 40, 300);
+
+  const storedHistoryLinesRaw = getConfigValue('captureHistoryLines');
+  const storedRedrawTailLinesRaw = getConfigValue('captureRedrawTailLines');
+  const storedHistoryLines = Number(storedHistoryLinesRaw);
+  const storedRedrawTailLines = Number(storedRedrawTailLinesRaw);
+
+  // Respect explicit config values if present; only auto-fill missing fields.
+  const historyPinned =
+    Number.isFinite(storedHistoryLines) &&
+    Number.isInteger(storedHistoryLines) &&
+    storedHistoryLines >= 300 &&
+    storedHistoryLines <= 4000;
+  const redrawPinned =
+    Number.isFinite(storedRedrawTailLines) &&
+    Number.isInteger(storedRedrawTailLines) &&
+    storedRedrawTailLines >= 40 &&
+    storedRedrawTailLines <= 300;
+
+  const historyLines = historyPinned ? storedHistoryLines : recommendedHistoryLines;
+  const redrawTailLines = redrawPinned ? storedRedrawTailLines : recommendedRedrawTailLines;
+
+  const currentHistoryLines = historyPinned ? storedHistoryLines : 0;
+  const currentRedrawTailLines = redrawPinned ? storedRedrawTailLines : 0;
   const changed = currentHistoryLines !== historyLines || currentRedrawTailLines !== redrawTailLines;
 
   if (changed) {

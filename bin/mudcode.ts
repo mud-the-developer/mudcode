@@ -848,6 +848,50 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
           type: 'string',
           describe: 'Set prompt refiner JSONL log path (use "default" to reset)',
         })
+        .option('capture-preset', {
+          type: 'string',
+          choices: ['default', 'codex-final'],
+          describe: 'Apply capture/output preset in one step',
+        })
+        .option('capture-poll-ms', { type: 'number', describe: 'Set capture poll interval ms (250-60000)' })
+        .option('capture-pending-quiet-polls', {
+          type: 'number',
+          describe: 'Set quiet poll threshold after output appears (1-20)',
+        })
+        .option('capture-pending-initial-quiet-polls-codex', {
+          type: 'number',
+          describe: 'Set codex initial quiet poll threshold before first output (0-20)',
+        })
+        .option('capture-codex-final-only', {
+          type: 'string',
+          choices: ['on', 'off'],
+          describe: 'Enable/disable codex final-only buffered output mode',
+        })
+        .option('capture-stale-alert-ms', {
+          type: 'number',
+          describe: 'Set stale pending alert threshold ms (1000-3600000)',
+        })
+        .option('capture-filter-prompt-echo', {
+          type: 'string',
+          choices: ['on', 'off'],
+          describe: 'Enable/disable prompt-echo suppression filter',
+        })
+        .option('capture-prompt-echo-max-polls', {
+          type: 'number',
+          describe: 'Set max prompt-echo suppress polls before fallback (1-20)',
+        })
+        .option('capture-history-lines', {
+          type: 'number',
+          describe: 'Set capture history lines (300-4000)',
+        })
+        .option('capture-redraw-tail-lines', {
+          type: 'number',
+          describe: 'Set redraw fallback tail lines (40-300)',
+        })
+        .option('long-output-thread-threshold', {
+          type: 'number',
+          describe: 'Set thread-based long output threshold (1200-20000)',
+        })
         .option('show', { type: 'boolean', describe: 'Show current configuration' }),
       async (argv: any) =>
         configCommand({
@@ -860,6 +904,17 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
           opencodePermission: argv.opencodePermission,
           promptRefinerMode: argv.promptRefinerMode,
           promptRefinerLogPath: argv.promptRefinerLogPath,
+          capturePreset: argv.capturePreset,
+          capturePollMs: argv.capturePollMs,
+          capturePendingQuietPolls: argv.capturePendingQuietPolls,
+          capturePendingInitialQuietPollsCodex: argv.capturePendingInitialQuietPollsCodex,
+          captureCodexFinalOnly: argv.captureCodexFinalOnly,
+          captureStaleAlertMs: argv.captureStaleAlertMs,
+          captureFilterPromptEcho: argv.captureFilterPromptEcho,
+          capturePromptEchoMaxPolls: argv.capturePromptEchoMaxPolls,
+          captureHistoryLines: argv.captureHistoryLines,
+          captureRedrawTailLines: argv.captureRedrawTailLines,
+          longOutputThreadThreshold: argv.longOutputThreadThreshold,
           platform: argv.platform,
           slackBotToken: argv.slackBotToken,
           slackAppToken: argv.slackAppToken,

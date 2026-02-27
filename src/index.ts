@@ -82,6 +82,14 @@ export class AgentBridge {
       tmux: this.tmux,
       stateManager: this.stateManager,
       pendingTracker: this.pendingTracker,
+      intervalMs: this.bridgeConfig.capture?.pollMs,
+      quietPendingPollThreshold: this.bridgeConfig.capture?.pendingQuietPolls,
+      codexInitialQuietPendingPollThreshold: this.bridgeConfig.capture?.pendingInitialQuietPollsCodex,
+      codexFinalOnlyModeEnabled: this.bridgeConfig.capture?.codexFinalOnly,
+      longOutputThreadThreshold: this.bridgeConfig.capture?.longOutputThreadThreshold,
+      stalePendingAlertMs: this.bridgeConfig.capture?.staleAlertMs,
+      promptEchoFilterEnabled: this.bridgeConfig.capture?.filterPromptEcho,
+      promptEchoSuppressionMaxPolls: this.bridgeConfig.capture?.promptEchoMaxPolls,
       redrawFallbackTailLines: this.bridgeConfig.capture?.redrawTailLines,
     });
   }

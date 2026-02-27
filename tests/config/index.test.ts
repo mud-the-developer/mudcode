@@ -100,6 +100,16 @@ describe('ConfigManager', () => {
         promptRefinerMode: 'shadow',
         promptRefinerLogPath: '/tmp/shadow-log.jsonl',
         promptRefinerMaxLogChars: 9000,
+        capturePollMs: 1200,
+        capturePendingQuietPolls: 3,
+        capturePendingInitialQuietPollsCodex: 0,
+        captureCodexFinalOnly: true,
+        captureStaleAlertMs: 75000,
+        captureFilterPromptEcho: true,
+        capturePromptEchoMaxPolls: 2,
+        captureHistoryLines: 1800,
+        captureRedrawTailLines: 120,
+        longOutputThreadThreshold: 2500,
       };
       storage.setFile(configFile, JSON.stringify(storedConfig));
 
@@ -115,6 +125,16 @@ describe('ConfigManager', () => {
       expect(config.promptRefiner?.mode).toBe('shadow');
       expect(config.promptRefiner?.logPath).toBe('/tmp/shadow-log.jsonl');
       expect(config.promptRefiner?.maxLogChars).toBe(9000);
+      expect(config.capture?.pollMs).toBe(1200);
+      expect(config.capture?.pendingQuietPolls).toBe(3);
+      expect(config.capture?.pendingInitialQuietPollsCodex).toBe(0);
+      expect(config.capture?.codexFinalOnly).toBe(true);
+      expect(config.capture?.staleAlertMs).toBe(75000);
+      expect(config.capture?.filterPromptEcho).toBe(true);
+      expect(config.capture?.promptEchoMaxPolls).toBe(2);
+      expect(config.capture?.historyLines).toBe(1800);
+      expect(config.capture?.redrawTailLines).toBe(120);
+      expect(config.capture?.longOutputThreadThreshold).toBe(2500);
     });
 
     it('falls back to env var when no stored config', () => {
@@ -127,6 +147,16 @@ describe('ConfigManager', () => {
       env.set('MUDCODE_PROMPT_REFINER_MODE', 'shadow');
       env.set('MUDCODE_PROMPT_REFINER_LOG_PATH', '/tmp/env-shadow-log.jsonl');
       env.set('MUDCODE_PROMPT_REFINER_MAX_LOG_CHARS', '7000');
+      env.set('AGENT_DISCORD_CAPTURE_POLL_MS', '1500');
+      env.set('AGENT_DISCORD_CAPTURE_PENDING_QUIET_POLLS', '4');
+      env.set('AGENT_DISCORD_CAPTURE_PENDING_INITIAL_QUIET_POLLS_CODEX', '1');
+      env.set('AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY', 'true');
+      env.set('AGENT_DISCORD_CAPTURE_STALE_ALERT_MS', '90000');
+      env.set('AGENT_DISCORD_CAPTURE_FILTER_PROMPT_ECHO', 'false');
+      env.set('AGENT_DISCORD_CAPTURE_PROMPT_ECHO_MAX_POLLS', '5');
+      env.set('AGENT_DISCORD_CAPTURE_HISTORY_LINES', '2000');
+      env.set('AGENT_DISCORD_CAPTURE_REDRAW_TAIL_LINES', '140');
+      env.set('AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD', '3000');
 
       const manager = new ConfigManager(storage, env, configDir);
       const config = manager.config;
@@ -138,6 +168,16 @@ describe('ConfigManager', () => {
       expect(config.promptRefiner?.mode).toBe('shadow');
       expect(config.promptRefiner?.logPath).toBe('/tmp/env-shadow-log.jsonl');
       expect(config.promptRefiner?.maxLogChars).toBe(7000);
+      expect(config.capture?.pollMs).toBe(1500);
+      expect(config.capture?.pendingQuietPolls).toBe(4);
+      expect(config.capture?.pendingInitialQuietPollsCodex).toBe(1);
+      expect(config.capture?.codexFinalOnly).toBe(true);
+      expect(config.capture?.staleAlertMs).toBe(90000);
+      expect(config.capture?.filterPromptEcho).toBe(false);
+      expect(config.capture?.promptEchoMaxPolls).toBe(5);
+      expect(config.capture?.historyLines).toBe(2000);
+      expect(config.capture?.redrawTailLines).toBe(140);
+      expect(config.capture?.longOutputThreadThreshold).toBe(3000);
     });
 
     it('stored config takes priority over env vars', () => {
@@ -296,6 +336,28 @@ describe('ConfigManager', () => {
       const manager = new ConfigManager(storage, env, configDir);
 
       expect(() => manager.validateConfig()).toThrow(/HOOK_SERVER_PORT/);
+    });
+
+    it('validateConfig throws for invalid capture booleans', () => {
+      const storage = new MockStorage();
+      const env = new MockEnvironment();
+      env.set('DISCORD_BOT_TOKEN', 'valid-token');
+      env.set('AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY', 'sometimes');
+
+      const manager = new ConfigManager(storage, env, configDir);
+
+      expect(() => manager.validateConfig()).toThrow(/AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY/);
+    });
+
+    it('validateConfig throws for invalid stored capture polling values', () => {
+      const storage = new MockStorage();
+      const env = new MockEnvironment();
+      env.set('DISCORD_BOT_TOKEN', 'valid-token');
+      storage.setFile(configFile, JSON.stringify({ capturePollMs: 100 }));
+
+      const manager = new ConfigManager(storage, env, configDir);
+
+      expect(() => manager.validateConfig()).toThrow(/capturePollMs/);
     });
 
     it('validateConfig throws for invalid stored hookServerPort', () => {

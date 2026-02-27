@@ -17,7 +17,36 @@ export async function configCommand(options: {
   slackBotToken?: string;
   slackAppToken?: string;
   platform?: string;
+  capturePreset?: 'default' | 'codex-final';
+  capturePollMs?: string | number;
+  capturePendingQuietPolls?: string | number;
+  capturePendingInitialQuietPollsCodex?: string | number;
+  captureCodexFinalOnly?: 'on' | 'off';
+  captureStaleAlertMs?: string | number;
+  captureFilterPromptEcho?: 'on' | 'off';
+  capturePromptEchoMaxPolls?: string | number;
+  captureHistoryLines?: string | number;
+  captureRedrawTailLines?: string | number;
+  longOutputThreadThreshold?: string | number;
 }) {
+  const parseBoundedInt = (raw: string | number, label: string, min: number, max: number): number => {
+    const valueRaw = String(raw).trim();
+    if (!/^\d+$/.test(valueRaw)) {
+      console.error(chalk.red(`Invalid ${label}: ${raw}`));
+      console.log(chalk.gray(`${label} must be an integer between ${min} and ${max}.`));
+      process.exit(1);
+    }
+    const value = parseInt(valueRaw, 10);
+    if (value < min || value > max) {
+      console.error(chalk.red(`Invalid ${label}: ${raw}`));
+      console.log(chalk.gray(`${label} must be an integer between ${min} and ${max}.`));
+      process.exit(1);
+    }
+    return value;
+  };
+
+  const onOffToBool = (raw: 'on' | 'off'): boolean => raw === 'on';
+
   if (options.show) {
     console.log(chalk.cyan('\n📋 Current configuration:\n'));
     console.log(chalk.gray(`   Config file: ${getConfigPath()}`));
@@ -32,8 +61,16 @@ export async function configCommand(options: {
     console.log(chalk.gray(`   OpenCode Permission Mode: ${config.opencode?.permissionMode || '(not set)'}`));
     console.log(chalk.gray(`   Prompt Refiner Mode: ${config.promptRefiner?.mode || '(off)'}`));
     console.log(chalk.gray(`   Prompt Refiner Log Path: ${config.promptRefiner?.logPath || '(default)'}`));
+    console.log(chalk.gray(`   Capture Poll Interval ms: ${config.capture?.pollMs || '(default)'}`));
+    console.log(chalk.gray(`   Capture Quiet Polls: ${config.capture?.pendingQuietPolls || '(default)'}`));
+    console.log(chalk.gray(`   Capture Initial Quiet Polls (Codex): ${config.capture?.pendingInitialQuietPollsCodex ?? '(default)'}`));
+    console.log(chalk.gray(`   Capture Codex Final Only: ${config.capture?.codexFinalOnly === undefined ? '(default/off)' : config.capture.codexFinalOnly ? 'on' : 'off'}`));
+    console.log(chalk.gray(`   Capture Stale Alert ms: ${config.capture?.staleAlertMs || '(default)'}`));
+    console.log(chalk.gray(`   Capture Prompt Echo Filter: ${config.capture?.filterPromptEcho === undefined ? '(default/on)' : config.capture.filterPromptEcho ? 'on' : 'off'}`));
+    console.log(chalk.gray(`   Capture Prompt Echo Max Polls: ${config.capture?.promptEchoMaxPolls || '(default)'}`));
     console.log(chalk.gray(`   Capture History Lines: ${config.capture?.historyLines || '(auto)'}`));
     console.log(chalk.gray(`   Capture Redraw Tail Lines: ${config.capture?.redrawTailLines || '(auto)'}`));
+    console.log(chalk.gray(`   Long Output Thread Threshold: ${config.capture?.longOutputThreadThreshold || '(default)'}`));
     console.log(chalk.gray(`   Keep Channel On Stop: ${getConfigValue('keepChannelOnStop') ? 'on' : 'off'}`));
     console.log(chalk.cyan('\n🤖 Registered Agents:\n'));
     for (const adapter of agentRegistry.getAll()) {
@@ -150,6 +187,108 @@ export async function configCommand(options: {
     updated = true;
   }
 
+  if (options.capturePreset) {
+    if (options.capturePreset === 'default') {
+      saveConfig({
+        capturePollMs: undefined,
+        capturePendingQuietPolls: undefined,
+        capturePendingInitialQuietPollsCodex: undefined,
+        captureCodexFinalOnly: undefined,
+        captureStaleAlertMs: undefined,
+        captureFilterPromptEcho: undefined,
+        capturePromptEchoMaxPolls: undefined,
+        captureHistoryLines: undefined,
+        captureRedrawTailLines: undefined,
+        longOutputThreadThreshold: undefined,
+      });
+      console.log(chalk.green('✅ Capture preset applied: default'));
+    } else if (options.capturePreset === 'codex-final') {
+      saveConfig({
+        captureCodexFinalOnly: true,
+        captureFilterPromptEcho: true,
+        capturePromptEchoMaxPolls: 2,
+        capturePendingInitialQuietPollsCodex: 0,
+      });
+      console.log(chalk.green('✅ Capture preset applied: codex-final'));
+    }
+    updated = true;
+  }
+
+  if (options.capturePollMs !== undefined) {
+    const value = parseBoundedInt(options.capturePollMs, 'capture poll ms', 250, 60000);
+    saveConfig({ capturePollMs: value });
+    console.log(chalk.green(`✅ Capture poll interval saved: ${value}ms`));
+    updated = true;
+  }
+
+  if (options.capturePendingQuietPolls !== undefined) {
+    const value = parseBoundedInt(options.capturePendingQuietPolls, 'capture pending quiet polls', 1, 20);
+    saveConfig({ capturePendingQuietPolls: value });
+    console.log(chalk.green(`✅ Capture pending quiet polls saved: ${value}`));
+    updated = true;
+  }
+
+  if (options.capturePendingInitialQuietPollsCodex !== undefined) {
+    const value = parseBoundedInt(
+      options.capturePendingInitialQuietPollsCodex,
+      'capture pending initial quiet polls (codex)',
+      0,
+      20,
+    );
+    saveConfig({ capturePendingInitialQuietPollsCodex: value });
+    console.log(chalk.green(`✅ Capture pending initial quiet polls (codex) saved: ${value}`));
+    updated = true;
+  }
+
+  if (options.captureCodexFinalOnly !== undefined) {
+    const value = onOffToBool(options.captureCodexFinalOnly);
+    saveConfig({ captureCodexFinalOnly: value });
+    console.log(chalk.green(`✅ Capture codex final-only saved: ${value ? 'on' : 'off'}`));
+    updated = true;
+  }
+
+  if (options.captureStaleAlertMs !== undefined) {
+    const value = parseBoundedInt(options.captureStaleAlertMs, 'capture stale alert ms', 1000, 3600000);
+    saveConfig({ captureStaleAlertMs: value });
+    console.log(chalk.green(`✅ Capture stale alert saved: ${value}ms`));
+    updated = true;
+  }
+
+  if (options.captureFilterPromptEcho !== undefined) {
+    const value = onOffToBool(options.captureFilterPromptEcho);
+    saveConfig({ captureFilterPromptEcho: value });
+    console.log(chalk.green(`✅ Capture prompt-echo filter saved: ${value ? 'on' : 'off'}`));
+    updated = true;
+  }
+
+  if (options.capturePromptEchoMaxPolls !== undefined) {
+    const value = parseBoundedInt(options.capturePromptEchoMaxPolls, 'capture prompt echo max polls', 1, 20);
+    saveConfig({ capturePromptEchoMaxPolls: value });
+    console.log(chalk.green(`✅ Capture prompt-echo max polls saved: ${value}`));
+    updated = true;
+  }
+
+  if (options.captureHistoryLines !== undefined) {
+    const value = parseBoundedInt(options.captureHistoryLines, 'capture history lines', 300, 4000);
+    saveConfig({ captureHistoryLines: value });
+    console.log(chalk.green(`✅ Capture history lines saved: ${value}`));
+    updated = true;
+  }
+
+  if (options.captureRedrawTailLines !== undefined) {
+    const value = parseBoundedInt(options.captureRedrawTailLines, 'capture redraw tail lines', 40, 300);
+    saveConfig({ captureRedrawTailLines: value });
+    console.log(chalk.green(`✅ Capture redraw tail lines saved: ${value}`));
+    updated = true;
+  }
+
+  if (options.longOutputThreadThreshold !== undefined) {
+    const value = parseBoundedInt(options.longOutputThreadThreshold, 'long output thread threshold', 1200, 20000);
+    saveConfig({ longOutputThreadThreshold: value });
+    console.log(chalk.green(`✅ Long output thread threshold saved: ${value}`));
+    updated = true;
+  }
+
   if (!updated) {
     console.log(chalk.yellow('No options provided. Use --help to see available options.'));
     console.log(chalk.gray('\nExample:'));
@@ -163,6 +302,9 @@ export async function configCommand(options: {
     console.log(chalk.gray('  mudcode config --opencode-permission allow'));
     console.log(chalk.gray('  mudcode config --prompt-refiner-mode shadow'));
     console.log(chalk.gray('  mudcode config --prompt-refiner-log-path ~/.mudcode/prompt-refiner-shadow.jsonl'));
+    console.log(chalk.gray('  mudcode config --capture-preset codex-final'));
+    console.log(chalk.gray('  mudcode config --capture-codex-final-only on'));
+    console.log(chalk.gray('  mudcode config --capture-filter-prompt-echo on'));
     console.log(chalk.gray('  mudcode config --show'));
   }
 }

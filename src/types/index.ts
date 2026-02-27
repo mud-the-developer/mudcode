@@ -64,6 +64,41 @@ export interface BridgeConfig {
   };
   capture?: {
     /**
+     * Capture poll interval in milliseconds.
+     * Equivalent to AGENT_DISCORD_CAPTURE_POLL_MS.
+     */
+    pollMs?: number;
+    /**
+     * Number of quiet polls before marking pending completion after output appears.
+     * Equivalent to AGENT_DISCORD_CAPTURE_PENDING_QUIET_POLLS.
+     */
+    pendingQuietPolls?: number;
+    /**
+     * Number of quiet polls before marking initial codex completion when no output has appeared yet.
+     * Equivalent to AGENT_DISCORD_CAPTURE_PENDING_INITIAL_QUIET_POLLS_CODEX.
+     */
+    pendingInitialQuietPollsCodex?: number;
+    /**
+     * Keep codex output buffered and send only final consolidated result.
+     * Equivalent to AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY.
+     */
+    codexFinalOnly?: boolean;
+    /**
+     * Stale pending alert threshold in milliseconds.
+     * Equivalent to AGENT_DISCORD_CAPTURE_STALE_ALERT_MS.
+     */
+    staleAlertMs?: number;
+    /**
+     * Remove pending prompt echo text from capture deltas.
+     * Equivalent to AGENT_DISCORD_CAPTURE_FILTER_PROMPT_ECHO.
+     */
+    filterPromptEcho?: boolean;
+    /**
+     * Maximum suppressed prompt-echo polls before fallback.
+     * Equivalent to AGENT_DISCORD_CAPTURE_PROMPT_ECHO_MAX_POLLS.
+     */
+    promptEchoMaxPolls?: number;
+    /**
      * tmux capture history depth (number of lines from bottom).
      * Equivalent to AGENT_DISCORD_CAPTURE_HISTORY_LINES.
      */
@@ -73,6 +108,11 @@ export interface BridgeConfig {
      * Equivalent to AGENT_DISCORD_CAPTURE_REDRAW_TAIL_LINES.
      */
     redrawTailLines?: number;
+    /**
+     * Threshold for thread-based long output delivery.
+     * Equivalent to AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD.
+     */
+    longOutputThreadThreshold?: number;
   };
   hookServerPort?: number;
   /**

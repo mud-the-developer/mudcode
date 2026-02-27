@@ -12,6 +12,13 @@ export interface BridgeCapturePollerDeps {
   stateManager: IStateManager;
   pendingTracker: PendingMessageTracker;
   intervalMs?: number;
+  quietPendingPollThreshold?: number;
+  codexInitialQuietPendingPollThreshold?: number;
+  codexFinalOnlyModeEnabled?: boolean;
+  longOutputThreadThreshold?: number;
+  stalePendingAlertMs?: number;
+  promptEchoFilterEnabled?: boolean;
+  promptEchoSuppressionMaxPolls?: number;
   redrawFallbackTailLines?: number;
 }
 
@@ -44,13 +51,15 @@ export class BridgeCapturePoller {
 
   constructor(private deps: BridgeCapturePollerDeps) {
     this.intervalMs = this.resolveIntervalMs(deps.intervalMs);
-    this.quietPendingPollThreshold = this.resolveQuietPendingPollThreshold();
-    this.codexInitialQuietPendingPollThreshold = this.resolveCodexInitialQuietPendingPollThreshold();
-    this.codexFinalOnlyModeEnabled = this.resolveCodexFinalOnlyModeEnabled();
-    this.longOutputThreadThreshold = this.resolveLongOutputThreadThreshold();
-    this.stalePendingAlertMs = this.resolveStalePendingAlertMs();
-    this.promptEchoFilterEnabled = this.resolvePromptEchoFilterEnabled();
-    this.promptEchoSuppressionMaxPolls = this.resolvePromptEchoSuppressionMaxPolls();
+    this.quietPendingPollThreshold = this.resolveQuietPendingPollThreshold(deps.quietPendingPollThreshold);
+    this.codexInitialQuietPendingPollThreshold = this.resolveCodexInitialQuietPendingPollThreshold(
+      deps.codexInitialQuietPendingPollThreshold,
+    );
+    this.codexFinalOnlyModeEnabled = this.resolveCodexFinalOnlyModeEnabled(deps.codexFinalOnlyModeEnabled);
+    this.longOutputThreadThreshold = this.resolveLongOutputThreadThreshold(deps.longOutputThreadThreshold);
+    this.stalePendingAlertMs = this.resolveStalePendingAlertMs(deps.stalePendingAlertMs);
+    this.promptEchoFilterEnabled = this.resolvePromptEchoFilterEnabled(deps.promptEchoFilterEnabled);
+    this.promptEchoSuppressionMaxPolls = this.resolvePromptEchoSuppressionMaxPolls(deps.promptEchoSuppressionMaxPolls);
     this.redrawFallbackTailLines = this.resolveRedrawFallbackTailLines(deps.redrawFallbackTailLines);
   }
 
@@ -92,7 +101,10 @@ export class BridgeCapturePoller {
     return 3000;
   }
 
-  private resolveQuietPendingPollThreshold(): number {
+  private resolveQuietPendingPollThreshold(configured?: number): number {
+    if (typeof configured === 'number' && Number.isFinite(configured) && configured >= 1) {
+      return Math.trunc(configured);
+    }
     const fromEnv = Number(process.env.AGENT_DISCORD_CAPTURE_PENDING_QUIET_POLLS || '');
     if (Number.isFinite(fromEnv) && fromEnv >= 1) {
       return Math.trunc(fromEnv);
@@ -100,9 +112,12 @@ export class BridgeCapturePoller {
     return 2;
   }
 
-  private resolveCodexInitialQuietPendingPollThreshold(): number {
+  private resolveCodexInitialQuietPendingPollThreshold(configured?: number): number {
+    if (typeof configured === 'number' && Number.isFinite(configured) && configured >= 0) {
+      return Math.trunc(configured);
+    }
     const fromEnv = Number(process.env.AGENT_DISCORD_CAPTURE_PENDING_INITIAL_QUIET_POLLS_CODEX || '');
-    if (Number.isFinite(fromEnv) && fromEnv >= 1) {
+    if (Number.isFinite(fromEnv) && fromEnv >= 0) {
       return Math.trunc(fromEnv);
     }
     // Default: do not auto-complete codex pending before first visible output.
@@ -110,7 +125,8 @@ export class BridgeCapturePoller {
     return 0;
   }
 
-  private resolveCodexFinalOnlyModeEnabled(): boolean {
+  private resolveCodexFinalOnlyModeEnabled(configured?: boolean): boolean {
+    if (typeof configured === 'boolean') return configured;
     const raw = process.env.AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY;
     if (!raw) return false;
     const normalized = raw.trim().toLowerCase();
@@ -119,7 +135,10 @@ export class BridgeCapturePoller {
     return false;
   }
 
-  private resolveLongOutputThreadThreshold(): number {
+  private resolveLongOutputThreadThreshold(configured?: number): number {
+    if (typeof configured === 'number' && Number.isFinite(configured) && configured >= 1200) {
+      return Math.trunc(configured);
+    }
     const fromEnv = Number(process.env.AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD || '');
     if (Number.isFinite(fromEnv) && fromEnv >= 1200) {
       return Math.trunc(fromEnv);
@@ -127,7 +146,10 @@ export class BridgeCapturePoller {
     return 2000;
   }
 
-  private resolveStalePendingAlertMs(): number {
+  private resolveStalePendingAlertMs(configured?: number): number {
+    if (typeof configured === 'number' && Number.isFinite(configured) && configured >= 1000) {
+      return Math.trunc(configured);
+    }
     const fromEnv = Number(process.env.AGENT_DISCORD_CAPTURE_STALE_ALERT_MS || '');
     if (Number.isFinite(fromEnv) && fromEnv >= 1000) {
       return Math.trunc(fromEnv);
@@ -135,7 +157,8 @@ export class BridgeCapturePoller {
     return 60000;
   }
 
-  private resolvePromptEchoFilterEnabled(): boolean {
+  private resolvePromptEchoFilterEnabled(configured?: boolean): boolean {
+    if (typeof configured === 'boolean') return configured;
     const raw = process.env.AGENT_DISCORD_CAPTURE_FILTER_PROMPT_ECHO;
     if (!raw) return true;
     const normalized = raw.trim().toLowerCase();
@@ -144,7 +167,10 @@ export class BridgeCapturePoller {
     return true;
   }
 
-  private resolvePromptEchoSuppressionMaxPolls(): number {
+  private resolvePromptEchoSuppressionMaxPolls(configured?: number): number {
+    if (typeof configured === 'number' && Number.isFinite(configured) && configured >= 1 && configured <= 20) {
+      return Math.trunc(configured);
+    }
     const fromEnv = Number(process.env.AGENT_DISCORD_CAPTURE_PROMPT_ECHO_MAX_POLLS || '');
     if (Number.isFinite(fromEnv) && fromEnv >= 1 && fromEnv <= 20) {
       return Math.trunc(fromEnv);

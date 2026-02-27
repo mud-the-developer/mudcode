@@ -20,8 +20,16 @@ export interface StoredConfig {
   promptRefinerMode?: 'off' | 'shadow' | 'enforce';
   promptRefinerLogPath?: string;
   promptRefinerMaxLogChars?: number;
+  capturePollMs?: number;
+  capturePendingQuietPolls?: number;
+  capturePendingInitialQuietPollsCodex?: number;
+  captureCodexFinalOnly?: boolean;
+  captureStaleAlertMs?: number;
+  captureFilterPromptEcho?: boolean;
+  capturePromptEchoMaxPolls?: number;
   captureHistoryLines?: number;
   captureRedrawTailLines?: number;
+  longOutputThreadThreshold?: number;
   keepChannelOnStop?: boolean;
   slackBotToken?: string;
   slackAppToken?: string;
@@ -82,6 +90,44 @@ export class ConfigManager {
               ...(promptRefinerMaxLogChars !== undefined ? { maxLogChars: promptRefinerMaxLogChars } : {}),
             }
           : undefined;
+      const capturePollMs = this.resolveCaptureLineCount(
+        storedConfig.capturePollMs,
+        this.env.get('AGENT_DISCORD_CAPTURE_POLL_MS'),
+        250,
+        60000,
+      );
+      const capturePendingQuietPolls = this.resolveCaptureLineCount(
+        storedConfig.capturePendingQuietPolls,
+        this.env.get('AGENT_DISCORD_CAPTURE_PENDING_QUIET_POLLS'),
+        1,
+        20,
+      );
+      const capturePendingInitialQuietPollsCodex = this.resolveCaptureLineCount(
+        storedConfig.capturePendingInitialQuietPollsCodex,
+        this.env.get('AGENT_DISCORD_CAPTURE_PENDING_INITIAL_QUIET_POLLS_CODEX'),
+        0,
+        20,
+      );
+      const captureCodexFinalOnly = this.resolveBooleanSetting(
+        storedConfig.captureCodexFinalOnly,
+        this.env.get('AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY'),
+      );
+      const captureStaleAlertMs = this.resolveCaptureLineCount(
+        storedConfig.captureStaleAlertMs,
+        this.env.get('AGENT_DISCORD_CAPTURE_STALE_ALERT_MS'),
+        1000,
+        3600000,
+      );
+      const captureFilterPromptEcho = this.resolveBooleanSetting(
+        storedConfig.captureFilterPromptEcho,
+        this.env.get('AGENT_DISCORD_CAPTURE_FILTER_PROMPT_ECHO'),
+      );
+      const capturePromptEchoMaxPolls = this.resolveCaptureLineCount(
+        storedConfig.capturePromptEchoMaxPolls,
+        this.env.get('AGENT_DISCORD_CAPTURE_PROMPT_ECHO_MAX_POLLS'),
+        1,
+        20,
+      );
       const captureHistoryLines = this.resolveCaptureLineCount(
         storedConfig.captureHistoryLines,
         this.env.get('AGENT_DISCORD_CAPTURE_HISTORY_LINES'),
@@ -94,11 +140,36 @@ export class ConfigManager {
         40,
         300,
       );
+      const longOutputThreadThreshold = this.resolveCaptureLineCount(
+        storedConfig.longOutputThreadThreshold,
+        this.env.get('AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD'),
+        1200,
+        20000,
+      );
       const capture =
-        captureHistoryLines !== undefined || captureRedrawTailLines !== undefined
+        capturePollMs !== undefined ||
+        capturePendingQuietPolls !== undefined ||
+        capturePendingInitialQuietPollsCodex !== undefined ||
+        captureCodexFinalOnly !== undefined ||
+        captureStaleAlertMs !== undefined ||
+        captureFilterPromptEcho !== undefined ||
+        capturePromptEchoMaxPolls !== undefined ||
+        captureHistoryLines !== undefined ||
+        captureRedrawTailLines !== undefined ||
+        longOutputThreadThreshold !== undefined
           ? {
+              ...(capturePollMs !== undefined ? { pollMs: capturePollMs } : {}),
+              ...(capturePendingQuietPolls !== undefined ? { pendingQuietPolls: capturePendingQuietPolls } : {}),
+              ...(capturePendingInitialQuietPollsCodex !== undefined
+                ? { pendingInitialQuietPollsCodex: capturePendingInitialQuietPollsCodex }
+                : {}),
+              ...(captureCodexFinalOnly !== undefined ? { codexFinalOnly: captureCodexFinalOnly } : {}),
+              ...(captureStaleAlertMs !== undefined ? { staleAlertMs: captureStaleAlertMs } : {}),
+              ...(captureFilterPromptEcho !== undefined ? { filterPromptEcho: captureFilterPromptEcho } : {}),
+              ...(capturePromptEchoMaxPolls !== undefined ? { promptEchoMaxPolls: capturePromptEchoMaxPolls } : {}),
               ...(captureHistoryLines !== undefined ? { historyLines: captureHistoryLines } : {}),
               ...(captureRedrawTailLines !== undefined ? { redrawTailLines: captureRedrawTailLines } : {}),
+              ...(longOutputThreadThreshold !== undefined ? { longOutputThreadThreshold } : {}),
             }
           : undefined;
 
@@ -245,6 +316,15 @@ export class ConfigManager {
     return this.parseCaptureLineCountCandidate(envValue, min, max);
   }
 
+  private resolveBooleanSetting(
+    storedValue: unknown,
+    envValue: string | undefined,
+  ): boolean | undefined {
+    const storedCandidate = this.parseBooleanCandidate(storedValue);
+    if (storedCandidate !== undefined) return storedCandidate;
+    return this.parseBooleanCandidate(envValue);
+  }
+
   private parsePromptRefinerModeCandidate(raw: unknown): 'off' | 'shadow' | 'enforce' | undefined {
     if (typeof raw !== 'string') return undefined;
     const normalized = raw.trim().toLowerCase();
@@ -268,6 +348,21 @@ export class ConfigManager {
     if (!Number.isInteger(value)) return undefined;
     if (value < min || value > max) return undefined;
     return value;
+  }
+
+  private parseBooleanCandidate(raw: unknown): boolean | undefined {
+    if (raw === undefined || raw === null || raw === '') return undefined;
+    if (typeof raw === 'boolean') return raw;
+    if (typeof raw === 'number') {
+      if (raw === 1) return true;
+      if (raw === 0) return false;
+      return undefined;
+    }
+    if (typeof raw !== 'string') return undefined;
+    const normalized = raw.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+    return undefined;
   }
 
   private validateRawInputs(): void {
@@ -341,6 +436,84 @@ export class ConfigManager {
       );
     }
 
+    const rawStoredCapturePollMs = storedConfig.capturePollMs;
+    if (
+      rawStoredCapturePollMs !== undefined &&
+      this.parseCaptureLineCountCandidate(rawStoredCapturePollMs, 250, 60000) === undefined
+    ) {
+      errors.push(
+        `Stored capturePollMs must be an integer between 250 and 60000 (received: ${String(rawStoredCapturePollMs)})`,
+      );
+    }
+
+    const rawStoredCapturePendingQuietPolls = storedConfig.capturePendingQuietPolls;
+    if (
+      rawStoredCapturePendingQuietPolls !== undefined &&
+      this.parseCaptureLineCountCandidate(rawStoredCapturePendingQuietPolls, 1, 20) === undefined
+    ) {
+      errors.push(
+        `Stored capturePendingQuietPolls must be an integer between 1 and 20 (received: ${String(rawStoredCapturePendingQuietPolls)})`,
+      );
+    }
+
+    const rawStoredCapturePendingInitialQuietPollsCodex = storedConfig.capturePendingInitialQuietPollsCodex;
+    if (
+      rawStoredCapturePendingInitialQuietPollsCodex !== undefined &&
+      this.parseCaptureLineCountCandidate(rawStoredCapturePendingInitialQuietPollsCodex, 0, 20) === undefined
+    ) {
+      errors.push(
+        `Stored capturePendingInitialQuietPollsCodex must be an integer between 0 and 20 (received: ${String(rawStoredCapturePendingInitialQuietPollsCodex)})`,
+      );
+    }
+
+    if (
+      storedConfig.captureCodexFinalOnly !== undefined &&
+      this.parseBooleanCandidate(storedConfig.captureCodexFinalOnly) === undefined
+    ) {
+      errors.push(
+        `Stored captureCodexFinalOnly must be a boolean (received: ${String(storedConfig.captureCodexFinalOnly)})`,
+      );
+    }
+
+    const rawStoredCaptureStaleAlertMs = storedConfig.captureStaleAlertMs;
+    if (
+      rawStoredCaptureStaleAlertMs !== undefined &&
+      this.parseCaptureLineCountCandidate(rawStoredCaptureStaleAlertMs, 1000, 3600000) === undefined
+    ) {
+      errors.push(
+        `Stored captureStaleAlertMs must be an integer between 1000 and 3600000 (received: ${String(rawStoredCaptureStaleAlertMs)})`,
+      );
+    }
+
+    if (
+      storedConfig.captureFilterPromptEcho !== undefined &&
+      this.parseBooleanCandidate(storedConfig.captureFilterPromptEcho) === undefined
+    ) {
+      errors.push(
+        `Stored captureFilterPromptEcho must be a boolean (received: ${String(storedConfig.captureFilterPromptEcho)})`,
+      );
+    }
+
+    const rawStoredCapturePromptEchoMaxPolls = storedConfig.capturePromptEchoMaxPolls;
+    if (
+      rawStoredCapturePromptEchoMaxPolls !== undefined &&
+      this.parseCaptureLineCountCandidate(rawStoredCapturePromptEchoMaxPolls, 1, 20) === undefined
+    ) {
+      errors.push(
+        `Stored capturePromptEchoMaxPolls must be an integer between 1 and 20 (received: ${String(rawStoredCapturePromptEchoMaxPolls)})`,
+      );
+    }
+
+    const rawStoredLongOutputThreadThreshold = storedConfig.longOutputThreadThreshold;
+    if (
+      rawStoredLongOutputThreadThreshold !== undefined &&
+      this.parseCaptureLineCountCandidate(rawStoredLongOutputThreadThreshold, 1200, 20000) === undefined
+    ) {
+      errors.push(
+        `Stored longOutputThreadThreshold must be an integer between 1200 and 20000 (received: ${String(rawStoredLongOutputThreadThreshold)})`,
+      );
+    }
+
     const rawEnvCaptureHistoryLines = this.env.get('AGENT_DISCORD_CAPTURE_HISTORY_LINES');
     if (rawEnvCaptureHistoryLines !== undefined && this.parseCaptureLineCountCandidate(rawEnvCaptureHistoryLines, 300, 4000) === undefined) {
       errors.push(
@@ -355,6 +528,77 @@ export class ConfigManager {
     ) {
       errors.push(
         `AGENT_DISCORD_CAPTURE_REDRAW_TAIL_LINES must be an integer between 40 and 300 (received: ${rawEnvCaptureRedrawTailLines})`,
+      );
+    }
+
+    const rawEnvCapturePollMs = this.env.get('AGENT_DISCORD_CAPTURE_POLL_MS');
+    if (rawEnvCapturePollMs !== undefined && this.parseCaptureLineCountCandidate(rawEnvCapturePollMs, 250, 60000) === undefined) {
+      errors.push(
+        `AGENT_DISCORD_CAPTURE_POLL_MS must be an integer between 250 and 60000 (received: ${rawEnvCapturePollMs})`,
+      );
+    }
+
+    const rawEnvCapturePendingQuietPolls = this.env.get('AGENT_DISCORD_CAPTURE_PENDING_QUIET_POLLS');
+    if (
+      rawEnvCapturePendingQuietPolls !== undefined &&
+      this.parseCaptureLineCountCandidate(rawEnvCapturePendingQuietPolls, 1, 20) === undefined
+    ) {
+      errors.push(
+        `AGENT_DISCORD_CAPTURE_PENDING_QUIET_POLLS must be an integer between 1 and 20 (received: ${rawEnvCapturePendingQuietPolls})`,
+      );
+    }
+
+    const rawEnvCapturePendingInitialQuietPollsCodex = this.env.get('AGENT_DISCORD_CAPTURE_PENDING_INITIAL_QUIET_POLLS_CODEX');
+    if (
+      rawEnvCapturePendingInitialQuietPollsCodex !== undefined &&
+      this.parseCaptureLineCountCandidate(rawEnvCapturePendingInitialQuietPollsCodex, 0, 20) === undefined
+    ) {
+      errors.push(
+        `AGENT_DISCORD_CAPTURE_PENDING_INITIAL_QUIET_POLLS_CODEX must be an integer between 0 and 20 (received: ${rawEnvCapturePendingInitialQuietPollsCodex})`,
+      );
+    }
+
+    const rawEnvCaptureCodexFinalOnly = this.env.get('AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY');
+    if (rawEnvCaptureCodexFinalOnly !== undefined && this.parseBooleanCandidate(rawEnvCaptureCodexFinalOnly) === undefined) {
+      errors.push(
+        `AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY must be boolean-like (true/false/1/0) (received: ${rawEnvCaptureCodexFinalOnly})`,
+      );
+    }
+
+    const rawEnvCaptureStaleAlertMs = this.env.get('AGENT_DISCORD_CAPTURE_STALE_ALERT_MS');
+    if (
+      rawEnvCaptureStaleAlertMs !== undefined &&
+      this.parseCaptureLineCountCandidate(rawEnvCaptureStaleAlertMs, 1000, 3600000) === undefined
+    ) {
+      errors.push(
+        `AGENT_DISCORD_CAPTURE_STALE_ALERT_MS must be an integer between 1000 and 3600000 (received: ${rawEnvCaptureStaleAlertMs})`,
+      );
+    }
+
+    const rawEnvCaptureFilterPromptEcho = this.env.get('AGENT_DISCORD_CAPTURE_FILTER_PROMPT_ECHO');
+    if (rawEnvCaptureFilterPromptEcho !== undefined && this.parseBooleanCandidate(rawEnvCaptureFilterPromptEcho) === undefined) {
+      errors.push(
+        `AGENT_DISCORD_CAPTURE_FILTER_PROMPT_ECHO must be boolean-like (true/false/1/0) (received: ${rawEnvCaptureFilterPromptEcho})`,
+      );
+    }
+
+    const rawEnvCapturePromptEchoMaxPolls = this.env.get('AGENT_DISCORD_CAPTURE_PROMPT_ECHO_MAX_POLLS');
+    if (
+      rawEnvCapturePromptEchoMaxPolls !== undefined &&
+      this.parseCaptureLineCountCandidate(rawEnvCapturePromptEchoMaxPolls, 1, 20) === undefined
+    ) {
+      errors.push(
+        `AGENT_DISCORD_CAPTURE_PROMPT_ECHO_MAX_POLLS must be an integer between 1 and 20 (received: ${rawEnvCapturePromptEchoMaxPolls})`,
+      );
+    }
+
+    const rawEnvLongOutputThreadThreshold = this.env.get('AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD');
+    if (
+      rawEnvLongOutputThreadThreshold !== undefined &&
+      this.parseCaptureLineCountCandidate(rawEnvLongOutputThreadThreshold, 1200, 20000) === undefined
+    ) {
+      errors.push(
+        `AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD must be an integer between 1200 and 20000 (received: ${rawEnvLongOutputThreadThreshold})`,
       );
     }
 
