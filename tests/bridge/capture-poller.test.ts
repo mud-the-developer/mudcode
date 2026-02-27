@@ -1107,6 +1107,109 @@ describe('BridgeCapturePoller', () => {
     poller.stop();
   });
 
+  it('filters short exact prompt echo lines while keeping assistant output', async () => {
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'ch-1',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const echoedPromptTail = 'hi';
+    const tmux = createTmux([
+      'boot line',
+      ['boot line', echoedPromptTail, 'assistant: hello there'].join('\n'),
+    ]);
+    const pendingTracker = {
+      getPendingChannel: vi.fn().mockReturnValue('ch-1'),
+      getPendingDepth: vi.fn().mockReturnValue(1),
+      getPendingPromptTail: vi.fn().mockReturnValue(echoedPromptTail),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      intervalMs: 300,
+    });
+
+    poller.start();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(messaging.sendToChannel).toHaveBeenCalledWith('ch-1', 'assistant: hello there');
+    expect(messaging.sendToChannel).not.toHaveBeenCalledWith('ch-1', echoedPromptTail);
+
+    poller.stop();
+  });
+
+  it('filters wrapped prompt echo fragments at the top of delta', async () => {
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'ch-1',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const echoedPromptTail = 'this is a wrapped prompt echo that appears in small fragments at the top';
+    const tmux = createTmux([
+      'boot line',
+      [
+        'boot line',
+        'this is a wrapped prompt',
+        'echo that appears in',
+        'small fragments at the top',
+        'assistant: response starts here',
+      ].join('\n'),
+    ]);
+    const pendingTracker = {
+      getPendingChannel: vi.fn().mockReturnValue('ch-1'),
+      getPendingDepth: vi.fn().mockReturnValue(1),
+      getPendingPromptTail: vi.fn().mockReturnValue(echoedPromptTail),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      intervalMs: 300,
+    });
+
+    poller.start();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(messaging.sendToChannel).toHaveBeenCalledWith('ch-1', 'assistant: response starts here');
+    const joinedPayload = messaging.sendToChannel.mock.calls.map((args: any[]) => String(args[1] ?? '')).join('\n');
+    expect(joinedPayload).not.toContain('this is a wrapped prompt');
+
+    poller.stop();
+  });
+
   it('does not complete pending on echo-only delta frames', async () => {
     const stateManager = createStateManager([
       {

@@ -71,8 +71,11 @@ function createMessagingMock() {
 describe('BridgeMessageRouter (codex)', () => {
   afterEach(() => {
     delete process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS;
+    delete process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS;
     delete process.env.AGENT_DISCORD_CODEX_LONG_PROMPT_REENTER_THRESHOLD;
     delete process.env.AGENT_DISCORD_CODEX_LONG_PROMPT_REENTER_DELAY_MS;
+    delete process.env.AGENT_DISCORD_CODEX_AUTO_REENTER_CHUNK_BOUNDARY;
+    delete process.env.AGENT_DISCORD_TMUX_SEND_KEYS_CHUNK_SIZE;
   });
 
   it('relaunches codex instead of sending prompt when pane is at shell', async () => {
@@ -124,6 +127,7 @@ describe('BridgeMessageRouter (codex)', () => {
 
   it('submits prompt to codex pane when codex is active', async () => {
     process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
 
     const { messaging, getCallback } = createMessagingMock();
     const tmux = {
@@ -167,8 +171,101 @@ describe('BridgeMessageRouter (codex)', () => {
     expect(pendingTracker.markRetry).not.toHaveBeenCalled();
   });
 
+  it('re-sends Enter when codex submit verification still sees prompt tail', async () => {
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_LONG_PROMPT_REENTER_THRESHOLD = '99999';
+    process.env.AGENT_DISCORD_CODEX_LONG_PROMPT_REENTER_DELAY_MS = '0';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+      capturePaneFromWindow: vi.fn().mockReturnValue('this is a prompt tail long enough for submit verification'),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', 'this is a prompt tail long enough for submit verification', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    expect(tmux.sendEnterToWindow).toHaveBeenCalledTimes(2);
+    expect(tmux.sendEnterToWindow).toHaveBeenNthCalledWith(1, 'agent-demo', 'demo-codex', 'codex');
+    expect(tmux.sendEnterToWindow).toHaveBeenNthCalledWith(2, 'agent-demo', 'demo-codex', 'codex');
+  });
+
+  it('does not re-send Enter when codex pane already shows working marker', async () => {
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_LONG_PROMPT_REENTER_THRESHOLD = '99999';
+    process.env.AGENT_DISCORD_CODEX_LONG_PROMPT_REENTER_DELAY_MS = '0';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+      capturePaneFromWindow: vi.fn().mockReturnValue('Esc to interrupt'),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', 'hello codex', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    expect(tmux.sendEnterToWindow).toHaveBeenCalledTimes(1);
+  });
+
   it('submits very long codex prompt via type+enter path without truncation', async () => {
     process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
     process.env.AGENT_DISCORD_CODEX_LONG_PROMPT_REENTER_DELAY_MS = '0';
 
     const { messaging, getCallback } = createMessagingMock();
@@ -213,8 +310,105 @@ describe('BridgeMessageRouter (codex)', () => {
     expect(pendingTracker.markError).not.toHaveBeenCalled();
   });
 
+  it('auto-tunes Enter retry at 2000-char chunk boundary', async () => {
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_LONG_PROMPT_REENTER_THRESHOLD = '99999';
+    process.env.AGENT_DISCORD_CODEX_LONG_PROMPT_REENTER_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_AUTO_REENTER_CHUNK_BOUNDARY = 'true';
+    process.env.AGENT_DISCORD_TMUX_SEND_KEYS_CHUNK_SIZE = '2000';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    const exactBoundaryPrompt = 'z'.repeat(2000);
+    await callback('codex', exactBoundaryPrompt, 'demo', 'ch-1', 'msg-1', 'codex');
+
+    expect(tmux.typeKeysToWindow).toHaveBeenCalledWith('agent-demo', 'demo-codex', exactBoundaryPrompt, 'codex');
+    expect(tmux.sendEnterToWindow).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not auto-retry just below boundary when verify does not indicate failure', async () => {
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_LONG_PROMPT_REENTER_THRESHOLD = '99999';
+    process.env.AGENT_DISCORD_CODEX_LONG_PROMPT_REENTER_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_AUTO_REENTER_CHUNK_BOUNDARY = 'true';
+    process.env.AGENT_DISCORD_TMUX_SEND_KEYS_CHUNK_SIZE = '2000';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+      // Return a working marker so verify path does not request retry.
+      capturePaneFromWindow: vi.fn().mockReturnValue('Esc to interrupt'),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', 'y'.repeat(1999), 'demo', 'ch-1', 'msg-1', 'codex');
+
+    expect(tmux.sendEnterToWindow).toHaveBeenCalledTimes(1);
+  });
+
   it('retries the last remembered prompt with /retry', async () => {
     process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
 
     const { messaging, getCallback } = createMessagingMock();
     const tmux = {
@@ -476,6 +670,7 @@ describe('BridgeMessageRouter (codex)', () => {
 
   it('continues tmux delivery even if pending reaction update fails', async () => {
     process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
 
     const { messaging, getCallback } = createMessagingMock();
     const tmux = {
@@ -518,6 +713,7 @@ describe('BridgeMessageRouter (codex)', () => {
 
   it('prefers remembered conversation route over channel default', async () => {
     process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
 
     const { messaging, getCallback } = createMessagingMock();
     const tmux = {

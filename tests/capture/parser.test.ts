@@ -1,5 +1,52 @@
 import { stripAnsi, cleanCapture, splitForDiscord, stripOuterCodeblock, stripFilePaths } from '../../src/capture/parser.js';
 
+function createDeterministicPrng(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 0x100000000;
+  };
+}
+
+function randomInt(next: () => number, min: number, max: number): number {
+  return Math.floor(next() * (max - min + 1)) + min;
+}
+
+function generateSyntheticOutput(seed: number): string {
+  const next = createDeterministicPrng(seed);
+  const targetLength = randomInt(next, 0, 16000);
+  if (targetLength === 0) return '';
+
+  let out = '';
+  while (out.length < targetLength) {
+    const mode = randomInt(next, 0, 4);
+    if (mode === 0) {
+      out += `line-${randomInt(next, 1, 99999)} `;
+      out += 'alpha '.repeat(randomInt(next, 1, 8));
+      out += '\n';
+      continue;
+    }
+    if (mode === 1) {
+      out += 'x'.repeat(randomInt(next, 1, 2600));
+      out += randomInt(next, 0, 1) === 0 ? '' : '\n';
+      continue;
+    }
+    if (mode === 2) {
+      out += '0123456789-'.repeat(randomInt(next, 1, 70));
+      out += '\n';
+      continue;
+    }
+    if (mode === 3) {
+      out += 'word '.repeat(randomInt(next, 1, 120));
+      out += '\n\n';
+      continue;
+    }
+    out += 'A_B-C.D '.repeat(randomInt(next, 1, 90));
+  }
+
+  return out.slice(0, targetLength);
+}
+
 describe('stripAnsi', () => {
   it('returns plain text unchanged', () => {
     const plain = 'hello world';
@@ -199,6 +246,27 @@ describe('splitForDiscord', () => {
       const fences = chunk.match(/^```/gm) || [];
       expect(fences.length % 2).toBe(0);
       expect(chunk.length).toBeLessThanOrEqual(500);
+    }
+  });
+
+  it('stress: 50 synthetic outputs keep full text without truncation', () => {
+    const cases = 50;
+    for (let i = 0; i < cases; i += 1) {
+      const seed = 1000 + i;
+      const text = generateSyntheticOutput(seed);
+      const localNext = createDeterministicPrng(seed * 7);
+      const requestedMax = randomInt(localNext, 60, 2600);
+      const effectiveMax = Math.min(2000, requestedMax);
+
+      const chunks = splitForDiscord(text, requestedMax);
+      expect(chunks.length).toBeGreaterThan(0);
+      for (const chunk of chunks) {
+        expect(chunk.length).toBeLessThanOrEqual(effectiveMax);
+      }
+      if (text.length > 0) {
+        expect(chunks.every((chunk) => chunk.length > 0)).toBe(true);
+      }
+      expect(chunks.join('')).toBe(text);
     }
   });
 });

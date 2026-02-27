@@ -608,12 +608,12 @@ export class BridgeCapturePoller {
 
     const promptNorms = this.getPendingPromptTails(projectName, agentType, instanceId)
       .map((tail) => this.normalizePromptFragment(tail))
-      .filter((tail) => tail.length >= 16);
+      .filter((tail) => tail.length > 0);
     if (promptNorms.length === 0) return delta;
 
     const lines = delta.split('\n');
     let dropCount = 0;
-    const maxScanLines = pendingDepth === 1 ? 8 : 2;
+    const maxScanLines = pendingDepth === 1 ? 16 : 4;
 
     for (let i = 0; i < Math.min(lines.length, maxScanLines); i += 1) {
       const normalizedLine = this.normalizePromptFragment(lines[i] || '');
@@ -632,6 +632,15 @@ export class BridgeCapturePoller {
       dropCount += 1;
     }
 
+    if (pendingDepth === 1) {
+      for (let end = Math.max(2, dropCount + 1); end <= Math.min(lines.length, maxScanLines); end += 1) {
+        const block = this.normalizePromptFragment(lines.slice(0, end).join(' '));
+        if (/^(assistant|system|user)\s*:/i.test(block)) break;
+        if (!this.isLikelyPromptEchoBlock(promptNorms[0]!, block)) break;
+        dropCount = end;
+      }
+    }
+
     if (dropCount === 0) return delta;
     return lines.slice(dropCount).join('\n');
   }
@@ -641,14 +650,25 @@ export class BridgeCapturePoller {
   }
 
   private isLikelyPromptEchoLine(promptNorm: string, normalizedLine: string): boolean {
-    if (normalizedLine.length < 16) return false;
     if (normalizedLine === promptNorm) return true;
+    if (normalizedLine.length < 16) return false;
 
     // Wrapped terminal echo often appears as a leading/trailing fragment of the
     // submitted prompt. Keep this strict to avoid stripping real assistant text.
     if (promptNorm.startsWith(normalizedLine) && normalizedLine.length >= 24) return true;
     if (promptNorm.endsWith(normalizedLine) && normalizedLine.length >= 24) return true;
 
+    return false;
+  }
+
+  private isLikelyPromptEchoBlock(promptNorm: string, normalizedBlock: string): boolean {
+    if (normalizedBlock.length === 0) return false;
+    if (normalizedBlock === promptNorm) return true;
+    if (normalizedBlock.length < 24) return false;
+
+    if (promptNorm.startsWith(normalizedBlock)) return true;
+    if (promptNorm.endsWith(normalizedBlock)) return true;
+    if (normalizedBlock.length >= 48 && promptNorm.includes(normalizedBlock)) return true;
     return false;
   }
 

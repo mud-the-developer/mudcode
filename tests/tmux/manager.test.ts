@@ -305,6 +305,37 @@ describe('TmuxManager', () => {
       );
     });
 
+    it('respects 2000-char boundary when sending keys with Enter', () => {
+      const run = (length: number) => {
+        executor.calls.length = 0;
+        executor.nextResult = '1\n';
+        const payload = 'b'.repeat(length);
+        tmux.sendKeysToWindow('agent-session', 'window1', payload);
+        const sendCalls = executor.calls.filter(
+          (call) =>
+            call.command.includes("tmux send-keys -t 'agent-session:window1.1'") &&
+            !call.command.endsWith(' Enter'),
+        );
+        return sendCalls;
+      };
+
+      const below = run(1999);
+      expect(below).toHaveLength(1);
+      expect(below[0].command).toContain(`'${'b'.repeat(1999)}'`);
+      expect(executor.calls[executor.calls.length - 1].command).toContain("tmux send-keys -t 'agent-session:window1.1' Enter");
+
+      const exact = run(2000);
+      expect(exact).toHaveLength(1);
+      expect(exact[0].command).toContain(`'${'b'.repeat(2000)}'`);
+      expect(executor.calls[executor.calls.length - 1].command).toContain("tmux send-keys -t 'agent-session:window1.1' Enter");
+
+      const above = run(2001);
+      expect(above).toHaveLength(2);
+      expect(above[0].command).toContain(`'${'b'.repeat(2000)}'`);
+      expect(above[1].command).toContain(`'b'`);
+      expect(executor.calls[executor.calls.length - 1].command).toContain("tmux send-keys -t 'agent-session:window1.1' Enter");
+    });
+
   });
 
   describe('typeKeysToWindow', () => {
@@ -331,6 +362,35 @@ describe('TmuxManager', () => {
       expect(sendCalls[1].command).toContain(`'${'y'.repeat(2000)}'`);
       expect(sendCalls[2].command).toContain(`'${'y'.repeat(500)}'`);
       expect(sendCalls.every((call) => !call.command.endsWith(' Enter'))).toBe(true);
+    });
+
+    it('respects 2000-char boundary when typing keys without Enter', () => {
+      const run = (length: number) => {
+        executor.calls.length = 0;
+        executor.nextResult = '1\n';
+        const payload = 'c'.repeat(length);
+        tmux.typeKeysToWindow('agent-session', 'gemini', payload);
+        const sendCalls = executor.calls.filter((call) =>
+          call.command.includes("tmux send-keys -t 'agent-session:gemini.1'"),
+        );
+        return sendCalls;
+      };
+
+      const below = run(1999);
+      expect(below).toHaveLength(1);
+      expect(below[0].command).toContain(`'${'c'.repeat(1999)}'`);
+      expect(below[0].command).not.toContain(' Enter');
+
+      const exact = run(2000);
+      expect(exact).toHaveLength(1);
+      expect(exact[0].command).toContain(`'${'c'.repeat(2000)}'`);
+      expect(exact[0].command).not.toContain(' Enter');
+
+      const above = run(2001);
+      expect(above).toHaveLength(2);
+      expect(above[0].command).toContain(`'${'c'.repeat(2000)}'`);
+      expect(above[1].command).toContain(`'c'`);
+      expect(above.every((call) => !call.command.endsWith(' Enter'))).toBe(true);
     });
   });
 

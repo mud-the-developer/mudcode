@@ -23,6 +23,7 @@ import { healthCommand } from '../src/cli/commands/health.js';
 import { listCommand } from '../src/cli/commands/list.js';
 import { agentsCommand } from '../src/cli/commands/agents.js';
 import { daemonCommand } from '../src/cli/commands/daemon.js';
+import { diagnoseCommand } from '../src/cli/commands/diagnose.js';
 import { uninstallCommand } from '../src/cli/commands/uninstall.js';
 import { getDaemonStatus, restartDaemonIfRunning } from '../src/app/daemon-service.js';
 import { main as daemonMain } from '../src/index.js';
@@ -436,7 +437,7 @@ const INTERACTIVE_MENU: InteractiveMenuItem[] = [
   { id: 6, icon: '🖥️', title: 'Open TUI', summary: 'Open terminal UI for realtime project management.', accent: chalk.magentaBright },
   { id: 7, icon: '⚙️', title: 'Show config', summary: 'Print current configuration and key runtime values.', accent: chalk.whiteBright },
   { id: 8, icon: '🔄', title: 'Update from git', summary: 'Pull latest repo and reinstall global CLI from local path.', accent: chalk.hex('#ff9f43') },
-  { id: 9, icon: '🧪', title: 'Output test', summary: 'Run capture-output probe presets to verify live delivery.', accent: chalk.hex('#2dd4bf') },
+  { id: 9, icon: '🧪', title: 'Output test', summary: 'Run capture probe or Discord E2E diagnose (send/read/history).', accent: chalk.hex('#2dd4bf') },
   { id: 10, icon: '👋', title: 'Exit', summary: 'Close interactive launcher.', accent: chalk.gray },
 ];
 
@@ -611,14 +612,50 @@ async function runInteractiveDaemonControl(): Promise<void> {
   await daemonCommand(action, { clearSession });
 }
 
+function parseInteractiveBoundedInt(raw: string, fallback: number, min: number, max: number): number {
+  const trimmed = raw.trim();
+  if (!trimmed) return fallback;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, Math.trunc(parsed)));
+}
+
 async function runInteractiveOutputTest(options: InteractiveLauncherOptions): Promise<void> {
   printInteractiveSection('🧪', 'Output Test', 'Run a live capture probe preset to validate output flow stability.');
-  console.log(chalk.white('\nProbe presets:'));
-  console.log(chalk.gray('  1) Quick    (polls=3, interval=300ms)'));
-  console.log(chalk.gray('  2) Standard (polls=6, interval=700ms) [recommended]'));
-  console.log(chalk.gray('  3) Deep     (polls=10, interval=1000ms)'));
-  const answer = await prompt(chalk.white('Select preset [1-3] (default 2): '));
+  console.log(chalk.white('\nTest modes:'));
+  console.log(chalk.gray('  1) Capture Quick    (polls=3, interval=300ms)'));
+  console.log(chalk.gray('  2) Capture Standard (polls=6, interval=700ms) [recommended]'));
+  console.log(chalk.gray('  3) Capture Deep     (polls=10, interval=1000ms)'));
+  console.log(chalk.gray('  4) Discord E2E Diagnose (send + read-back + history parsing)'));
+  const answer = await prompt(chalk.white('Select mode [1-4] (default 2): '));
   const index = Number((answer || '2').trim());
+
+  if (index === 4) {
+    const projectName = (await prompt(chalk.white('Project name (optional): '))).trim();
+    const instanceId = (await prompt(chalk.white('Instance ID (optional): '))).trim();
+    const channelId = (await prompt(chalk.white('Channel ID override (optional): '))).trim();
+    const runProbe = await confirmYesNo(chalk.white('Run basic send/read probe too? [Y/n]: '), true);
+    const ioBoundary = await confirmYesNo(chalk.white('Run Discord I/O boundary test (1990/1999/2000 chars)? [Y/n]: '), true);
+    const includeOversize = ioBoundary
+      ? await confirmYesNo(chalk.white('Also test 2001-char oversize rejection? [y/N]: '), false)
+      : false;
+    const lookbackRaw = await prompt(chalk.white('History lookback [80] (10-200): '));
+    const timeoutRaw = await prompt(chalk.white('Probe timeout ms [15000] (3000-120000): '));
+    const lookback = parseInteractiveBoundedInt(lookbackRaw, 80, 10, 200);
+    const timeoutMs = parseInteractiveBoundedInt(timeoutRaw, 15000, 3000, 120000);
+
+    await diagnoseCommand({
+      project: projectName || undefined,
+      instance: instanceId || undefined,
+      channel: channelId || undefined,
+      lookback,
+      timeoutMs,
+      skipProbe: !runProbe,
+      ioBoundary,
+      includeOversize,
+    });
+    return;
+  }
 
   const presetMap: Record<number, { polls: number; intervalMs: number }> = {
     1: { polls: 3, intervalMs: 300 },
@@ -863,6 +900,38 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
           captureTest: argv.captureTest,
           captureTestPolls: argv.captureTestPolls,
           captureTestIntervalMs: argv.captureTestIntervalMs,
+        })
+    )
+    .command(
+      'diagnose',
+      'Run Discord E2E self-diagnosis (probe send/read + history pattern scan)',
+      (y: Argv) => y
+        .option('project', { alias: 'p', type: 'string', describe: 'Project name to target' })
+        .option('instance', { alias: 'i', type: 'string', describe: 'Instance ID to target' })
+        .option('channel', { alias: 'c', type: 'string', describe: 'Override target channel ID' })
+        .option('lookback', { type: 'number', describe: 'Recent message count to scan (10-200)' })
+        .option('timeout-ms', { type: 'number', describe: 'Probe read-back timeout in ms (3000-120000)' })
+        .option('skip-probe', { type: 'boolean', default: false, describe: 'Skip send/read probe and only parse history' })
+        .option('io-boundary', {
+          type: 'boolean',
+          default: false,
+          describe: 'Run Discord I/O boundary probes at 1990/1999/2000 chars and verify exact read-back',
+        })
+        .option('include-oversize', {
+          type: 'boolean',
+          default: false,
+          describe: 'When used with --io-boundary, also attempt 2001 chars (expected rejection)',
+        }),
+      async (argv: any) =>
+        diagnoseCommand({
+          project: argv.project,
+          instance: argv.instance,
+          channel: argv.channel,
+          lookback: argv.lookback,
+          timeoutMs: argv.timeoutMs,
+          skipProbe: argv.skipProbe,
+          ioBoundary: argv.ioBoundary,
+          includeOversize: argv.includeOversize,
         })
     )
     .command(

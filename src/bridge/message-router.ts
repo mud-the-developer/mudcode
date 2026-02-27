@@ -187,6 +187,45 @@ export class BridgeMessageRouter {
     }
   }
 
+  private normalizeCaptureLine(line: string): string {
+    return line.replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+
+  private normalizePromptTail(prompt: string): string[] {
+    const normalized = prompt.replace(/\s+/g, ' ').trim().toLowerCase();
+    if (normalized.length < 24) return [];
+    const tails = [160, 120, 80, 48]
+      .filter((size) => normalized.length >= size)
+      .map((size) => normalized.slice(-size));
+    return [...new Set([normalized, ...tails])];
+  }
+
+  private shouldRetryCodexSubmit(sessionName: string, windowName: string, prompt: string): boolean {
+    try {
+      const captureRaw = this.deps.tmux.capturePaneFromWindow(sessionName, windowName, 'codex');
+      if (this.hasEscToInterruptMarker(captureRaw)) return false;
+
+      const cleaned = cleanCapture(captureRaw);
+      if (!cleaned || cleaned.trim().length === 0) return true;
+
+      const tailLines = cleaned
+        .split('\n')
+        .map((line) => this.normalizeCaptureLine(line))
+        .filter((line) => line.length > 0)
+        .slice(-24);
+
+      const tailJoined = tailLines.join('\n');
+      const promptTails = this.normalizePromptTail(prompt);
+      if (promptTails.some((tail) => tailJoined.includes(tail))) {
+        return true;
+      }
+
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
   private buildInputStatus(snapshot: PendingRuntimeSnapshot, paneWorkingHint: boolean): string {
     if (snapshot.pendingDepth > 0) {
       const latestStage = snapshot.latestStage || snapshot.oldestStage || 'received';
@@ -804,6 +843,15 @@ export class BridgeMessageRouter {
     return Math.trunc(n);
   }
 
+  private getEnvBool(name: string, defaultValue: boolean): boolean {
+    const raw = process.env[name];
+    if (!raw) return defaultValue;
+    const normalized = raw.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+    return defaultValue;
+  }
+
   private async sleep(ms: number): Promise<void> {
     if (ms <= 0) return;
     await new Promise((resolve) => setTimeout(resolve, ms));
@@ -848,10 +896,27 @@ export class BridgeMessageRouter {
     await this.sleep(delayMs);
     this.deps.tmux.sendEnterToWindow(tmuxSession, windowName, 'codex');
 
+    const tmuxChunkSize = Math.max(1, this.getEnvInt('AGENT_DISCORD_TMUX_SEND_KEYS_CHUNK_SIZE', 2000));
+    const promptLength = trimmedPrompt.length;
+    const estimatedChunkCount = Math.max(1, Math.ceil(promptLength / tmuxChunkSize));
+    const exactChunkBoundary = promptLength > 0 && (promptLength % tmuxChunkSize === 0);
+    const autoBoundaryRetry = this.getEnvBool('AGENT_DISCORD_CODEX_AUTO_REENTER_CHUNK_BOUNDARY', true);
+
     // Codex can occasionally miss the first Enter for very long typed payloads.
     // Send one follow-up Enter to match the observed manual recovery (/enter).
     const retryThreshold = this.getEnvInt('AGENT_DISCORD_CODEX_LONG_PROMPT_REENTER_THRESHOLD', 3500);
-    if (trimmedPrompt.length >= Math.max(1, retryThreshold)) {
+    let shouldRetrySubmit = trimmedPrompt.length >= Math.max(1, retryThreshold);
+    if (!shouldRetrySubmit && autoBoundaryRetry && (estimatedChunkCount >= 2 || exactChunkBoundary)) {
+      // Auto-tuned guard for 2000-char tmux send-keys boundary and multi-chunk prompts.
+      shouldRetrySubmit = true;
+    }
+    if (!shouldRetrySubmit) {
+      const verifyDelayMs = this.getEnvInt('AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS', 140);
+      await this.sleep(Math.max(0, verifyDelayMs));
+      shouldRetrySubmit = this.shouldRetryCodexSubmit(tmuxSession, windowName, trimmedPrompt);
+    }
+
+    if (shouldRetrySubmit) {
       const retryDelayMs = this.getEnvInt('AGENT_DISCORD_CODEX_LONG_PROMPT_REENTER_DELAY_MS', 120);
       await this.sleep(Math.max(0, retryDelayMs));
       this.deps.tmux.sendEnterToWindow(tmuxSession, windowName, 'codex');
