@@ -652,6 +652,7 @@ export class BridgeCapturePoller {
     //   "? for shortcuts ... 95% context left"
     //   "rfor shortcuts t ... 94% context left"
     //   "95% context left"
+    //   "gpt-5.3-codex xhigh · 99% left · ~/repo/path"
     const compact = line.replace(/\s+/g, ' ').trim();
     if (compact.length === 0) return true;
 
@@ -661,6 +662,7 @@ export class BridgeCapturePoller {
 
     if (/^\d{1,3}%\s*context left$/i.test(compact)) return true;
     if (/^\??\s*for shortcuts$/i.test(compact)) return true;
+    if (/^.+[·•]\s*\d{1,3}%\s*left\s*[·•]\s*(?:~\/|\/).+$/i.test(compact)) return true;
 
     return false;
   }

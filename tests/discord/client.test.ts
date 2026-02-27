@@ -100,6 +100,25 @@ describe('DiscordClient', () => {
       expect(mappings1).not.toBe(mappings2);
       expect(mappings1.size).toBe(mappings2.size);
     });
+
+    it('registerChannelMappings replaces stale mappings', () => {
+      const client = new DiscordClient('test-token');
+
+      client.registerChannelMappings([
+        { channelId: 'ch-old', projectName: 'legacy', agentType: 'codex' },
+      ]);
+      client.registerChannelMappings([
+        { channelId: 'ch-new', projectName: 'proj', agentType: 'claude' },
+      ]);
+
+      const mappings = client.getChannelMapping();
+      expect(mappings.size).toBe(1);
+      expect(mappings.get('ch-old')).toBeUndefined();
+      expect(mappings.get('ch-new')).toEqual({
+        projectName: 'proj',
+        agentType: 'claude',
+      });
+    });
   });
 
   describe('Message handling', () => {
@@ -445,6 +464,9 @@ describe('DiscordClient', () => {
       vi.setSystemTime(new Date('2026-02-23T12:34:56Z'));
       try {
         const client = new DiscordClient('test-token');
+        client.registerChannelMappings([
+          { channelId: 'ch-123', projectName: 'proj', agentType: 'claude' },
+        ]);
         const mockChannel = {
           isTextBased: () => true,
           name: 'demo-codex',
@@ -458,6 +480,7 @@ describe('DiscordClient', () => {
 
         expect(archived).toMatch(/^saved_\d{8}_\d{6}_demo-codex$/);
         expect(mockChannel.setName).toHaveBeenCalledWith(archived);
+        expect(client.getChannelMapping().has('ch-123')).toBe(false);
       } finally {
         vi.useRealTimers();
       }
@@ -499,6 +522,33 @@ describe('DiscordClient', () => {
   });
 
   describe('Connect', () => {
+    it('does not auto-discover channel mappings from channel names by default', async () => {
+      const client = new DiscordClient('test-token');
+      const mockClient = getMockClient();
+      const setCommands = vi.fn().mockResolvedValue(undefined);
+      mockClient.guilds.cache = new Map([
+        [
+          'g-1',
+          {
+            id: 'g-1',
+            commands: { set: setCommands },
+            channels: {
+              cache: new Map([
+                ['ch-legacy', { id: 'ch-legacy', isTextBased: () => true, name: 'legacy-codex' }],
+              ]),
+            },
+          },
+        ],
+      ]);
+
+      const onReadyHandler = mockClient.on.mock.calls.find(
+        (call: any[]) => call[0] === 'clientReady',
+      )?.[1];
+      await onReadyHandler();
+
+      expect(client.getChannelMapping().size).toBe(0);
+    });
+
     it('normalizes bot token before login', async () => {
       const client = new DiscordClient('  "Bot test-token-123"  ');
       const mockClient = getMockClient();

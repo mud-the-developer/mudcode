@@ -59,7 +59,9 @@ export class DiscordClient implements MessagingClient {
   private setupEventHandlers(): void {
     this.client.on('clientReady', async () => {
       console.log(`Discord bot logged in as ${this.client.user?.tag}`);
-      this.scanExistingChannels();
+      if (this.shouldScanExistingChannels()) {
+        this.scanExistingChannels();
+      }
       await this.registerSessionControlCommands();
     });
 
@@ -776,6 +778,8 @@ export class DiscordClient implements MessagingClient {
    * Register channel mappings from external source (e.g., state file)
    */
   registerChannelMappings(mappings: { channelId: string; projectName: string; agentType: string; instanceId?: string }[]): void {
+    // Keep routing strict: state-provided mappings are authoritative.
+    this.channelMapping.clear();
     for (const m of mappings) {
       this.channelMapping.set(m.channelId, {
         projectName: m.projectName,
@@ -842,6 +846,7 @@ export class DiscordClient implements MessagingClient {
           : 'channel';
       const savedName = this.buildSavedChannelName(currentName);
       await (channel as any).setName(savedName);
+      this.channelMapping.delete(channelId);
       return savedName;
     } catch (error) {
       console.error(`Failed to archive channel ${channelId}:`, error);
@@ -947,6 +952,12 @@ export class DiscordClient implements MessagingClient {
     if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
     if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
     return fallback;
+  }
+
+  private shouldScanExistingChannels(): boolean {
+    // Disabled by default so only explicit state bindings are routed.
+    // Set AGENT_DISCORD_SCAN_EXISTING_CHANNELS=true to opt in to legacy name-based discovery.
+    return this.resolveBooleanEnv('AGENT_DISCORD_SCAN_EXISTING_CHANNELS', false);
   }
 
   private shouldSuppressNotifications(): boolean {

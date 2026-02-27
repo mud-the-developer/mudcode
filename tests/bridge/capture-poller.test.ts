@@ -737,6 +737,95 @@ describe('BridgeCapturePoller', () => {
     poller.stop();
   });
 
+  it('strips codex hud status lines with model profile and path', async () => {
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'ch-1',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const tmux = createTmux([
+      'boot line',
+      [
+        'boot line',
+        'gpt-5.3-codex xhigh · 99% left · ~/yonsei/mud/ar_xapp_v3',
+        'assistant: ready on new hud',
+      ].join('\n'),
+    ]);
+    const pendingTracker = createPendingTracker();
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      intervalMs: 300,
+    });
+
+    poller.start();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(messaging.sendToChannel).toHaveBeenCalledWith('ch-1', 'assistant: ready on new hud');
+
+    poller.stop();
+  });
+
+  it('does not send codex hud-only left percentage updates', async () => {
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'ch-1',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const tmux = createTmux([
+      'gpt-5.3-codex xhigh · 99% left · ~/yonsei/mud/ar_xapp_v3',
+      'gpt-5.3-codex xhigh · 96% left · ~/yonsei/mud/ar_xapp_v3',
+      'gpt-5.3-codex xhigh · 91% left · ~/yonsei/mud/ar_xapp_v3',
+    ]);
+    const pendingTracker = createPendingTracker();
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      intervalMs: 300,
+    });
+
+    poller.start();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
+    expect(pendingTracker.markCompleted).not.toHaveBeenCalled();
+
+    poller.stop();
+  });
+
   it('strips malformed codex footer variants and keeps real output', async () => {
     const stateManager = createStateManager([
       {
