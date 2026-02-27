@@ -694,6 +694,7 @@ export class BridgeCapturePoller {
     const prevLines = previous.split('\n');
     const currLines = current.split('\n');
     if (currLines.length === 0) return '';
+    let foundTailAnchorOnly = false;
 
     // Use the most recent stable line from previous snapshot as an anchor.
     for (let i = prevLines.length - 1; i >= 0; i -= 1) {
@@ -704,8 +705,16 @@ export class BridgeCapturePoller {
         return currLines.slice(anchor + 1).join('\n');
       }
       if (anchor === currLines.length - 1) {
-        return '';
+        // For full-screen TUI redraws, the bottom status line often stays
+        // identical while content above changes completely. Keep scanning for
+        // a better anchor; if we only find tail anchors, fall back to tail.
+        foundTailAnchorOnly = true;
+        continue;
       }
+    }
+
+    if (foundTailAnchorOnly) {
+      return currLines.slice(Math.max(0, currLines.length - 20)).join('\n');
     }
 
     // As a last resort for full-screen redraws, send only the tail.

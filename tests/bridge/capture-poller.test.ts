@@ -697,6 +697,48 @@ describe('BridgeCapturePoller', () => {
     poller.stop();
   });
 
+  it('does not drop codex output when only bottom status line anchors the redraw', async () => {
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'ch-1',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const footer = 'gpt-5.3-codex xhigh · 31% left · ~/yonsei/mud/ar_xapp_v3';
+    const tmux = createTmux([
+      ['old view line', footer].join('\n'),
+      ['assistant: render from full-screen redraw', footer].join('\n'),
+    ]);
+    const pendingTracker = createPendingTracker();
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      intervalMs: 300,
+    });
+
+    poller.start();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(messaging.sendToChannel).toHaveBeenCalledWith('ch-1', 'assistant: render from full-screen redraw');
+
+    poller.stop();
+  });
+
   it('does not send codex footer-only percentage updates', async () => {
     const stateManager = createStateManager([
       {
