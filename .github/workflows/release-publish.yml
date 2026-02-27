@@ -1,6 +1,9 @@
 name: Release Publish
 
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       scope:
@@ -48,7 +51,7 @@ jobs:
           - name: windows-x64
             runs_on: windows-latest
             full_only: true
-    if: ${{ matrix.full_only != true || inputs.profile == 'full' }}
+    if: ${{ matrix.full_only != true || (github.event_name == 'workflow_dispatch' && inputs.profile == 'full') }}
 
     steps:
       - name: Checkout
@@ -64,7 +67,7 @@ jobs:
 
       - name: Build host release binaries
         env:
-          MUDCODE_NPM_SCOPE: ${{ inputs.scope }}
+          MUDCODE_NPM_SCOPE: ${{ github.event_name == 'workflow_dispatch' && inputs.scope || '@mudramo' }}
           MUDCODE_RS_SKIP_LOCAL_BUILD: "1"
         run: bun run build:release:binaries:host
 
@@ -128,19 +131,31 @@ jobs:
 
       - name: Rebuild manifest + npm meta package
         env:
-          MUDCODE_NPM_SCOPE: ${{ inputs.scope }}
+          MUDCODE_NPM_SCOPE: ${{ github.event_name == 'workflow_dispatch' && inputs.scope || '@mudramo' }}
         run: |
           bun run build:release:manifest
           bun run build:release:npm
 
+      - name: Validate tag matches package version
+        if: ${{ github.event_name == 'push' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION="$(node -e "console.log(JSON.parse(require('fs').readFileSync('package.json', 'utf8')).version)")"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "Tag version (v$TAG_VERSION) does not match package.json version ($PKG_VERSION)."
+            exit 1
+          fi
+
       - name: Publish release packages (bun)
         env:
-          MUDCODE_NPM_SCOPE: ${{ inputs.scope }}
-          MUDCODE_RELEASE_PROFILE: ${{ inputs.profile }}
+          MUDCODE_NPM_SCOPE: ${{ github.event_name == 'workflow_dispatch' && inputs.scope || '@mudramo' }}
+          MUDCODE_RELEASE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.profile || 'linux' }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          ARGS="--pm bun --skip-build --access public --tag ${{ inputs.tag }} --profile ${{ inputs.profile }}"
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
+          ARGS="--pm bun --skip-build --access public --tag ${{ github.event_name == 'workflow_dispatch' && inputs.tag || 'latest' }} --profile ${{ github.event_name == 'workflow_dispatch' && inputs.profile || 'linux' }}"
+          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}" = "true" ]; then
             ARGS="$ARGS --dry-run"
           fi
           node scripts/publish-release.mjs $ARGS

@@ -1,0 +1,112 @@
+name: Auto Version Bump
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: auto-version-bump-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Bump patch version
+        id: bump
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('fs');
+
+          const pkgPath = 'package.json';
+          const lockPath = 'package-lock.json';
+          const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+
+          const parts = String(pkg.version || '').split('.');
+          if (parts.length !== 3) {
+            throw new Error(`Unsupported semver format: ${pkg.version}`);
+          }
+          const major = Number(parts[0]);
+          const minor = Number(parts[1]);
+          const patch = Number(parts[2]);
+          if (![major, minor, patch].every(Number.isInteger)) {
+            throw new Error(`Invalid semver numbers: ${pkg.version}`);
+          }
+
+          const next = `${major}.${minor}.${patch + 1}`;
+          pkg.version = next;
+
+          if (pkg.optionalDependencies && typeof pkg.optionalDependencies === 'object') {
+            for (const key of Object.keys(pkg.optionalDependencies)) {
+              if (/\/mudcode-/.test(key)) {
+                pkg.optionalDependencies[key] = next;
+              }
+            }
+          }
+
+          fs.writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
+
+          if (fs.existsSync(lockPath)) {
+            const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+            lock.version = next;
+
+            if (lock.packages && lock.packages['']) {
+              lock.packages[''].version = next;
+              const rootOptional = lock.packages[''].optionalDependencies;
+              if (rootOptional && typeof rootOptional === 'object') {
+                for (const key of Object.keys(rootOptional)) {
+                  if (/\/mudcode-/.test(key)) {
+                    rootOptional[key] = next;
+                  }
+                }
+              }
+            }
+
+            fs.writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`);
+          }
+          NODE
+
+          NEXT_VERSION="$(node -p \"require('./package.json').version\")"
+          echo "next_version=${NEXT_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "Next version: ${NEXT_VERSION}"
+
+      - name: Commit version bump
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add package.json package-lock.json
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "chore(release): bump version to v${{ steps.bump.outputs.next_version }} [skip ci]"
+          git tag "v${{ steps.bump.outputs.next_version }}"
+
+      - name: Push bump commit + tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push origin HEAD:main
+          git push origin "v${{ steps.bump.outputs.next_version }}"
