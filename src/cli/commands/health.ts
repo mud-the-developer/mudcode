@@ -28,6 +28,7 @@ type InstanceHealth = {
   channelId: string | undefined;
   runtime?: RuntimeSnapshot;
   paneWorkingHint?: boolean;
+  captureProbe?: CaptureProbeSnapshot;
 };
 
 type RuntimeSnapshot = {
@@ -54,6 +55,22 @@ type RuntimeStatusPayload = {
   instances?: RuntimeStatusEntry[];
 };
 
+type CaptureProbeStatus = 'ok' | 'warn' | 'fail';
+
+type CaptureProbeSnapshot = {
+  enabled: true;
+  polls: number;
+  intervalMs: number;
+  captures: number;
+  changes: number;
+  emptyCaptures: number;
+  maxLines: number;
+  lastLines: number;
+  status: CaptureProbeStatus;
+  detail: string;
+  lastError?: string;
+};
+
 function pushCheck(checks: HealthCheck[], name: string, level: HealthLevel, detail: string): void {
   checks.push({ name, level, detail });
 }
@@ -71,6 +88,133 @@ function formatRuntimeAge(ageMs?: number): string {
   if (min < 60) return `${min}m`;
   const hour = Math.round(min / 60);
   return `${hour}h`;
+}
+
+function resolveCaptureProbePolls(raw?: number): number {
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    const n = Math.trunc(raw);
+    if (n >= 1 && n <= 20) return n;
+  }
+  return 4;
+}
+
+function resolveCaptureProbeIntervalMs(raw?: number): number {
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    const n = Math.trunc(raw);
+    if (n >= 300 && n <= 10000) return n;
+  }
+  return 1200;
+}
+
+function sleep(ms: number): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function captureProbeKey(instance: InstanceHealth): string {
+  return `${instance.projectName}:${instance.instanceId}`;
+}
+
+async function runCaptureProbe(
+  tmux: TmuxManager,
+  instances: InstanceHealth[],
+  polls: number,
+  intervalMs: number,
+): Promise<Map<string, CaptureProbeSnapshot>> {
+  type ProbeMutableState = {
+    previous?: string;
+    captures: number;
+    changes: number;
+    emptyCaptures: number;
+    maxLines: number;
+    lastLines: number;
+    lastError?: string;
+  };
+
+  const states = new Map<string, ProbeMutableState>();
+  for (const instance of instances) {
+    states.set(captureProbeKey(instance), {
+      captures: 0,
+      changes: 0,
+      emptyCaptures: 0,
+      maxLines: 0,
+      lastLines: 0,
+    });
+  }
+
+  const sampleOnce = (): void => {
+    for (const instance of instances) {
+      const key = captureProbeKey(instance);
+      const state = states.get(key);
+      if (!state) continue;
+      if (!instance.windowExists) continue;
+
+      try {
+        const captureRaw = tmux.capturePaneFromWindow(instance.tmuxSession, instance.tmuxWindow, instance.agentType);
+        const cleaned = cleanCapture(captureRaw);
+        const lineCount = cleaned.length > 0 ? cleaned.split('\n').length : 0;
+        state.captures += 1;
+        state.lastLines = lineCount;
+        state.maxLines = Math.max(state.maxLines, lineCount);
+        if (cleaned.trim().length === 0) state.emptyCaptures += 1;
+        if (typeof state.previous === 'string' && state.previous !== cleaned) {
+          state.changes += 1;
+        }
+        state.previous = cleaned;
+      } catch (error) {
+        state.lastError = error instanceof Error ? error.message : String(error);
+      }
+    }
+  };
+
+  sampleOnce();
+  for (let i = 1; i < polls; i += 1) {
+    await sleep(intervalMs);
+    sampleOnce();
+  }
+
+  const result = new Map<string, CaptureProbeSnapshot>();
+  for (const instance of instances) {
+    const key = captureProbeKey(instance);
+    const state = states.get(key);
+    if (!state) continue;
+
+    let status: CaptureProbeStatus = 'ok';
+    let detail = `captures=${state.captures}, changes=${state.changes}, lines=${state.lastLines}, max=${state.maxLines}`;
+    const pendingDepth = instance.runtime?.pendingDepth || 0;
+
+    if (!instance.windowExists) {
+      status = 'warn';
+      detail = 'skipped (tmux window missing)';
+    } else if (state.captures === 0) {
+      status = 'fail';
+      detail = state.lastError ? `capture failed: ${state.lastError}` : 'no captures collected';
+    } else if (state.emptyCaptures === state.captures) {
+      status = 'warn';
+      detail = `all captures were empty (${state.captures}/${state.captures})`;
+    } else if (pendingDepth > 0 && state.changes === 0) {
+      status = 'warn';
+      detail = instance.paneWorkingHint
+        ? `pending=${pendingDepth}, pane says working, but no screen deltas in ${polls} poll(s)`
+        : `pending=${pendingDepth}, but no screen deltas in ${polls} poll(s)`;
+    }
+
+    result.set(key, {
+      enabled: true,
+      polls,
+      intervalMs,
+      captures: state.captures,
+      changes: state.changes,
+      emptyCaptures: state.emptyCaptures,
+      maxLines: state.maxLines,
+      lastLines: state.lastLines,
+      status,
+      detail,
+      ...(state.lastError ? { lastError: state.lastError } : {}),
+    });
+  }
+
+  return result;
 }
 
 function hasEscToInterruptMarker(captureRaw: string): boolean {
@@ -151,7 +295,14 @@ async function fetchRuntimeStatus(port: number): Promise<Map<string, RuntimeSnap
   return map;
 }
 
-export async function healthCommand(options: TmuxCliOptions & { json?: boolean } = {}): Promise<void> {
+export async function healthCommand(
+  options: TmuxCliOptions & {
+    json?: boolean;
+    captureTest?: boolean;
+    captureTestPolls?: number;
+    captureTestIntervalMs?: number;
+  } = {},
+): Promise<void> {
   const effectiveConfig = applyTmuxCliOverrides(config, options);
   const tmux = new TmuxManager(effectiveConfig.tmux.sessionPrefix);
 
@@ -264,6 +415,25 @@ export async function healthCommand(options: TmuxCliOptions & { json?: boolean }
     }
   }
 
+  if (options.captureTest) {
+    const probePolls = resolveCaptureProbePolls(options.captureTestPolls);
+    const probeIntervalMs = resolveCaptureProbeIntervalMs(options.captureTestIntervalMs);
+    const probeByInstance = await runCaptureProbe(tmux, instances, probePolls, probeIntervalMs);
+    pushCheck(checks, 'capture-probe', 'ok', `sampled ${instances.length} instance(s), polls=${probePolls}, interval=${probeIntervalMs}ms`);
+
+    for (const instance of instances) {
+      const key = captureProbeKey(instance);
+      const probe = probeByInstance.get(key);
+      if (!probe) continue;
+      instance.captureProbe = probe;
+      if (probe.status === 'warn') {
+        pushCheck(checks, `capture:${instance.projectName}/${instance.instanceId}`, 'warn', probe.detail);
+      } else if (probe.status === 'fail') {
+        pushCheck(checks, `capture:${instance.projectName}/${instance.instanceId}`, 'fail', probe.detail);
+      }
+    }
+  }
+
   const summary = {
     ok: checks.filter((check) => check.level === 'ok').length,
     warn: checks.filter((check) => check.level === 'warn').length,
@@ -288,6 +458,11 @@ export async function healthCommand(options: TmuxCliOptions & { json?: boolean }
     console.log(chalk.gray(`Config file: ${getConfigPath()}`));
     console.log(chalk.gray(`Platform: ${effectiveConfig.messagingPlatform || 'discord'}`));
     console.log(chalk.gray(`Hook port: ${effectiveConfig.hookServerPort || 18470}`));
+    if (options.captureTest) {
+      const probePolls = resolveCaptureProbePolls(options.captureTestPolls);
+      const probeIntervalMs = resolveCaptureProbeIntervalMs(options.captureTestIntervalMs);
+      console.log(chalk.gray(`Capture probe: enabled (${probePolls} polls, ${probeIntervalMs}ms interval)`));
+    }
     console.log('');
 
     for (const check of checks) {
@@ -315,6 +490,19 @@ export async function healthCommand(options: TmuxCliOptions & { json?: boolean }
         console.log(
           chalk.gray(`    runtime: ${describeRuntime(instance.runtime, instance.paneWorkingHint === true)}`),
         );
+        if (instance.captureProbe) {
+          const captureColor =
+            instance.captureProbe.status === 'ok'
+              ? chalk.green
+              : instance.captureProbe.status === 'warn'
+                ? chalk.yellow
+                : chalk.red;
+          console.log(
+            captureColor(
+              `    capture: ${instance.captureProbe.status} (${instance.captureProbe.detail})`,
+            ),
+          );
+        }
       }
       console.log('');
     }

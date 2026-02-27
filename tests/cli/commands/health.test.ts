@@ -169,4 +169,61 @@ describe('healthCommand', () => {
 
     logSpy.mockRestore();
   });
+
+  it('runs capture probe when capture-test is enabled', async () => {
+    mocks.stateManager.listProjects.mockReturnValue([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'bridge',
+        agents: { claude: true },
+        discordChannels: { claude: 'ch-1' },
+        instances: {
+          claude: {
+            instanceId: 'claude',
+            agentType: 'claude',
+            tmuxWindow: 'demo-claude',
+            channelId: 'ch-1',
+          },
+        },
+        createdAt: new Date(),
+        lastActive: new Date(),
+      },
+    ]);
+    mocks.fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        generatedAt: new Date().toISOString(),
+        instances: [
+          {
+            projectName: 'demo',
+            instanceId: 'claude',
+            agentType: 'claude',
+            pendingDepth: 1,
+            oldestStage: 'processing',
+            oldestAgeMs: 2000,
+          },
+        ],
+      }),
+    });
+    const samples = ['line1', 'line1\nline2', 'line1\nline2\nline3'];
+    mocks.tmux.capturePaneFromWindow.mockImplementation(() => samples.shift() || 'line1\nline2\nline3');
+
+    const { healthCommand } = await import('../../../src/cli/commands/health.js');
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await healthCommand({ json: true, captureTest: true, captureTestPolls: 3, captureTestIntervalMs: 1 });
+
+    const payload = JSON.parse(String(logSpy.mock.calls[0]?.[0] || '{}'));
+    expect(payload.instances[0].captureProbe.enabled).toBe(true);
+    expect(payload.instances[0].captureProbe.captures).toBe(3);
+    expect(payload.instances[0].captureProbe.changes).toBeGreaterThanOrEqual(1);
+    expect(payload.instances[0].captureProbe.status).toBe('ok');
+    expect(
+      payload.checks.some((c: { name?: string }) => c.name === 'capture-probe'),
+    ).toBe(true);
+
+    logSpy.mockRestore();
+  });
 });

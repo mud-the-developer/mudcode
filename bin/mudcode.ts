@@ -542,11 +542,27 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
       'health',
       'Run one-shot diagnostics for config, daemon, tmux, and channel mappings',
       (y: Argv) => addTmuxOptions(y)
-        .option('json', { type: 'boolean', default: false, describe: 'Print machine-readable JSON output' }),
+        .option('json', { type: 'boolean', default: false, describe: 'Print machine-readable JSON output' })
+        .option('capture-test', {
+          type: 'boolean',
+          default: false,
+          describe: 'Sample live tmux captures while daemon is running to detect stuck/no-delta output',
+        })
+        .option('capture-test-polls', {
+          type: 'number',
+          describe: 'Number of capture samples for --capture-test (1-20, default 4)',
+        })
+        .option('capture-test-interval-ms', {
+          type: 'number',
+          describe: 'Sampling interval for --capture-test in ms (300-10000, default 1200)',
+        }),
       async (argv: any) =>
         healthCommand({
           tmuxSharedSessionName: argv.tmuxSharedSessionName,
           json: argv.json,
+          captureTest: argv.captureTest,
+          captureTestPolls: argv.captureTestPolls,
+          captureTestIntervalMs: argv.captureTestIntervalMs,
         })
     )
     .command(
