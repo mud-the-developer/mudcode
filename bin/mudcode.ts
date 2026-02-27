@@ -8,7 +8,7 @@ import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 import type { Argv } from 'yargs';
 import { existsSync, readFileSync } from 'fs';
-import { resolve } from 'path';
+import { basename, resolve } from 'path';
 import { execSync } from 'child_process';
 import chalk from 'chalk';
 import { newCommand } from '../src/cli/commands/new.js';
@@ -33,7 +33,7 @@ import { TmuxManager } from '../src/tmux/manager.js';
 import { listProjectInstances, normalizeProjectState } from '../src/state/instances.js';
 import { buildAgentLaunchEnv, buildExportPrefix } from '../src/policy/agent-launch.js';
 import { addTmuxOptions } from '../src/cli/common/options.js';
-import { confirmYesNo, isInteractiveShell } from '../src/cli/common/interactive.js';
+import { confirmYesNo, isInteractiveShell, prompt } from '../src/cli/common/interactive.js';
 
 export { newCommand, attachCommand, stopCommand };
 
@@ -366,7 +366,7 @@ function shouldCheckForUpdate(rawArgs: string[]): boolean {
   const command = commandNameFromArgs(rawArgs);
   if (!command) return false;
 
-  if (command === 'tui' || command === 'daemon' || command === 'daemon-runner' || command === 'update') return false;
+  if (command === 'interactive' || command === 'tui' || command === 'daemon' || command === 'daemon-runner' || command === 'update') return false;
   return true;
 }
 
@@ -415,6 +415,204 @@ async function runUpdateCommand(options: { check?: boolean; git?: boolean; repo?
   await performSelfUpgrade();
 }
 
+type InteractiveLauncherOptions = {
+  tmuxSharedSessionName?: string;
+};
+
+function printInteractiveMenu(): void {
+  console.log(chalk.cyan('\n🧭 Mudcode Interactive Launcher\n'));
+  console.log(chalk.gray('  1) New/Resume project'));
+  console.log(chalk.gray('  2) Attach to project'));
+  console.log(chalk.gray('  3) Stop project'));
+  console.log(chalk.gray('  4) Health check'));
+  console.log(chalk.gray('  5) Daemon control'));
+  console.log(chalk.gray('  6) Open TUI'));
+  console.log(chalk.gray('  7) Show config'));
+  console.log(chalk.gray('  8) Update from git'));
+  console.log(chalk.gray('  9) Exit'));
+}
+
+async function runInteractiveNew(options: InteractiveLauncherOptions): Promise<void> {
+  const defaultProjectName = basename(process.cwd());
+  const projectNameInput = await prompt(chalk.white(`Project name [${defaultProjectName}]: `));
+  const projectName = projectNameInput || defaultProjectName;
+
+  const installedAgents = agentRegistry.getAll().filter((a) => a.isInstalled());
+  let selectedAgent: string | undefined;
+  if (installedAgents.length > 0) {
+    console.log(chalk.white('\nAgent selection:'));
+    console.log(chalk.gray('  0) auto'));
+    installedAgents.forEach((agent, index) => {
+      console.log(chalk.gray(`  ${index + 1}) ${agent.config.displayName} (${agent.config.name})`));
+    });
+    const answer = await prompt(chalk.white(`Select agent [0-${installedAgents.length}] (default 0): `));
+    const normalized = answer.trim();
+    if (normalized.length > 0) {
+      const index = Number(normalized);
+      if (Number.isFinite(index) && index >= 1 && index <= installedAgents.length) {
+        selectedAgent = installedAgents[index - 1]!.config.name;
+      } else if (index !== 0) {
+        console.log(chalk.yellow('⚠️ Invalid selection, using auto.'));
+      }
+    }
+  }
+
+  const instanceRaw = await prompt(chalk.white('Instance ID (optional): '));
+  const shouldAttach = await confirmYesNo(chalk.white('Attach after setup? [Y/n]: '), true);
+  await newCommand(selectedAgent, {
+    name: projectName,
+    instance: instanceRaw.trim() || undefined,
+    attach: shouldAttach,
+    tmuxSharedSessionName: options.tmuxSharedSessionName,
+  });
+}
+
+async function runInteractiveAttach(options: InteractiveLauncherOptions): Promise<void> {
+  stateManager.reload();
+  const projects = stateManager.listProjects();
+  if (projects.length === 0) {
+    console.log(chalk.yellow('⚠️ No projects found.'));
+    return;
+  }
+
+  console.log(chalk.white('\nProjects:'));
+  projects.forEach((project, index) => {
+    const instances = listProjectInstances(normalizeProjectState(project))
+      .map((instance) => instance.instanceId)
+      .join(', ');
+    const suffix = instances ? ` [${instances}]` : '';
+    console.log(chalk.gray(`  ${index + 1}) ${project.projectName}${suffix}`));
+  });
+
+  const answer = await prompt(chalk.white(`Select project [1-${projects.length}]: `));
+  const index = Number(answer.trim());
+  if (!Number.isFinite(index) || index < 1 || index > projects.length) {
+    console.log(chalk.yellow('⚠️ Invalid selection.'));
+    return;
+  }
+
+  const projectName = projects[index - 1]!.projectName;
+  const instanceRaw = await prompt(chalk.white('Instance ID (optional): '));
+  attachCommand(projectName, {
+    instance: instanceRaw.trim() || undefined,
+    tmuxSharedSessionName: options.tmuxSharedSessionName,
+  });
+}
+
+async function runInteractiveStop(options: InteractiveLauncherOptions): Promise<void> {
+  stateManager.reload();
+  const projects = stateManager.listProjects();
+  if (projects.length === 0) {
+    console.log(chalk.yellow('⚠️ No projects found.'));
+    return;
+  }
+
+  console.log(chalk.white('\nProjects:'));
+  projects.forEach((project, index) => {
+    console.log(chalk.gray(`  ${index + 1}) ${project.projectName}`));
+  });
+  const answer = await prompt(chalk.white(`Select project [1-${projects.length}]: `));
+  const index = Number(answer.trim());
+  if (!Number.isFinite(index) || index < 1 || index > projects.length) {
+    console.log(chalk.yellow('⚠️ Invalid selection.'));
+    return;
+  }
+
+  const projectName = projects[index - 1]!.projectName;
+  const instanceRaw = await prompt(chalk.white('Instance ID (optional): '));
+  const keepChannel = await confirmYesNo(chalk.white('Keep channel on stop? [y/N]: '), false);
+  await stopCommand(projectName, {
+    instance: instanceRaw.trim() || undefined,
+    keepChannel,
+    tmuxSharedSessionName: options.tmuxSharedSessionName,
+  });
+}
+
+async function runInteractiveDaemonControl(): Promise<void> {
+  console.log(chalk.white('\nDaemon actions:'));
+  console.log(chalk.gray('  1) status'));
+  console.log(chalk.gray('  2) start'));
+  console.log(chalk.gray('  3) restart'));
+  console.log(chalk.gray('  4) stop'));
+  const answer = await prompt(chalk.white('Select action [1-4]: '));
+  const index = Number(answer.trim());
+  const actionMap: Record<number, 'status' | 'start' | 'restart' | 'stop'> = {
+    1: 'status',
+    2: 'start',
+    3: 'restart',
+    4: 'stop',
+  };
+  const action = actionMap[index];
+  if (!action) {
+    console.log(chalk.yellow('⚠️ Invalid selection.'));
+    return;
+  }
+
+  const clearSession = action === 'restart'
+    ? await confirmYesNo(chalk.white('Clear managed tmux sessions before restart? [y/N]: '), false)
+    : false;
+  await daemonCommand(action, { clearSession });
+}
+
+async function runInteractiveLauncher(options: InteractiveLauncherOptions = {}): Promise<void> {
+  if (!isInteractiveShell()) {
+    console.log(chalk.yellow('⚠️ Interactive launcher requires a TTY.'));
+    console.log(chalk.gray('Use explicit commands like `mudcode new`, `mudcode attach`, `mudcode health`.'));
+    return;
+  }
+
+  while (true) {
+    printInteractiveMenu();
+    const choiceRaw = await prompt(chalk.white('\nSelect action [1-9]: '));
+    const choice = Number(choiceRaw.trim());
+
+    if (!Number.isFinite(choice) || choice < 1 || choice > 9) {
+      console.log(chalk.yellow('⚠️ Invalid selection.'));
+      continue;
+    }
+
+    if (choice === 1) {
+      await runInteractiveNew(options);
+      continue;
+    }
+    if (choice === 2) {
+      await runInteractiveAttach(options);
+      continue;
+    }
+    if (choice === 3) {
+      await runInteractiveStop(options);
+      continue;
+    }
+    if (choice === 4) {
+      const probe = await confirmYesNo(chalk.white('Run live capture probe too? [Y/n]: '), true);
+      await healthCommand({ tmuxSharedSessionName: options.tmuxSharedSessionName, captureTest: probe });
+      continue;
+    }
+    if (choice === 5) {
+      await runInteractiveDaemonControl();
+      continue;
+    }
+    if (choice === 6) {
+      await tuiCommand({ tmuxSharedSessionName: options.tmuxSharedSessionName });
+      continue;
+    }
+    if (choice === 7) {
+      await configCommand({ show: true });
+      continue;
+    }
+    if (choice === 8) {
+      const defaultRepo = process.cwd();
+      const repo = await prompt(chalk.white(`Repo path [${defaultRepo}]: `));
+      await runUpdateCommand({ git: true, repo: repo.trim() || defaultRepo });
+      continue;
+    }
+    if (choice === 9) {
+      console.log(chalk.gray('Bye.'));
+      return;
+    }
+  }
+}
+
 export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise<void> {
   await maybePromptForUpgrade(rawArgs);
 
@@ -425,7 +623,16 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
     .help()
     .strict()
     .command(
-      ['$0', 'tui'],
+      ['$0', 'interactive'],
+      'Interactive launcher (menu-driven)',
+      (y: Argv) => addTmuxOptions(y),
+      async (argv: any) =>
+        runInteractiveLauncher({
+          tmuxSharedSessionName: argv.tmuxSharedSessionName,
+        })
+    )
+    .command(
+      'tui',
       'Interactive terminal UI (supports /new)',
       (y: Argv) => addTmuxOptions(y),
       async (argv: any) =>
