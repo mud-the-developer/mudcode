@@ -53,7 +53,11 @@ export class AgentBridge {
   constructor(deps?: AgentBridgeDeps) {
     this.bridgeConfig = deps?.config || defaultConfig;
     this.messaging = deps?.messaging || this.createMessagingClient();
-    this.tmux = deps?.tmux || new TmuxManager(this.bridgeConfig.tmux.sessionPrefix);
+    this.tmux =
+      deps?.tmux ||
+      new TmuxManager(this.bridgeConfig.tmux.sessionPrefix, undefined, {
+        captureHistoryLines: this.bridgeConfig.capture?.historyLines,
+      });
     this.stateManager = deps?.stateManager || defaultStateManager;
     this.registry = deps?.registry || defaultAgentRegistry;
     this.promptRefiner = new PromptRefiner(this.bridgeConfig.promptRefiner);
@@ -78,6 +82,7 @@ export class AgentBridge {
       tmux: this.tmux,
       stateManager: this.stateManager,
       pendingTracker: this.pendingTracker,
+      redrawFallbackTailLines: this.bridgeConfig.capture?.redrawTailLines,
     });
   }
 

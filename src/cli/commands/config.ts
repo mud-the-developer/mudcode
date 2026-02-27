@@ -32,6 +32,8 @@ export async function configCommand(options: {
     console.log(chalk.gray(`   OpenCode Permission Mode: ${config.opencode?.permissionMode || '(not set)'}`));
     console.log(chalk.gray(`   Prompt Refiner Mode: ${config.promptRefiner?.mode || '(off)'}`));
     console.log(chalk.gray(`   Prompt Refiner Log Path: ${config.promptRefiner?.logPath || '(default)'}`));
+    console.log(chalk.gray(`   Capture History Lines: ${config.capture?.historyLines || '(auto)'}`));
+    console.log(chalk.gray(`   Capture Redraw Tail Lines: ${config.capture?.redrawTailLines || '(auto)'}`));
     console.log(chalk.gray(`   Keep Channel On Stop: ${getConfigValue('keepChannelOnStop') ? 'on' : 'off'}`));
     console.log(chalk.cyan('\n🤖 Registered Agents:\n'));
     for (const adapter of agentRegistry.getAll()) {

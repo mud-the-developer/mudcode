@@ -137,6 +137,22 @@ export function stopDaemon(): boolean {
   return defaultDaemonManager.stopDaemon();
 }
 
+async function waitForDaemonStopped(timeoutMs: number = 5000): Promise<boolean> {
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  while (Date.now() < deadline) {
+    const running = await defaultDaemonManager.isRunning();
+    if (!running) return true;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  return !(await defaultDaemonManager.isRunning());
+}
+
+export async function stopDaemonAndWait(timeoutMs: number = 5000): Promise<boolean> {
+  const stopIssued = stopDaemon();
+  if (!stopIssued) return false;
+  return waitForDaemonStopped(timeoutMs);
+}
+
 export async function restartDaemonIfRunning(): Promise<{
   restarted: boolean;
   ready: boolean;
@@ -153,7 +169,7 @@ export async function restartDaemonIfRunning(): Promise<{
     };
   }
 
-  const stopped = stopDaemon();
+  const stopped = await stopDaemonAndWait();
   if (!stopped) {
     return {
       restarted: false,

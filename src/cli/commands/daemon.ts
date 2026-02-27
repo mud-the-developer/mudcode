@@ -1,12 +1,14 @@
 import chalk from 'chalk';
-import { ensureDaemonRunning, getDaemonStatus, stopDaemon } from '../../app/daemon-service.js';
+import { ensureDaemonRunning, getDaemonStatus, stopDaemon, stopDaemonAndWait } from '../../app/daemon-service.js';
 import { ensureTmuxInstalled } from '../common/tmux.js';
 import { config } from '../../config/index.js';
 import { stateManager } from '../../state/index.js';
 import { TmuxManager } from '../../tmux/manager.js';
+import { autoTuneCaptureSettings } from '../common/capture-autotune.js';
 
 export type DaemonCommandOptions = {
   clearSession?: boolean;
+  autoTuneCapture?: boolean;
 };
 
 function clearManagedTmuxSessions(): { cleared: string[]; failed: string[] } {
@@ -35,9 +37,24 @@ function clearManagedTmuxSessions(): { cleared: string[]; failed: string[] } {
 }
 
 export async function daemonCommand(action: string, options: DaemonCommandOptions = {}) {
+  const shouldAutoTuneCapture = options.autoTuneCapture !== false;
+
+  function runCaptureAutoTune(): void {
+    if (!shouldAutoTuneCapture) return;
+    const result = autoTuneCaptureSettings();
+    const prefix = result.changed ? '✅' : 'ℹ️';
+    const changeSummary = result.changed ? 'updated' : 'kept';
+    console.log(
+      chalk.gray(
+        `${prefix} Capture auto-tune ${changeSummary}: history=${result.tuning.historyLines}, redraw-tail=${result.tuning.redrawTailLines} (active panes: ${result.activeInstances}/${result.scannedInstances}, max lines: ${result.maxObservedLines})`,
+      ),
+    );
+  }
+
   switch (action) {
     case 'start': {
       ensureTmuxInstalled();
+      runCaptureAutoTune();
       const result = await ensureDaemonRunning();
       if (result.alreadyRunning) {
         console.log(chalk.green(`✅ Daemon already running (port ${result.port})`));
@@ -73,9 +90,9 @@ export async function daemonCommand(action: string, options: DaemonCommandOption
       ensureTmuxInstalled();
       const status = await getDaemonStatus();
       if (status.running) {
-        const stopped = stopDaemon();
+        const stopped = await stopDaemonAndWait();
         if (!stopped) {
-          console.log(chalk.yellow('⚠️ Could not stop daemon for restart. Try: daemon stop, then daemon start.'));
+          console.log(chalk.yellow('⚠️ Could not stop daemon for restart in time. Try: daemon stop, wait a few seconds, then daemon start.'));
           return;
         }
       }
@@ -92,6 +109,7 @@ export async function daemonCommand(action: string, options: DaemonCommandOption
         }
       }
 
+      runCaptureAutoTune();
       const result = await ensureDaemonRunning();
       if (result.ready) {
         if (status.running) {

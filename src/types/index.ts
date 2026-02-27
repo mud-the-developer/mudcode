@@ -62,6 +62,18 @@ export interface BridgeConfig {
      */
     sharedSessionName?: string;
   };
+  capture?: {
+    /**
+     * tmux capture history depth (number of lines from bottom).
+     * Equivalent to AGENT_DISCORD_CAPTURE_HISTORY_LINES.
+     */
+    historyLines?: number;
+    /**
+     * Fallback tail lines for full-screen redraw deltas.
+     * Equivalent to AGENT_DISCORD_CAPTURE_REDRAW_TAIL_LINES.
+     */
+    redrawTailLines?: number;
+  };
   hookServerPort?: number;
   /**
    * Preferred AI CLI for `mudcode new` when agent is not explicitly specified.

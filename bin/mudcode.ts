@@ -519,8 +519,13 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
           type: 'boolean',
           default: false,
           describe: 'Restart only: kill managed tmux sessions before daemon start',
+        })
+        .option('auto-tune-capture', {
+          type: 'boolean',
+          default: true,
+          describe: 'Probe active tmux panes and auto-tune capture settings before start/restart',
         }),
-      async (argv: any) => daemonCommand(argv.action, { clearSession: argv.clearSession })
+      async (argv: any) => daemonCommand(argv.action, { clearSession: argv.clearSession, autoTuneCapture: argv.autoTuneCapture })
     )
     .command(
       'update',

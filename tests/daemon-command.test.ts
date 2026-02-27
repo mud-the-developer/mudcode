@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   ensureDaemonRunning: vi.fn(),
   getDaemonStatus: vi.fn(),
   stopDaemon: vi.fn(),
+  stopDaemonAndWait: vi.fn(),
   ensureTmuxInstalled: vi.fn(),
   stateManager: {
     listProjects: vi.fn(),
@@ -14,6 +15,7 @@ const mocks = vi.hoisted(() => ({
     killSession: vi.fn(),
   },
   TmuxManager: vi.fn(),
+  autoTuneCaptureSettings: vi.fn(),
   config: {
     tmux: {
       sessionPrefix: 'agent-',
@@ -25,6 +27,7 @@ vi.mock('../src/app/daemon-service.js', () => ({
   ensureDaemonRunning: mocks.ensureDaemonRunning,
   getDaemonStatus: mocks.getDaemonStatus,
   stopDaemon: mocks.stopDaemon,
+  stopDaemonAndWait: mocks.stopDaemonAndWait,
 }));
 
 vi.mock('../src/cli/common/tmux.js', () => ({
@@ -37,6 +40,10 @@ vi.mock('../src/state/index.js', () => ({
 
 vi.mock('../src/tmux/manager.js', () => ({
   TmuxManager: mocks.TmuxManager,
+}));
+
+vi.mock('../src/cli/common/capture-autotune.js', () => ({
+  autoTuneCaptureSettings: mocks.autoTuneCaptureSettings,
 }));
 
 vi.mock('../src/config/index.js', () => ({
@@ -57,6 +64,7 @@ describe('daemonCommand restart action', () => {
       pidFile: '/tmp/daemon.pid',
     });
     mocks.stopDaemon.mockReturnValue(true);
+    mocks.stopDaemonAndWait.mockResolvedValue(true);
     mocks.ensureDaemonRunning.mockResolvedValue({
       alreadyRunning: false,
       ready: true,
@@ -70,6 +78,13 @@ describe('daemonCommand restart action', () => {
     mocks.TmuxManager.mockImplementation(function MockTmuxManager() {
       return mocks.tmuxManagerInstance;
     });
+    mocks.autoTuneCaptureSettings.mockReturnValue({
+      scannedInstances: 0,
+      activeInstances: 0,
+      maxObservedLines: 0,
+      tuning: { historyLines: 1200, redrawTailLines: 100 },
+      changed: false,
+    });
   });
 
   afterEach(() => {
@@ -82,8 +97,9 @@ describe('daemonCommand restart action', () => {
     await daemonCommand('restart');
 
     expect(mocks.ensureTmuxInstalled).toHaveBeenCalledOnce();
+    expect(mocks.autoTuneCaptureSettings).toHaveBeenCalledOnce();
     expect(mocks.getDaemonStatus).toHaveBeenCalledOnce();
-    expect(mocks.stopDaemon).toHaveBeenCalledOnce();
+    expect(mocks.stopDaemonAndWait).toHaveBeenCalledOnce();
     expect(mocks.ensureDaemonRunning).toHaveBeenCalledOnce();
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Daemon restarted'));
   });
@@ -100,19 +116,21 @@ describe('daemonCommand restart action', () => {
 
     await daemonCommand('restart');
 
-    expect(mocks.stopDaemon).not.toHaveBeenCalled();
+    expect(mocks.stopDaemonAndWait).not.toHaveBeenCalled();
+    expect(mocks.autoTuneCaptureSettings).toHaveBeenCalledOnce();
     expect(mocks.ensureDaemonRunning).toHaveBeenCalledOnce();
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Daemon started'));
   });
 
   it('does not start a second daemon when stop fails during restart', async () => {
-    mocks.stopDaemon.mockReturnValue(false);
+    mocks.stopDaemonAndWait.mockResolvedValue(false);
 
     const { daemonCommand } = await import('../src/cli/commands/daemon.js');
 
     await daemonCommand('restart');
 
-    expect(mocks.stopDaemon).toHaveBeenCalledOnce();
+    expect(mocks.stopDaemonAndWait).toHaveBeenCalledOnce();
+    expect(mocks.autoTuneCaptureSettings).not.toHaveBeenCalled();
     expect(mocks.ensureDaemonRunning).not.toHaveBeenCalled();
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Could not stop daemon for restart'));
   });
@@ -136,6 +154,17 @@ describe('daemonCommand restart action', () => {
     expect(mocks.tmuxManagerInstance.killSession).toHaveBeenCalledTimes(2);
     expect(mocks.tmuxManagerInstance.killSession).toHaveBeenCalledWith('agent-bridge');
     expect(mocks.tmuxManagerInstance.killSession).toHaveBeenCalledWith('agent-demo');
+    expect(mocks.stopDaemonAndWait).toHaveBeenCalledOnce();
+    expect(mocks.autoTuneCaptureSettings).toHaveBeenCalledOnce();
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Cleared 2 tmux session(s)'));
+  });
+
+  it('skips capture auto-tune when explicitly disabled', async () => {
+    const { daemonCommand } = await import('../src/cli/commands/daemon.js');
+
+    await daemonCommand('restart', { autoTuneCapture: false });
+
+    expect(mocks.autoTuneCaptureSettings).not.toHaveBeenCalled();
+    expect(mocks.ensureDaemonRunning).toHaveBeenCalledOnce();
   });
 });

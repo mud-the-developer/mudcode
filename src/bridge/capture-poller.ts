@@ -12,6 +12,7 @@ export interface BridgeCapturePollerDeps {
   stateManager: IStateManager;
   pendingTracker: PendingMessageTracker;
   intervalMs?: number;
+  redrawFallbackTailLines?: number;
 }
 
 export class BridgeCapturePoller {
@@ -46,7 +47,7 @@ export class BridgeCapturePoller {
     this.stalePendingAlertMs = this.resolveStalePendingAlertMs();
     this.promptEchoFilterEnabled = this.resolvePromptEchoFilterEnabled();
     this.promptEchoSuppressionMaxPolls = this.resolvePromptEchoSuppressionMaxPolls();
-    this.redrawFallbackTailLines = this.resolveRedrawFallbackTailLines();
+    this.redrawFallbackTailLines = this.resolveRedrawFallbackTailLines(deps.redrawFallbackTailLines);
   }
 
   start(): void {
@@ -136,7 +137,10 @@ export class BridgeCapturePoller {
     return 4;
   }
 
-  private resolveRedrawFallbackTailLines(): number {
+  private resolveRedrawFallbackTailLines(configured?: number): number {
+    if (typeof configured === 'number' && Number.isFinite(configured) && configured >= 10 && configured <= 400) {
+      return Math.trunc(configured);
+    }
     const fromEnv = Number(process.env.AGENT_DISCORD_CAPTURE_REDRAW_TAIL_LINES || '');
     if (Number.isFinite(fromEnv) && fromEnv >= 10 && fromEnv <= 400) {
       return Math.trunc(fromEnv);

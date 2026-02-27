@@ -20,6 +20,8 @@ export interface StoredConfig {
   promptRefinerMode?: 'off' | 'shadow' | 'enforce';
   promptRefinerLogPath?: string;
   promptRefinerMaxLogChars?: number;
+  captureHistoryLines?: number;
+  captureRedrawTailLines?: number;
   keepChannelOnStop?: boolean;
   slackBotToken?: string;
   slackAppToken?: string;
@@ -80,6 +82,25 @@ export class ConfigManager {
               ...(promptRefinerMaxLogChars !== undefined ? { maxLogChars: promptRefinerMaxLogChars } : {}),
             }
           : undefined;
+      const captureHistoryLines = this.resolveCaptureLineCount(
+        storedConfig.captureHistoryLines,
+        this.env.get('AGENT_DISCORD_CAPTURE_HISTORY_LINES'),
+        300,
+        4000,
+      );
+      const captureRedrawTailLines = this.resolveCaptureLineCount(
+        storedConfig.captureRedrawTailLines,
+        this.env.get('AGENT_DISCORD_CAPTURE_REDRAW_TAIL_LINES'),
+        40,
+        300,
+      );
+      const capture =
+        captureHistoryLines !== undefined || captureRedrawTailLines !== undefined
+          ? {
+              ...(captureHistoryLines !== undefined ? { historyLines: captureHistoryLines } : {}),
+              ...(captureRedrawTailLines !== undefined ? { redrawTailLines: captureRedrawTailLines } : {}),
+            }
+          : undefined;
 
       const slackBotToken = storedConfig.slackBotToken || this.env.get('SLACK_BOT_TOKEN');
       const slackAppToken = storedConfig.slackAppToken || this.env.get('SLACK_APP_TOKEN');
@@ -103,6 +124,7 @@ export class ConfigManager {
           sessionPrefix: this.env.get('TMUX_SESSION_PREFIX') || '',
           sharedSessionName: this.env.get('TMUX_SHARED_SESSION_NAME') || 'bridge',
         },
+        ...(capture ? { capture } : {}),
         hookServerPort: resolvedHookPort,
         ...(defaultAgentCli ? { defaultAgentCli } : {}),
         ...(promptRefiner ? { promptRefiner } : {}),
@@ -212,6 +234,17 @@ export class ConfigManager {
     return this.parsePromptRefinerMaxLogCharsCandidate(envValue);
   }
 
+  private resolveCaptureLineCount(
+    storedValue: unknown,
+    envValue: string | undefined,
+    min: number,
+    max: number,
+  ): number | undefined {
+    const storedCandidate = this.parseCaptureLineCountCandidate(storedValue, min, max);
+    if (storedCandidate !== undefined) return storedCandidate;
+    return this.parseCaptureLineCountCandidate(envValue, min, max);
+  }
+
   private parsePromptRefinerModeCandidate(raw: unknown): 'off' | 'shadow' | 'enforce' | undefined {
     if (typeof raw !== 'string') return undefined;
     const normalized = raw.trim().toLowerCase();
@@ -226,6 +259,14 @@ export class ConfigManager {
     const value = Number(raw);
     if (!Number.isInteger(value)) return undefined;
     if (value < 500 || value > 200000) return undefined;
+    return value;
+  }
+
+  private parseCaptureLineCountCandidate(raw: unknown, min: number, max: number): number | undefined {
+    if (raw === undefined || raw === null || raw === '') return undefined;
+    const value = Number(raw);
+    if (!Number.isInteger(value)) return undefined;
+    if (value < min || value > max) return undefined;
     return value;
   }
 
@@ -277,6 +318,43 @@ export class ConfigManager {
     if (rawEnvRefinerMax !== undefined && this.parsePromptRefinerMaxLogCharsCandidate(rawEnvRefinerMax) === undefined) {
       errors.push(
         `MUDCODE_PROMPT_REFINER_MAX_LOG_CHARS must be an integer between 500 and 200000 (received: ${rawEnvRefinerMax})`,
+      );
+    }
+
+    const rawStoredCaptureHistoryLines = storedConfig.captureHistoryLines;
+    if (
+      rawStoredCaptureHistoryLines !== undefined &&
+      this.parseCaptureLineCountCandidate(rawStoredCaptureHistoryLines, 300, 4000) === undefined
+    ) {
+      errors.push(
+        `Stored captureHistoryLines must be an integer between 300 and 4000 (received: ${String(rawStoredCaptureHistoryLines)})`,
+      );
+    }
+
+    const rawStoredCaptureRedrawTailLines = storedConfig.captureRedrawTailLines;
+    if (
+      rawStoredCaptureRedrawTailLines !== undefined &&
+      this.parseCaptureLineCountCandidate(rawStoredCaptureRedrawTailLines, 40, 300) === undefined
+    ) {
+      errors.push(
+        `Stored captureRedrawTailLines must be an integer between 40 and 300 (received: ${String(rawStoredCaptureRedrawTailLines)})`,
+      );
+    }
+
+    const rawEnvCaptureHistoryLines = this.env.get('AGENT_DISCORD_CAPTURE_HISTORY_LINES');
+    if (rawEnvCaptureHistoryLines !== undefined && this.parseCaptureLineCountCandidate(rawEnvCaptureHistoryLines, 300, 4000) === undefined) {
+      errors.push(
+        `AGENT_DISCORD_CAPTURE_HISTORY_LINES must be an integer between 300 and 4000 (received: ${rawEnvCaptureHistoryLines})`,
+      );
+    }
+
+    const rawEnvCaptureRedrawTailLines = this.env.get('AGENT_DISCORD_CAPTURE_REDRAW_TAIL_LINES');
+    if (
+      rawEnvCaptureRedrawTailLines !== undefined &&
+      this.parseCaptureLineCountCandidate(rawEnvCaptureRedrawTailLines, 40, 300) === undefined
+    ) {
+      errors.push(
+        `AGENT_DISCORD_CAPTURE_REDRAW_TAIL_LINES must be an integer between 40 and 300 (received: ${rawEnvCaptureRedrawTailLines})`,
       );
     }
 

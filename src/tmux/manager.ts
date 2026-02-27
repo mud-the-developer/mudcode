@@ -32,10 +32,23 @@ type PaneMetadata = {
 export class TmuxManager {
   private sessionPrefix: string;
   private executor: ICommandExecutor;
+  private configuredCaptureHistoryLines?: number;
 
-  constructor(sessionPrefix: string = '', executor?: ICommandExecutor) {
+  constructor(
+    sessionPrefix: string = '',
+    executor?: ICommandExecutor,
+    options?: { captureHistoryLines?: number },
+  ) {
     this.sessionPrefix = sessionPrefix;
     this.executor = executor || new ShellCommandExecutor();
+    if (
+      typeof options?.captureHistoryLines === 'number' &&
+      Number.isFinite(options.captureHistoryLines) &&
+      options.captureHistoryLines >= 300 &&
+      options.captureHistoryLines <= 4000
+    ) {
+      this.configuredCaptureHistoryLines = Math.trunc(options.captureHistoryLines);
+    }
   }
 
   listSessions(): TmuxSession[] {
@@ -600,6 +613,9 @@ export class TmuxManager {
   }
 
   private resolveCaptureStartLine(): number {
+    if (typeof this.configuredCaptureHistoryLines === 'number') {
+      return -this.configuredCaptureHistoryLines;
+    }
     const raw = process.env.AGENT_DISCORD_CAPTURE_HISTORY_LINES;
     if (typeof raw === 'string' && raw.trim().length > 0) {
       const fromEnv = Number(raw);
