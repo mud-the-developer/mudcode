@@ -42,6 +42,9 @@ type RuntimeSnapshot = {
   lastTerminalStage?: 'completed' | 'error' | 'retry';
   lastTerminalAgeMs?: number;
   lastTerminalAt?: string;
+  ignoredEventCount?: number;
+  ignoredEventTypes?: Record<string, number>;
+  ignoredLastAt?: string;
 };
 
 type RuntimeStatusEntry = RuntimeSnapshot & {
@@ -247,22 +250,28 @@ function detectPaneWorkingHint(
 }
 
 function describeRuntime(runtime?: RuntimeSnapshot, paneWorkingHint: boolean = false): string {
-  if (paneWorkingHint) return 'working (pane shows "Esc to interrupt")';
+  const ignoredCount =
+    typeof runtime?.ignoredEventCount === 'number' && Number.isFinite(runtime.ignoredEventCount)
+      ? Math.max(0, Math.trunc(runtime.ignoredEventCount))
+      : 0;
+  const ignoredSuffix = ignoredCount > 0 ? `, ignored hook events=${ignoredCount}` : '';
+
+  if (paneWorkingHint) return `working (pane shows "Esc to interrupt"${ignoredSuffix})`;
   if (!runtime) return 'unavailable';
   if (runtime.pendingDepth > 0) {
     const stage = runtime.oldestStage || runtime.latestStage || 'received';
-    return `working (${runtime.pendingDepth} queued, stage=${stage}, age=${formatRuntimeAge(runtime.oldestAgeMs)})`;
+    return `working (${runtime.pendingDepth} queued, stage=${stage}, age=${formatRuntimeAge(runtime.oldestAgeMs)}${ignoredSuffix})`;
   }
   if (runtime.lastTerminalStage === 'completed') {
-    return `completed recently (${formatRuntimeAge(runtime.lastTerminalAgeMs)} ago)`;
+    return `completed recently (${formatRuntimeAge(runtime.lastTerminalAgeMs)} ago${ignoredSuffix})`;
   }
   if (runtime.lastTerminalStage === 'error') {
-    return `last request failed (${formatRuntimeAge(runtime.lastTerminalAgeMs)} ago)`;
+    return `last request failed (${formatRuntimeAge(runtime.lastTerminalAgeMs)} ago${ignoredSuffix})`;
   }
   if (runtime.lastTerminalStage === 'retry') {
-    return `last request needs retry (${formatRuntimeAge(runtime.lastTerminalAgeMs)} ago)`;
+    return `last request needs retry (${formatRuntimeAge(runtime.lastTerminalAgeMs)} ago${ignoredSuffix})`;
   }
-  return 'idle';
+  return `idle${ignoredSuffix}`;
 }
 
 async function fetchRuntimeStatus(port: number): Promise<Map<string, RuntimeSnapshot>> {
@@ -290,6 +299,15 @@ async function fetchRuntimeStatus(port: number): Promise<Map<string, RuntimeSnap
       lastTerminalStage: entry.lastTerminalStage,
       lastTerminalAgeMs: entry.lastTerminalAgeMs,
       lastTerminalAt: entry.lastTerminalAt,
+      ignoredEventCount:
+        typeof entry.ignoredEventCount === 'number' && Number.isFinite(entry.ignoredEventCount)
+          ? Math.max(0, Math.trunc(entry.ignoredEventCount))
+          : undefined,
+      ignoredEventTypes:
+        entry.ignoredEventTypes && typeof entry.ignoredEventTypes === 'object'
+          ? (entry.ignoredEventTypes as Record<string, number>)
+          : undefined,
+      ignoredLastAt: typeof entry.ignoredLastAt === 'string' ? entry.ignoredLastAt : undefined,
     });
   }
   return map;
@@ -383,6 +401,7 @@ export async function healthCommand(
       const channelId = instance.channelId;
       const paneWorkingHint =
         windowExists && detectPaneWorkingHint(tmux, project.tmuxSession, windowName, instance.agentType);
+      const runtime = runtimeByInstance.get(runtimeKey(project.projectName, instance.instanceId));
       instances.push({
         projectName: project.projectName,
         instanceId: instance.instanceId,
@@ -392,7 +411,7 @@ export async function healthCommand(
         sessionExists,
         windowExists,
         channelId,
-        runtime: runtimeByInstance.get(runtimeKey(project.projectName, instance.instanceId)),
+        runtime,
         paneWorkingHint,
       });
 
@@ -410,6 +429,15 @@ export async function healthCommand(
           `instance:${project.projectName}/${instance.instanceId}`,
           'fail',
           'channel mapping missing',
+        );
+      }
+      const ignoredEventCount = runtime?.ignoredEventCount || 0;
+      if (ignoredEventCount > 0) {
+        pushCheck(
+          checks,
+          `hook:${project.projectName}/${instance.instanceId}`,
+          'warn',
+          `ignored ${ignoredEventCount} event-hook payload(s) for capture-driven instance`,
         );
       }
     }

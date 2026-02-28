@@ -226,4 +226,60 @@ describe('healthCommand', () => {
 
     logSpy.mockRestore();
   });
+
+  it('reports ignored hook events from runtime status', async () => {
+    mocks.stateManager.listProjects.mockReturnValue([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'bridge',
+        agents: { codex: true },
+        discordChannels: { codex: 'ch-1' },
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'ch-1',
+          },
+        },
+        createdAt: new Date(),
+        lastActive: new Date(),
+      },
+    ]);
+    mocks.fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        generatedAt: new Date().toISOString(),
+        instances: [
+          {
+            projectName: 'demo',
+            instanceId: 'codex',
+            agentType: 'codex',
+            pendingDepth: 0,
+            ignoredEventCount: 3,
+            ignoredEventTypes: { 'session.idle': 3 },
+            ignoredLastAt: new Date().toISOString(),
+          },
+        ],
+      }),
+    });
+
+    const { healthCommand } = await import('../../../src/cli/commands/health.js');
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await healthCommand({ json: true });
+
+    const payload = JSON.parse(String(logSpy.mock.calls[0]?.[0] || '{}'));
+    expect(payload.instances[0].runtime.ignoredEventCount).toBe(3);
+    expect(
+      payload.checks.some(
+        (c: { name?: string; level?: string; detail?: string }) =>
+          c.name === 'hook:demo/codex' && c.level === 'warn' && String(c.detail || '').includes('ignored 3'),
+      ),
+    ).toBe(true);
+
+    logSpy.mockRestore();
+  });
 });

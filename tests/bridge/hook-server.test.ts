@@ -166,6 +166,49 @@ describe('BridgeHookServer', () => {
       });
       expect(pendingTracker.getRuntimeSnapshot).toHaveBeenCalledWith('test', 'claude', 'claude');
     });
+
+    it('includes ignored event counters for capture-driven instances', async () => {
+      const stateManager = createMockStateManager({
+        test: {
+          projectName: 'test',
+          projectPath: tempDir,
+          tmuxSession: 'bridge',
+          agents: { codex: true },
+          discordChannels: { codex: 'ch-123' },
+          instances: {
+            codex: { instanceId: 'codex', agentType: 'codex', channelId: 'ch-123', eventHook: false },
+          },
+          createdAt: new Date(),
+          lastActive: new Date(),
+        },
+      });
+      const pendingTracker = createMockPendingTracker() as any;
+      pendingTracker.getRuntimeSnapshot = vi.fn().mockReturnValue({ pendingDepth: 0 });
+      startServer({ stateManager: stateManager as any, pendingTracker });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const eventRes = await postJSON(port, '/opencode-event', {
+        projectName: 'test',
+        agentType: 'codex',
+        type: 'session.idle',
+        text: 'intermediate',
+      });
+      expect(eventRes.status).toBe(200);
+
+      const res = await getPath(port, '/runtime-status');
+      expect(res.status).toBe(200);
+
+      const payload = JSON.parse(res.body) as {
+        instances: Array<Record<string, unknown>>;
+      };
+      expect(payload.instances).toHaveLength(1);
+      expect(payload.instances[0]).toMatchObject({
+        projectName: 'test',
+        instanceId: 'codex',
+        ignoredEventCount: 1,
+      });
+      expect((payload.instances[0]?.ignoredEventTypes as Record<string, unknown>)?.['session.idle']).toBe(1);
+    });
   });
 
   describe('POST /send-files', () => {
@@ -337,6 +380,77 @@ describe('BridgeHookServer', () => {
   });
 
   describe('POST /opencode-event', () => {
+    it('ignores codex events when eventHook is disabled', async () => {
+      const mockMessaging = createMockMessaging();
+      const mockPendingTracker = createMockPendingTracker();
+      const stateManager = createMockStateManager({
+        test: {
+          projectName: 'test',
+          projectPath: tempDir,
+          tmuxSession: 'bridge',
+          agents: { codex: true },
+          discordChannels: { codex: 'ch-123' },
+          instances: {
+            codex: { instanceId: 'codex', agentType: 'codex', channelId: 'ch-123', eventHook: false },
+          },
+          createdAt: new Date(),
+          lastActive: new Date(),
+        },
+      });
+      startServer({
+        messaging: mockMessaging as any,
+        stateManager: stateManager as any,
+        pendingTracker: mockPendingTracker as any,
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const res = await postJSON(port, '/opencode-event', {
+        projectName: 'test',
+        agentType: 'codex',
+        type: 'session.idle',
+        text: 'intermediate text',
+      });
+      expect(res.status).toBe(200);
+      expect(mockMessaging.sendToChannel).not.toHaveBeenCalled();
+      expect(mockPendingTracker.markCompleted).not.toHaveBeenCalled();
+      expect(mockPendingTracker.markError).not.toHaveBeenCalled();
+    });
+
+    it('handles codex events when eventHook is explicitly enabled', async () => {
+      const mockMessaging = createMockMessaging();
+      const mockPendingTracker = createMockPendingTracker();
+      const stateManager = createMockStateManager({
+        test: {
+          projectName: 'test',
+          projectPath: tempDir,
+          tmuxSession: 'bridge',
+          agents: { codex: true },
+          discordChannels: { codex: 'ch-123' },
+          instances: {
+            codex: { instanceId: 'codex', agentType: 'codex', channelId: 'ch-123', eventHook: true },
+          },
+          createdAt: new Date(),
+          lastActive: new Date(),
+        },
+      });
+      startServer({
+        messaging: mockMessaging as any,
+        stateManager: stateManager as any,
+        pendingTracker: mockPendingTracker as any,
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const res = await postJSON(port, '/opencode-event', {
+        projectName: 'test',
+        agentType: 'codex',
+        type: 'session.idle',
+        text: 'final text',
+      });
+      expect(res.status).toBe(200);
+      expect(mockMessaging.sendToChannel).toHaveBeenCalledWith('ch-123', 'final text');
+      expect(mockPendingTracker.markCompleted).toHaveBeenCalled();
+    });
+
     it('handles session.idle with text', async () => {
       const mockMessaging = createMockMessaging();
       const mockPendingTracker = createMockPendingTracker();

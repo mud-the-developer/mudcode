@@ -24,8 +24,48 @@ export interface BridgeHookServerDeps {
 
 export class BridgeHookServer {
   private httpServer?: ReturnType<typeof createServer>;
+  private ignoredEventsByInstance = new Map<
+    string,
+    { count: number; byType: Record<string, number>; lastIgnoredAtMs: number }
+  >();
 
   constructor(private deps: BridgeHookServerDeps) {}
+
+  private runtimeKey(projectName: string, instanceId: string): string {
+    return `${projectName}:${instanceId}`;
+  }
+
+  private markIgnoredEvent(
+    projectName: string,
+    instanceId: string,
+    eventType?: string,
+  ): void {
+    const key = this.runtimeKey(projectName, instanceId);
+    const current = this.ignoredEventsByInstance.get(key) || {
+      count: 0,
+      byType: {},
+      lastIgnoredAtMs: Date.now(),
+    };
+    current.count += 1;
+    const typeKey = typeof eventType === 'string' && eventType.trim().length > 0 ? eventType.trim() : 'unknown';
+    current.byType[typeKey] = (current.byType[typeKey] || 0) + 1;
+    current.lastIgnoredAtMs = Date.now();
+    this.ignoredEventsByInstance.set(key, current);
+  }
+
+  private getIgnoredEventSnapshot(
+    projectName: string,
+    instanceId: string,
+  ): { ignoredEventCount: number; ignoredEventTypes: Record<string, number>; ignoredLastAt: string } | undefined {
+    const key = this.runtimeKey(projectName, instanceId);
+    const snapshot = this.ignoredEventsByInstance.get(key);
+    if (!snapshot || snapshot.count <= 0) return undefined;
+    return {
+      ignoredEventCount: snapshot.count,
+      ignoredEventTypes: { ...snapshot.byType },
+      ignoredLastAt: new Date(snapshot.lastIgnoredAtMs).toISOString(),
+    };
+  }
 
   private resolveOutputRoute(
     defaultChannelId: string | undefined,
@@ -130,6 +170,9 @@ export class BridgeHookServer {
       projectName: string;
       instanceId: string;
       agentType: string;
+      ignoredEventCount?: number;
+      ignoredEventTypes?: Record<string, number>;
+      ignoredLastAt?: string;
     } & PendingRuntimeSnapshot>;
   } {
     const projects = this.deps.stateManager.listProjects().map((project) => normalizeProjectState(project));
@@ -141,11 +184,13 @@ export class BridgeHookServer {
 
     for (const project of projects) {
       for (const instance of listProjectInstances(project)) {
+        const ignored = this.getIgnoredEventSnapshot(project.projectName, instance.instanceId);
         instances.push({
           projectName: project.projectName,
           instanceId: instance.instanceId,
           agentType: instance.agentType,
           ...this.getRuntimeSnapshotForInstance(project.projectName, instance.agentType, instance.instanceId),
+          ...(ignored || {}),
         });
       }
     }
@@ -336,6 +381,13 @@ export class BridgeHookServer {
       getPrimaryInstanceForAgent(normalizedProject, agentType);
     const resolvedAgentType = instance?.agentType || agentType;
     const resolvedInstanceId = instance?.instanceId;
+    if (instance?.eventHook === false) {
+      this.markIgnoredEvent(projectName, instance.instanceId, eventType);
+      console.log(
+        `⏭️ [${projectName}/${resolvedAgentType}${instance ? `#${instance.instanceId}` : ''}] ignoring ${eventType || 'unknown'} event (eventHook disabled)`,
+      );
+      return true;
+    }
     const routeInfo = this.resolveOutputRoute(
       instance?.channelId,
       projectName,
