@@ -30,11 +30,12 @@ Release 작업 시 아래 항목은 필수입니다.
 
 주의:
 
-- `mudcode-src onboard`는 이미 실행 중인 글로벌 daemon을 재사용하므로 코드 변경이 자동 반영되지 않는다.
+- `mudcode onboard`는 이미 실행 중인 글로벌 daemon을 재사용하므로 코드 변경이 자동 반영되지 않는다.
 - 코드 변경 후 아래 명령으로 수동 재시작한다.
 
 ```bash
-mudcode-src daemon stop
-mudcode-src daemon start
-mudcode-src daemon status
+bun run build
+bun dist/bin/mudcode.js daemon stop
+bun dist/bin/mudcode.js daemon start
+bun dist/bin/mudcode.js daemon status
 ```

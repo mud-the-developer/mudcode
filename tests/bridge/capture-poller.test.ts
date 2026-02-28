@@ -32,8 +32,8 @@ function createPendingTracker() {
 describe('BridgeCapturePoller', () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    process.env.AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY = '0';
     delete process.env.AGENT_DISCORD_CAPTURE_PENDING_INITIAL_QUIET_POLLS_CODEX;
-    delete process.env.AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY;
     delete process.env.AGENT_DISCORD_CAPTURE_STALE_ALERT_MS;
     delete process.env.AGENT_DISCORD_CAPTURE_FILTER_PROMPT_ECHO;
     delete process.env.AGENT_DISCORD_CAPTURE_PROMPT_ECHO_MAX_POLLS;
@@ -227,8 +227,8 @@ describe('BridgeCapturePoller', () => {
     poller.stop();
   });
 
-  it('buffers codex deltas and sends once when request completes in final-only mode', async () => {
-    process.env.AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY = '1';
+  it('buffers codex deltas and sends once when request completes in final-only mode by default', async () => {
+    delete process.env.AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY;
 
     const stateManager = createStateManager([
       {

@@ -2,9 +2,10 @@
 
 ## Switching Mudcode Runtime (Local vs Release)
 
-By default, `mudcode` should point to your local TypeScript source runtime during development.
+By default, keep `mudcode` as the globally installed CLI.
+Add optional helper functions when you need to force a specific runtime.
 
-Add this patch to `~/.zshrc`:
+Optionally add this patch to `~/.zshrc`:
 
 ```zsh
 # --- Mudcode runtime switchers ---
@@ -26,18 +27,16 @@ mudcode-src() {
   bun run tsx "$MUDCODE_REPO/bin/mudcode.ts" "$@"
 }
 
-# Default `mudcode` to local source runtime
-alias mudcode='mudcode-src'
 ```
 
 Helpers:
 
-- `mudcode`: local TypeScript source runtime (default alias)
+- `mudcode`: globally installed runtime (default)
 - `mudcode-local`: local compiled binary from this repo
 - `mudcode-rel`: global installed release runtime (ignores `MUDCODE_BIN_PATH`)
-- `mudcode-src`: local TypeScript source runtime
+- `mudcode-src`: optional local TypeScript source runtime helper
 
-Note: `mudcode-src` intentionally preserves your current working directory.
+Note: the `mudcode-src` helper intentionally preserves your current working directory.
 This keeps commands like `mudcode new` tied to the folder you ran them in.
 
 After updating `~/.zshrc`, reload shell config:
@@ -49,13 +48,16 @@ source ~/.zshrc
 ### Commands
 
 ```bash
-# Release (global installed package)
+# Global installed package (default)
+mudcode onboard
+
+# Force release runtime (if MUDCODE_BIN_PATH is set)
 mudcode-rel onboard
 
 # Local compiled binary
 mudcode-local onboard
 
-# Local source (tsx)
+# Local source (optional, tsx)
 mudcode-src onboard
 ```
 
@@ -63,8 +65,8 @@ mudcode-src onboard
 
 ```bash
 cd /Users/dev/git/mudcode
-npm run build
-npm run build:release:binaries:single
+bun run build
+bun run build:release:binaries:single
 ```
 
 The `mudcode-local` helper expects:
@@ -75,12 +77,12 @@ The `mudcode-local` helper expects:
 
 ### Keep `mudcode-local` up to date
 
-Use this workflow whenever `mudcode-local` behavior differs from `mudcode-src`, or after changing CLI code:
+Use this workflow whenever `mudcode-local` behavior differs from `mudcode` (or `mudcode-src` if you use it), or after changing CLI code:
 
 ```bash
 cd /Users/dev/git/mudcode
-npm run build
-npm run build:release:binaries:single
+bun run build
+bun run build:release:binaries:single
 ```
 
 Quick verification:

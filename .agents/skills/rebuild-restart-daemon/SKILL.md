@@ -11,7 +11,7 @@ Rebuild the local project and restart its global daemon process with status veri
 
 ## Workflow
 
-1. Confirm the target directory is the `discord-agent-bridge` repository.
+1. Confirm the target directory is the `mudcode` repository.
 2. Run the bundled script to rebuild and restart daemon.
 3. Verify daemon status and report log path when failures occur.
 
@@ -20,13 +20,13 @@ Rebuild the local project and restart its global daemon process with status veri
 Run:
 
 ```bash
-bash "$(git rev-parse --show-toplevel)/.agents/skills/rebuild-restart-daemon/scripts/rebuild_restart_daemon.sh" --repo /path/to/discord-agent-bridge
+bash "$(git rev-parse --show-toplevel)/.agents/skills/rebuild-restart-daemon/scripts/rebuild_restart_daemon.sh" --repo /path/to/mudcode
 ```
 
 If the skill bundle is mirrored under `~/.codex/skills`, this path also works:
 
 ```bash
-bash /Users/dev/.codex/skills/rebuild-restart-daemon/scripts/rebuild_restart_daemon.sh --repo /path/to/discord-agent-bridge
+bash ~/.codex/skills/rebuild-restart-daemon/scripts/rebuild_restart_daemon.sh --repo /path/to/mudcode
 ```
 
 Use options:
@@ -40,7 +40,7 @@ Use options:
 Run:
 
 ```bash
-cd /path/to/discord-agent-bridge
+cd /path/to/mudcode
 bun run build
 bun dist/bin/mudcode.js daemon stop
 bun dist/bin/mudcode.js daemon start

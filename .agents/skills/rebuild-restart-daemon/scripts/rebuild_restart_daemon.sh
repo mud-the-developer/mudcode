@@ -10,7 +10,7 @@ Usage:
 
 Options:
   --repo <path>   Target repository path (default: current directory)
-  --skip-build    Skip npm build and only restart daemon
+  --skip-build    Skip bun build and only restart daemon
   --dry-run       Print commands without executing them
   -h, --help      Show this help
 EOF

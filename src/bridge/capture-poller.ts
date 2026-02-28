@@ -132,11 +132,11 @@ export class BridgeCapturePoller {
   private resolveCodexFinalOnlyModeEnabled(configured?: boolean): boolean {
     if (typeof configured === 'boolean') return configured;
     const raw = process.env.AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY;
-    if (!raw) return false;
+    if (!raw) return true;
     const normalized = raw.trim().toLowerCase();
     if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
     if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
-    return false;
+    return true;
   }
 
   private resolveLongOutputThreadThreshold(configured?: number): number {

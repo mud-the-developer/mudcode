@@ -64,7 +64,7 @@ export async function configCommand(options: {
     console.log(chalk.gray(`   Capture Poll Interval ms: ${config.capture?.pollMs || '(default)'}`));
     console.log(chalk.gray(`   Capture Quiet Polls: ${config.capture?.pendingQuietPolls || '(default)'}`));
     console.log(chalk.gray(`   Capture Initial Quiet Polls (Codex): ${config.capture?.pendingInitialQuietPollsCodex ?? '(default)'}`));
-    console.log(chalk.gray(`   Capture Codex Final Only: ${config.capture?.codexFinalOnly === undefined ? '(default/off)' : config.capture.codexFinalOnly ? 'on' : 'off'}`));
+    console.log(chalk.gray(`   Capture Codex Final Only: ${config.capture?.codexFinalOnly === undefined ? '(default/on)' : config.capture.codexFinalOnly ? 'on' : 'off'}`));
     console.log(chalk.gray(`   Capture Stale Alert ms: ${config.capture?.staleAlertMs || '(default)'}`));
     console.log(chalk.gray(`   Capture Prompt Echo Filter: ${config.capture?.filterPromptEcho === undefined ? '(default/on)' : config.capture.filterPromptEcho ? 'on' : 'off'}`));
     console.log(chalk.gray(`   Capture Prompt Echo Max Polls: ${config.capture?.promptEchoMaxPolls || '(default)'}`));
