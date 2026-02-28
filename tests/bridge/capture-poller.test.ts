@@ -423,11 +423,14 @@ describe('BridgeCapturePoller', () => {
     await vi.advanceTimersByTimeAsync(300);
     expect(messaging.sendToChannel).not.toHaveBeenCalled();
 
-    // Marker disappears; buffered final content is flushed once.
+    // Marker disappears; output stays buffered until quiet threshold is met.
     await vi.advanceTimersByTimeAsync(300);
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
 
+    // Next quiet poll flushes buffered final content.
+    await vi.advanceTimersByTimeAsync(300);
     expect(messaging.sendToChannel).toHaveBeenCalledTimes(1);
-    expect(messaging.sendToChannel).toHaveBeenCalledWith('parent-ch', 'assistant: step one\nassistant: step two');
+    expect(messaging.sendToChannel).toHaveBeenCalledWith('parent-ch', 'assistant: step two');
 
     poller.stop();
   });
@@ -491,10 +494,12 @@ describe('BridgeCapturePoller', () => {
 
     await vi.advanceTimersByTimeAsync(300); // marker removed, delta buffered
     expect(messaging.sendToChannel).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(300); // quiet flush
+    await vi.advanceTimersByTimeAsync(300); // first quiet poll after marker removal
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(300); // second quiet poll flush
 
     expect(messaging.sendToChannel).toHaveBeenCalledTimes(1);
-    expect(messaging.sendToChannel).toHaveBeenCalledWith('thread-ch', 'assistant: intro\nassistant: final');
+    expect(messaging.sendToChannel).toHaveBeenCalledWith('thread-ch', 'assistant: final');
 
     poller.stop();
   });
@@ -563,7 +568,7 @@ describe('BridgeCapturePoller', () => {
 
     await vi.advanceTimersByTimeAsync(300); // second quiet poll flush
     expect(messaging.sendToChannel).toHaveBeenCalledTimes(1);
-    expect(messaging.sendToChannel).toHaveBeenCalledWith('thread-ch', 'assistant: step one\nassistant: step two');
+    expect(messaging.sendToChannel).toHaveBeenCalledWith('thread-ch', 'assistant: step two');
 
     poller.stop();
   });
@@ -684,6 +689,70 @@ describe('BridgeCapturePoller', () => {
     expect(pendingTracker.markCompleted).not.toHaveBeenCalled();
 
     // First quiet cycle should complete immediately due ready marker.
+    await vi.advanceTimersByTimeAsync(300);
+    expect(pendingTracker.markCompleted).toHaveBeenCalledWith('demo', 'codex', 'codex');
+
+    poller.stop();
+  });
+
+  it('does not complete codex pending immediately on input-ready marker in final-only mode', async () => {
+    process.env.AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY = '1';
+
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'parent-ch',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const footer = 'gpt-5.3-codex xhigh · 93% left · ~/repo/demo';
+    const tmux = createTmux([
+      'boot line',
+      ['boot line', 'assistant: final answer ready', '›', footer].join('\n'),
+      ['boot line', 'assistant: final answer ready', '›', footer].join('\n'),
+      ['boot line', 'assistant: final answer ready', '›', footer].join('\n'),
+    ]);
+
+    let pendingDepth = 1;
+    const pendingTracker = {
+      getPendingChannel: vi.fn().mockImplementation(() => (pendingDepth > 0 ? 'thread-ch' : undefined)),
+      getPendingDepth: vi.fn().mockImplementation(() => pendingDepth),
+      markCompleted: vi.fn().mockImplementation(async () => {
+        pendingDepth = 0;
+      }),
+    } as any;
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      intervalMs: 300,
+    });
+
+    poller.start();
+    await Promise.resolve();
+
+    // First output poll buffers only.
+    await vi.advanceTimersByTimeAsync(300);
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
+    expect(pendingTracker.markCompleted).not.toHaveBeenCalled();
+
+    // Ready marker should not complete immediately in final-only mode.
+    await vi.advanceTimersByTimeAsync(300);
+    expect(pendingTracker.markCompleted).not.toHaveBeenCalled();
+
+    // Quiet threshold eventually completes pending.
     await vi.advanceTimersByTimeAsync(300);
     expect(pendingTracker.markCompleted).toHaveBeenCalledWith('demo', 'codex', 'codex');
 
@@ -1536,6 +1605,50 @@ describe('BridgeCapturePoller', () => {
       'gpt-5.3-codex xhigh · 99% left · ~/yonsei/mud/ar_xapp_v3',
       'gpt-5.3-codex xhigh · 96% left · ~/yonsei/mud/ar_xapp_v3',
       'gpt-5.3-codex xhigh · 91% left · ~/yonsei/mud/ar_xapp_v3',
+    ]);
+    const pendingTracker = createPendingTracker();
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      intervalMs: 300,
+    });
+
+    poller.start();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
+    expect(pendingTracker.markCompleted).not.toHaveBeenCalled();
+
+    poller.stop();
+  });
+
+  it('does not send codex tab-to-queue status updates', async () => {
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'ch-1',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const tmux = createTmux([
+      'boot line',
+      ['boot line', 'tab to queue message                                        49% context left'].join('\n'),
+      ['boot line', 'tab to queue message                                        42% context left'].join('\n'),
     ]);
     const pendingTracker = createPendingTracker();
 

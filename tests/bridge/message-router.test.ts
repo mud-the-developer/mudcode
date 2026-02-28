@@ -82,6 +82,10 @@ describe('BridgeMessageRouter (codex)', () => {
     delete process.env.AGENT_DISCORD_CODEX_LONG_PROMPT_REENTER_DELAY_MS;
     delete process.env.AGENT_DISCORD_CODEX_AUTO_REENTER_CHUNK_BOUNDARY;
     delete process.env.AGENT_DISCORD_TMUX_SEND_KEYS_CHUNK_SIZE;
+    delete process.env.AGENT_DISCORD_CODEX_AUTO_SUBAGENT;
+    delete process.env.AGENT_DISCORD_CODEX_AUTO_SUBAGENT_MIN_CHARS;
+    delete process.env.AGENT_DISCORD_CODEX_AUTO_SUBAGENT_MIN_LINES;
+    delete process.env.AGENT_DISCORD_CODEX_AUTO_SUBAGENT_MIN_BULLETS;
     delete process.env.MUDCODE_CODEX_AUTO_SKILL_LINK;
     for (const dir of tempDirs.splice(0)) {
       rmSync(dir, { recursive: true, force: true });
@@ -245,6 +249,100 @@ describe('BridgeMessageRouter (codex)', () => {
     expect(sentPrompt).toContain('rebuild-restart-daemon');
   });
 
+  it('auto-injects sub-agent hint for large codex prompts', async () => {
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_AUTO_SUBAGENT = '1';
+    process.env.AGENT_DISCORD_CODEX_AUTO_SUBAGENT_MIN_CHARS = '2400';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    const longPrompt = `Refactor this module:\n\n${'A'.repeat(2600)}`;
+    await callback('codex', longPrompt, 'demo', 'ch-1', 'msg-1', 'codex');
+
+    const sentPrompt = String(tmux.typeKeysToWindow.mock.calls[0]?.[2] ?? '');
+    expect(sentPrompt).toContain('[mudcode auto-subagent]');
+    expect(sentPrompt).toContain('sub-agent Codex workers');
+  });
+
+  it('does not inject sub-agent hint when prompt already requests sub-agent split', async () => {
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_AUTO_SUBAGENT = '1';
+    process.env.AGENT_DISCORD_CODEX_AUTO_SUBAGENT_MIN_CHARS = '1200';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    const alreadySplit = `Use sub-agent codex and split tasks by file ownership.\n\n${'B'.repeat(1400)}`;
+    await callback('codex', alreadySplit, 'demo', 'ch-1', 'msg-1', 'codex');
+
+    const sentPrompt = String(tmux.typeKeysToWindow.mock.calls[0]?.[2] ?? '');
+    expect(sentPrompt).toContain('Use sub-agent codex');
+    expect(sentPrompt).not.toContain('[mudcode auto-subagent]');
+  });
+
   it('re-sends Enter when codex submit verification still sees prompt tail', async () => {
     process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
     process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
@@ -341,6 +439,7 @@ describe('BridgeMessageRouter (codex)', () => {
     process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
     process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
     process.env.AGENT_DISCORD_CODEX_LONG_PROMPT_REENTER_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_AUTO_SUBAGENT = '0';
 
     const { messaging, getCallback } = createMessagingMock();
     const tmux = {

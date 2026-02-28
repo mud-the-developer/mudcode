@@ -67,6 +67,25 @@ export class BridgeHookServer {
     };
   }
 
+  private resolveIgnoredEventRetentionMs(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_IGNORED_EVENT_RETENTION_MS || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 60_000) {
+      return Math.trunc(fromEnv);
+    }
+    return 24 * 60 * 60 * 1000;
+  }
+
+  private pruneIgnoredEvents(activeInstanceKeys: Set<string>): void {
+    if (this.ignoredEventsByInstance.size === 0) return;
+    const now = Date.now();
+    const retentionMs = this.resolveIgnoredEventRetentionMs();
+    for (const [key, snapshot] of this.ignoredEventsByInstance.entries()) {
+      if (activeInstanceKeys.has(key)) continue;
+      if (now - snapshot.lastIgnoredAtMs <= retentionMs) continue;
+      this.ignoredEventsByInstance.delete(key);
+    }
+  }
+
   private resolveOutputRoute(
     defaultChannelId: string | undefined,
     projectName: string,
@@ -176,6 +195,7 @@ export class BridgeHookServer {
     } & PendingRuntimeSnapshot>;
   } {
     const projects = this.deps.stateManager.listProjects().map((project) => normalizeProjectState(project));
+    const activeInstanceKeys = new Set<string>();
     const instances: Array<{
       projectName: string;
       instanceId: string;
@@ -184,6 +204,7 @@ export class BridgeHookServer {
 
     for (const project of projects) {
       for (const instance of listProjectInstances(project)) {
+        activeInstanceKeys.add(this.runtimeKey(project.projectName, instance.instanceId));
         const ignored = this.getIgnoredEventSnapshot(project.projectName, instance.instanceId);
         instances.push({
           projectName: project.projectName,
@@ -194,6 +215,7 @@ export class BridgeHookServer {
         });
       }
     }
+    this.pruneIgnoredEvents(activeInstanceKeys);
 
     return {
       generatedAt: new Date().toISOString(),

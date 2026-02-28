@@ -62,10 +62,12 @@ describe('BridgeCapturePoller replay fixtures', () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
+    process.env.AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY = '0';
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    delete process.env.AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY;
   });
 
   for (const replay of replayCases) {

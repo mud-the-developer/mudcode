@@ -303,7 +303,7 @@ export class BridgeCapturePoller {
     );
   }
 
-  private appendBufferedOutput(key: string, text: string, channelId?: string): void {
+  private appendBufferedOutput(key: string, text: string, channelId?: string, agentType: string = ''): void {
     const trimmed = text.trim();
     if (trimmed.length === 0) return;
     if (channelId && !this.bufferedOutputChannelByInstance.has(key)) {
@@ -311,10 +311,102 @@ export class BridgeCapturePoller {
     }
     const previous = this.bufferedOutputByInstance.get(key);
     if (!previous) {
-      this.bufferedOutputByInstance.set(key, trimmed);
+      const initial =
+        this.codexFinalOnlyModeEnabled && agentType === 'codex'
+          ? this.prepareCodexFinalOnlyOutput(trimmed)
+          : trimmed;
+      if (initial.trim().length === 0) return;
+      this.bufferedOutputByInstance.set(key, this.trimTailLines(initial, 320));
       return;
     }
-    this.bufferedOutputByInstance.set(key, `${previous}\n${trimmed}`);
+    const merged = this.mergeBufferedOutput(previous, trimmed, agentType);
+    if (merged.trim().length === 0) return;
+    this.bufferedOutputByInstance.set(key, merged);
+  }
+
+  private mergeBufferedOutput(previous: string, incoming: string, agentType: string): string {
+    const overlap = this.longestSuffixPrefix(previous, incoming);
+    const merged = overlap > 0 ? `${previous}${incoming.slice(overlap)}` : `${previous}\n${incoming}`;
+    const normalized =
+      this.codexFinalOnlyModeEnabled && agentType === 'codex'
+        ? this.prepareCodexFinalOnlyOutput(merged)
+        : merged;
+    return this.trimTailLines(normalized, 320);
+  }
+
+  private trimTailLines(text: string, maxLines: number): string {
+    const lines = text.split('\n');
+    if (lines.length <= maxLines) return text;
+    return lines.slice(lines.length - maxLines).join('\n');
+  }
+
+  private prepareCodexFinalOnlyOutput(text: string): string {
+    const sourceLines = text
+      .split('\n')
+      .map((line) => line.replace(/\r/g, '').trimEnd());
+    const kept: string[] = [];
+    let lastWasBlank = false;
+
+    for (const raw of sourceLines) {
+      const compact = raw.trim();
+      if (compact.length === 0) {
+        if (!lastWasBlank && kept.length > 0) {
+          kept.push('');
+        }
+        lastWasBlank = true;
+        continue;
+      }
+
+      if (this.isCodexIntermediaryBridgeLine(compact)) {
+        continue;
+      }
+
+      kept.push(raw);
+      lastWasBlank = false;
+    }
+
+    const compact = kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+    if (compact.length === 0) return '';
+
+    const compactLines = compact.split('\n');
+    let lastAssistantLine = -1;
+    for (let i = compactLines.length - 1; i >= 0; i -= 1) {
+      if (/^assistant\s*:/i.test(compactLines[i]!.trim())) {
+        lastAssistantLine = i;
+        break;
+      }
+    }
+    if (lastAssistantLine >= 0) {
+      return compactLines.slice(lastAssistantLine).join('\n').trim();
+    }
+
+    return compact;
+  }
+
+  private isCodexIntermediaryBridgeLine(line: string): boolean {
+    const compact = line.replace(/\s+/g, ' ').trim();
+    if (compact.length === 0) return true;
+    if (this.isCodexUiProgressNoiseLine(compact)) return true;
+    if (this.isCodexUiStatusNoiseLine(compact)) return true;
+    if (/^›(?:\s.*)?$/.test(compact)) return true;
+    if (/^[-─]{20,}$/.test(compact)) return true;
+    if (/^[│└├]/.test(compact)) return true;
+    if (/^would you like to run the following command\?/i.test(compact)) return true;
+    if (/^press enter to confirm or esc to cancel$/i.test(compact)) return true;
+    if (/^\d+\.\s+(yes|no)\b/i.test(compact)) return true;
+    if (/^token usage:/i.test(compact)) return true;
+    if (/^to continue this session, run codex resume\b/i.test(compact)) return true;
+    if (/^tip:\s/i.test(compact)) return true;
+    if (/^⚠\s*mcp /i.test(compact)) return true;
+    if (/^⚠\s*`?collab`?\s+is deprecated/i.test(compact)) return true;
+    if (
+      /^•\s*(ran|explored|read|search|find|list|open(?:ed)?|click(?:ed)?|screenshot|apply|applied|edit(?:ed|ing)?|update(?:d|ing)?|create(?:d|ing)?|delete(?:d|ing)?|move(?:d|ing)?|analy(?:ze|zing)|check(?:ing)?|verify|verifying|inspect(?:ing)?|debug(?:ging)?|run(?:ning)?|execute|executing)\b/i.test(
+        compact,
+      )
+    ) {
+      return true;
+    }
+    return false;
   }
 
   private isLikelyCodexReadyForInput(captureSnapshot: string): boolean {
@@ -353,7 +445,7 @@ export class BridgeCapturePoller {
     return tail.some((line) => /\besc to interrupt\b/.test(line));
   }
 
-  private async flushBufferedOutput(key: string, channelId?: string): Promise<boolean> {
+  private async flushBufferedOutput(key: string, channelId?: string, agentType: string = ''): Promise<boolean> {
     const buffered = this.bufferedOutputByInstance.get(key);
     if (!buffered || buffered.trim().length === 0) {
       this.bufferedOutputByInstance.delete(key);
@@ -363,7 +455,19 @@ export class BridgeCapturePoller {
     const targetChannelId = this.bufferedOutputChannelByInstance.get(key) || channelId;
     if (!targetChannelId) return false;
 
-    const sent = await this.sendOutput(targetChannelId, buffered);
+    const prepared =
+      this.codexFinalOnlyModeEnabled && agentType === 'codex'
+        ? this.prepareCodexFinalOnlyOutput(buffered)
+        : buffered.trim();
+    if (this.codexFinalOnlyModeEnabled && agentType === 'codex' && prepared.trim().length === 0) {
+      this.bufferedOutputByInstance.delete(key);
+      this.bufferedOutputChannelByInstance.delete(key);
+      return true;
+    }
+    const output = prepared.trim().length > 0 ? prepared : buffered.trim();
+    const sent = await this.sendOutput(targetChannelId, output);
+    if (!sent) return false;
+
     this.bufferedOutputByInstance.delete(key);
     this.bufferedOutputChannelByInstance.delete(key);
     return sent;
@@ -390,6 +494,11 @@ export class BridgeCapturePoller {
       });
     }
 
+    if (this.codexFinalOnlyModeEnabled && params.agentType === 'codex') {
+      // Any newly observed codex output means we're not in a quiet window anymore.
+      this.finalOnlyQuietFlushPollsByInstance.delete(params.key);
+    }
+
     const shouldBuffer =
       this.shouldBufferUntilCompletion(params.key, params.agentType, params.pendingDepth) ||
       (
@@ -398,7 +507,7 @@ export class BridgeCapturePoller {
         params.codexWorkingHint === true
       );
     if (shouldBuffer) {
-      this.appendBufferedOutput(params.key, trimmed, params.channelId);
+      this.appendBufferedOutput(params.key, trimmed, params.channelId, params.agentType);
       return true;
     }
 
@@ -736,15 +845,6 @@ export class BridgeCapturePoller {
           return;
         }
 
-        const codexReadyForInput =
-          typeof captureSnapshot === 'string' &&
-          this.isLikelyCodexReadyForInput(captureSnapshot);
-        if (codexReadyForInput) {
-          await this.flushBufferedOutput(key, channelId);
-          this.finalOnlyQuietFlushPollsByInstance.delete(key);
-          return;
-        }
-
         const hasBufferedOutput = this.bufferedOutputByInstance.has(key);
         if (!hasBufferedOutput) {
           this.finalOnlyQuietFlushPollsByInstance.delete(key);
@@ -758,7 +858,7 @@ export class BridgeCapturePoller {
           return;
         }
 
-        await this.flushBufferedOutput(key, channelId);
+        await this.flushBufferedOutput(key, channelId, agentType);
         this.finalOnlyQuietFlushPollsByInstance.delete(key);
         return;
       }
@@ -778,6 +878,7 @@ export class BridgeCapturePoller {
       return;
     }
     if (
+      !this.codexFinalOnlyModeEnabled &&
       agentType === 'codex' &&
       hasOutputCandidate &&
       typeof captureSnapshot === 'string' &&
@@ -1166,6 +1267,7 @@ export class BridgeCapturePoller {
 
     if (/^\d{1,3}%\s*context left$/i.test(compact)) return true;
     if (/^\??\s*for shortcuts$/i.test(compact)) return true;
+    if (/^tab to queue message(?:\s+\d{1,3}%\s*(?:context\s*)?left)?$/i.test(compact)) return true;
     if (/^.+[·•]\s*\d{1,3}%\s*left\s*[·•]\s*(?:~\/|\/).+$/i.test(compact)) return true;
 
     return false;

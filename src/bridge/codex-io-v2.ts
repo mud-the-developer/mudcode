@@ -20,6 +20,10 @@ interface TurnState {
   startedAtMs: number;
   commandsDetected: number;
   channelId?: string;
+  projectPath?: string;
+  taskMarkdownPath?: string;
+  taskDeltaCount: number;
+  deltaTail: string[];
   activeCommand?: ActiveCommandState;
 }
 
@@ -79,20 +83,43 @@ export class CodexIoV2Tracker {
     projectName: string;
     instanceId: string;
     channelId?: string;
+    projectPath?: string;
     prompt: string;
   }): void {
     if (!this.enabled) return;
 
     const key = this.instanceKey(params.projectName, params.instanceId);
     const now = Date.now();
+    const taskMarkdownPath = this.resolveTaskMarkdownPath(
+      params.projectName,
+      params.instanceId,
+      now,
+      params.projectPath,
+    );
     const state: TurnState = {
       startedAtMs: now,
       commandsDetected: 0,
       channelId: params.channelId?.trim() || undefined,
+      projectPath: params.projectPath?.trim() || undefined,
+      taskMarkdownPath,
+      taskDeltaCount: 0,
+      deltaTail: [],
       activeCommand: undefined,
     };
 
     this.turnByInstance.set(key, state);
+    this.appendTaskMarkdown(
+      taskMarkdownPath,
+      `# Task ${new Date(now).toISOString()}\n\n` +
+        `- project: \`${params.projectName}\`\n` +
+        `- instance: \`${params.instanceId}\`\n` +
+        `- startedAt: ${new Date(now).toISOString()}\n\n` +
+        `## Prompt\n\n` +
+        '```text\n' +
+        `${params.prompt}\n` +
+        '```\n\n' +
+        '## Updates\n',
+    );
     this.appendEvent(params.projectName, params.instanceId, {
       type: 'turn_start',
       ts: new Date(now).toISOString(),
@@ -117,6 +144,8 @@ export class CodexIoV2Tracker {
     if (params.channelId && params.channelId.trim().length > 0) {
       state.channelId = params.channelId.trim();
     }
+    this.pushDeltaTail(state, trimmed);
+    this.appendTaskDelta(state, now, trimmed);
 
     this.appendEvent(params.projectName, params.instanceId, {
       type: 'delta',
@@ -166,6 +195,12 @@ export class CodexIoV2Tracker {
       durationMs: Math.max(0, now - state.startedAtMs),
       commandsDetected: state.commandsDetected,
     });
+    this.appendTaskCompletion(state, {
+      endedAtMs: now,
+      status: 'completed',
+      reason: params.reason,
+      durationMs: Math.max(0, now - state.startedAtMs),
+    });
     this.turnByInstance.delete(key);
   }
 
@@ -190,6 +225,12 @@ export class CodexIoV2Tracker {
       type: 'turn_failed',
       ts: new Date(now).toISOString(),
       reason: params.reason,
+    });
+    this.appendTaskCompletion(state, {
+      endedAtMs: now,
+      status: 'failed',
+      reason: params.reason,
+      durationMs: Math.max(0, now - state.startedAtMs),
     });
     this.turnByInstance.delete(key);
   }
@@ -241,11 +282,11 @@ export class CodexIoV2Tracker {
     if (typeof configured === 'boolean') return configured;
 
     const raw = process.env.AGENT_DISCORD_CODEX_IO_V2_ANNOUNCE;
-    if (!raw) return true;
+    if (!raw) return false;
     const normalized = raw.trim().toLowerCase();
     if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
     if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
-    return true;
+    return false;
   }
 
   private resolveRootDir(configured?: string): string {
@@ -270,10 +311,164 @@ export class CodexIoV2Tracker {
       startedAtMs: now,
       commandsDetected: 0,
       channelId: channelId?.trim() || undefined,
+      projectPath: undefined,
+      taskMarkdownPath: undefined,
+      taskDeltaCount: 0,
+      deltaTail: [],
       activeCommand: undefined,
     };
     this.turnByInstance.set(key, created);
     return created;
+  }
+
+  private resolveTaskMarkdownPath(
+    projectName: string,
+    instanceId: string,
+    timestampMs: number,
+    projectPath?: string,
+  ): string {
+    const safeProject = this.safePathSegment(projectName);
+    const safeInstance = this.safePathSegment(instanceId);
+    const stamp = new Date(timestampMs).toISOString().replace(/[:.]/g, '-');
+    const root = projectPath && projectPath.trim().length > 0
+      ? join(projectPath, '.mudcode', 'tasks', safeInstance)
+      : join(homedir(), '.mudcode', 'tasks', safeProject, safeInstance);
+    return join(root, `${stamp}.md`);
+  }
+
+  private appendTaskMarkdown(taskPath: string | undefined, content: string): void {
+    if (!taskPath) return;
+    try {
+      mkdirSync(dirname(taskPath), { recursive: true });
+      appendFileSync(taskPath, content);
+    } catch (error) {
+      console.warn(`Failed to write codex task markdown: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private pushDeltaTail(state: TurnState, deltaText: string): void {
+    state.deltaTail.push(deltaText);
+    if (state.deltaTail.length > 16) {
+      state.deltaTail = state.deltaTail.slice(state.deltaTail.length - 16);
+    }
+  }
+
+  private appendTaskDelta(state: TurnState, timestampMs: number, deltaText: string): void {
+    if (!state.taskMarkdownPath) return;
+    if (state.taskDeltaCount >= 12) return;
+    const cleaned = this.cleanTaskDelta(deltaText);
+    if (cleaned.length === 0) return;
+
+    state.taskDeltaCount += 1;
+    const snippet = cleaned.length <= 900 ? cleaned : `${cleaned.slice(0, 899)}…`;
+    this.appendTaskMarkdown(
+      state.taskMarkdownPath,
+      `### Update ${new Date(timestampMs).toISOString()}\n\n` +
+        '```text\n' +
+        `${snippet}\n` +
+        '```\n\n',
+    );
+  }
+
+  private appendTaskCompletion(
+    state: TurnState,
+    params: { endedAtMs: number; status: 'completed' | 'failed'; reason: string; durationMs: number },
+  ): void {
+    if (!state.taskMarkdownPath) return;
+    const finalOutput = this.pickTaskFinalOutput(state.deltaTail);
+    const statusLabel = params.status === 'completed' ? 'completed' : 'failed';
+    let section =
+      `## Result\n\n` +
+      `- status: \`${statusLabel}\`\n` +
+      `- endedAt: ${new Date(params.endedAtMs).toISOString()}\n` +
+      `- durationMs: ${params.durationMs}\n` +
+      `- reason: \`${this.truncateInline(params.reason, 200)}\`\n\n`;
+    if (finalOutput.length > 0) {
+      const body = finalOutput.length <= 4000 ? finalOutput : `${finalOutput.slice(0, 3999)}…`;
+      section +=
+        `### Final Output\n\n` +
+        '```text\n' +
+        `${body}\n` +
+        '```\n\n';
+    }
+    this.appendTaskMarkdown(state.taskMarkdownPath, section);
+  }
+
+  private pickTaskFinalOutput(deltaTail: string[]): string {
+    if (deltaTail.length === 0) return '';
+    const candidates = deltaTail
+      .map((delta) => this.cleanTaskDelta(delta))
+      .filter((delta) => delta.trim().length > 0);
+    if (candidates.length === 0) return '';
+
+    const preferred = candidates[candidates.length - 1]!;
+    const lastAssistant = preferred
+      .split('\n')
+      .map((line) => line.trimEnd())
+      .filter((line) => line.trim().length > 0);
+    let lastAssistantIdx = -1;
+    for (let i = lastAssistant.length - 1; i >= 0; i -= 1) {
+      if (/^assistant\s*:/i.test(lastAssistant[i]!)) {
+        lastAssistantIdx = i;
+        break;
+      }
+    }
+    if (lastAssistantIdx >= 0) {
+      return lastAssistant.slice(lastAssistantIdx).join('\n').trim();
+    }
+    return preferred.trim();
+  }
+
+  private cleanTaskDelta(deltaText: string): string {
+    const lines = deltaText
+      .split('\n')
+      .map((line) => line.replace(/\r/g, '').trimEnd());
+    const kept: string[] = [];
+    let lastBlank = false;
+
+    for (const raw of lines) {
+      const compact = raw.trim();
+      if (compact.length === 0) {
+        if (!lastBlank && kept.length > 0) {
+          kept.push('');
+        }
+        lastBlank = true;
+        continue;
+      }
+
+      if (this.isTaskNoiseLine(compact)) {
+        continue;
+      }
+
+      kept.push(raw);
+      lastBlank = false;
+    }
+
+    return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  private isTaskNoiseLine(line: string): boolean {
+    const compact = line.replace(/\s+/g, ' ').trim();
+    if (compact.length === 0) return true;
+    if (/^[-─]{20,}$/.test(compact)) return true;
+    if (/^[│└├╭╰]/.test(compact)) return true;
+    if (/^token usage:/i.test(compact)) return true;
+    if (/^to continue this session, run codex resume\b/i.test(compact)) return true;
+    if (/^tip:\s/i.test(compact)) return true;
+    if (/^⚠\s*`?collab`?\s+is deprecated/i.test(compact)) return true;
+    if (/^⚠\s*mcp /i.test(compact)) return true;
+    if (/^would you like to run the following command\?/i.test(compact)) return true;
+    if (/^press enter to confirm or esc to cancel$/i.test(compact)) return true;
+    if (/^\d+\.\s+(yes|no)\b/i.test(compact)) return true;
+    if (/^›(?:\s.*)?$/.test(compact)) return true;
+    if (
+      /^•\s*(ran|explored|read|search|find|list|open(?:ed)?|click(?:ed)?|screenshot|apply|applied|edit(?:ed|ing)?|update(?:d|ing)?|create(?:d|ing)?|delete(?:d|ing)?|move(?:d|ing)?|analy(?:ze|zing)|check(?:ing)?|verify|verifying|inspect(?:ing)?|debug(?:ging)?|run(?:ning)?|execute|executing)\b/i.test(
+        compact,
+      )
+    ) {
+      return true;
+    }
+    return false;
   }
 
   private instanceKey(projectName: string, instanceId: string): string {
@@ -357,6 +552,10 @@ export class CodexIoV2Tracker {
       sequence,
       command: normalizedCommand,
     });
+    this.appendTaskMarkdown(
+      state.taskMarkdownPath,
+      `- ${new Date(now).toISOString()} ▶️ cmd#${sequence} \`${this.truncateInline(normalizedCommand, 220)}\`\n`,
+    );
 
     if (this.announceCommandEvents && state.channelId) {
       const preview = this.truncateInline(normalizedCommand, 220);
@@ -386,6 +585,10 @@ export class CodexIoV2Tracker {
       exitCode,
       reason,
     });
+    this.appendTaskMarkdown(
+      state.taskMarkdownPath,
+      `- ${new Date(now).toISOString()} ⏹️ cmd#${active.sequence} exit ${exitCode === undefined ? 'unknown' : exitCode} (${this.formatDuration(durationMs)}) \`${this.truncateInline(active.command, 180)}\`\n`,
+    );
 
     if (this.announceCommandEvents && state.channelId) {
       const exitLabel = exitCode === undefined ? 'unknown' : String(exitCode);

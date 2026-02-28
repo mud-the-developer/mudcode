@@ -205,6 +205,59 @@ export class BridgeMessageRouter {
     return [...new Set([normalized, ...tails])];
   }
 
+  private hasExplicitSubAgentRequest(prompt: string): boolean {
+    if (/\[mudcode auto-subagent\]/i.test(prompt)) return true;
+    if (/\bsub[-\s]?agent\b/i.test(prompt)) return true;
+    if (/\bspawn[_-]?agent\b/i.test(prompt)) return true;
+    if (/\bparallel(?:ize)?\b/i.test(prompt)) return true;
+    if (/서브\s*에이전트/i.test(prompt)) return true;
+    if (/작업\s*분할/i.test(prompt)) return true;
+    if (/나눠(?:서)?\s*진행/i.test(prompt)) return true;
+    if (/병렬\s*처리/i.test(prompt)) return true;
+    return false;
+  }
+
+  private isLargeContextPrompt(prompt: string): boolean {
+    const minChars = Math.max(600, this.getEnvInt('AGENT_DISCORD_CODEX_AUTO_SUBAGENT_MIN_CHARS', 2600));
+    const minLines = Math.max(8, this.getEnvInt('AGENT_DISCORD_CODEX_AUTO_SUBAGENT_MIN_LINES', 48));
+    const minBulletLines = Math.max(3, this.getEnvInt('AGENT_DISCORD_CODEX_AUTO_SUBAGENT_MIN_BULLETS', 8));
+
+    const lines = prompt
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    const bulletLines = lines.filter((line) => /^([-*+]|(\d+[\.)]))\s+/.test(line)).length;
+    const fenceCount = (prompt.match(/```/g) || []).length;
+
+    if (prompt.length >= minChars) return true;
+    if (lines.length >= minLines && bulletLines >= minBulletLines) return true;
+    if (lines.length >= Math.floor(minLines * 1.5)) return true;
+    if (fenceCount >= 2 && prompt.length >= Math.floor(minChars * 0.7)) return true;
+    return false;
+  }
+
+  private maybeAugmentCodexPromptForSubAgent(prompt: string): { prompt: string; applied: boolean } {
+    if (!this.getEnvBool('AGENT_DISCORD_CODEX_AUTO_SUBAGENT', true)) {
+      return { prompt, applied: false };
+    }
+    if (prompt.trim().length === 0) return { prompt, applied: false };
+    if (this.hasExplicitSubAgentRequest(prompt)) return { prompt, applied: false };
+    if (!this.isLargeContextPrompt(prompt)) return { prompt, applied: false };
+
+    const hint = [
+      '[mudcode auto-subagent]',
+      'This request looks context-heavy. Split work and run focused sub-agent Codex workers.',
+      '- Create 2-4 sub-agents with explicit ownership (files/responsibility).',
+      '- Run independent chunks in parallel, then merge and verify once.',
+      '- Keep each sub-agent context narrow; avoid full-repo rereads unless needed.',
+      '- Return one integrated summary with changed files and verification results.',
+      '[/mudcode auto-subagent]',
+    ].join('\n');
+
+    const augmented = `${prompt.trimEnd()}\n\n${hint}`;
+    return { prompt: augmented, applied: true };
+  }
+
   private shouldRetryCodexSubmit(sessionName: string, windowName: string, prompt: string): boolean {
     try {
       const captureRaw = this.deps.tmux.capturePaneFromWindow(sessionName, windowName, 'codex');
@@ -774,7 +827,14 @@ export class BridgeMessageRouter {
               projectPath: project.projectPath,
               prompt: sanitized,
             });
-            promptToSend = linked?.prompt || sanitized;
+            const withSkillHint = linked?.prompt || sanitized;
+            const subAgentHinted = this.maybeAugmentCodexPromptForSubAgent(withSkillHint);
+            if (subAgentHinted.applied) {
+              console.log(
+                `🧩 [${projectName}/${resolvedAgentType}] auto sub-agent hint injected (${withSkillHint.length} chars)`,
+              );
+            }
+            promptToSend = subAgentHinted.prompt;
           } else {
             promptToSend = sanitized;
           }
@@ -786,7 +846,7 @@ export class BridgeMessageRouter {
           this.deps.pendingTracker.markPending(
             projectName,
             resolvedAgentType,
-            channelId,
+            commandChannelId,
             messageId,
             instanceKey,
             promptToSend || undefined,
@@ -838,6 +898,7 @@ export class BridgeMessageRouter {
               projectName,
               instanceId: instanceKey,
               channelId: commandChannelId,
+              projectPath: project.projectPath,
               prompt: promptToSend,
             });
           }

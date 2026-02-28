@@ -41,6 +41,7 @@ export class PendingMessageTracker {
   private static readonly MAX_TERMINAL_SNAPSHOTS = 4000;
   private pendingMessageByInstance: Map<string, PendingMessageState[]> = new Map();
   private lastTerminalByInstance: Map<string, PendingTerminalSnapshot> = new Map();
+  private operationQueueByKey = new Map<string, Promise<void>>();
   private readonly pendingStuckAlertMs: number;
 
   constructor(private messaging: MessagingClient) {
@@ -115,6 +116,18 @@ export class PendingMessageTracker {
       }
     }
     this.pendingMessageByInstance.delete(key);
+    this.operationQueueByKey.delete(key);
+  }
+
+  private enqueueByKey(key: string, operation: () => Promise<void>): Promise<void> {
+    const previous = this.operationQueueByKey.get(key) || Promise.resolve();
+    const next = previous.catch(() => undefined).then(operation);
+    this.operationQueueByKey.set(key, next);
+    return next.finally(() => {
+      if (this.operationQueueByKey.get(key) === next) {
+        this.operationQueueByKey.delete(key);
+      }
+    });
   }
 
   private emojiForStage(stage: PendingStage): string {
@@ -241,38 +254,42 @@ export class PendingMessageTracker {
     removeAfter: boolean = false,
     target: PendingQueueTarget = 'tail',
   ): Promise<void> {
-    const pending = this.resolvePendingState(key, target);
-    if (!pending) return;
+    await this.enqueueByKey(key, async () => {
+      const pending = this.resolvePendingState(key, target);
+      if (!pending) return;
 
-    const nextEmoji = this.emojiForStage(stage);
-    if (pending.statusEmoji !== nextEmoji) {
-      await this.messaging.replaceOwnReactionOnMessage(
-        pending.channelId,
-        pending.messageId,
-        pending.statusEmoji,
-        nextEmoji,
-      );
-      pending.statusEmoji = nextEmoji;
-    }
-
-    pending.stage = stage;
-    pending.updatedAtMs = Date.now();
-
-    if (removeAfter) {
-      if (stage === 'completed' || stage === 'error' || stage === 'retry') {
-        this.lastTerminalByInstance.set(key, { stage, atMs: pending.updatedAtMs });
-        this.pruneOldest(this.lastTerminalByInstance, PendingMessageTracker.MAX_TERMINAL_SNAPSHOTS);
+      const nextEmoji = this.emojiForStage(stage);
+      if (pending.statusEmoji !== nextEmoji) {
+        await this.messaging.replaceOwnReactionOnMessage(
+          pending.channelId,
+          pending.messageId,
+          pending.statusEmoji,
+          nextEmoji,
+        );
+        pending.statusEmoji = nextEmoji;
       }
-      this.removePendingState(key, target);
-    }
+
+      pending.stage = stage;
+      pending.updatedAtMs = Date.now();
+
+      if (removeAfter) {
+        if (stage === 'completed' || stage === 'error' || stage === 'retry') {
+          this.lastTerminalByInstance.set(key, { stage, atMs: pending.updatedAtMs });
+          this.pruneOldest(this.lastTerminalByInstance, PendingMessageTracker.MAX_TERMINAL_SNAPSHOTS);
+        }
+        this.removePendingState(key, target);
+      }
+    });
   }
 
   private async addHintByKey(key: string, hint: RouteHint, target: PendingQueueTarget = 'tail'): Promise<void> {
-    const pending = this.resolvePendingState(key, target);
-    if (!pending) return;
-    const emoji = this.emojiForHint(hint);
-    if (!emoji) return;
-    await this.messaging.addReactionToMessage(pending.channelId, pending.messageId, emoji);
+    await this.enqueueByKey(key, async () => {
+      const pending = this.resolvePendingState(key, target);
+      if (!pending) return;
+      const emoji = this.emojiForHint(hint);
+      if (!emoji) return;
+      await this.messaging.addReactionToMessage(pending.channelId, pending.messageId, emoji);
+    });
   }
 
   async markPending(
@@ -284,31 +301,33 @@ export class PendingMessageTracker {
     prompt?: string,
   ): Promise<void> {
     const key = this.pendingKey(projectName, instanceId || agentType);
-    const statusEmoji = this.emojiForStage('received');
-    const now = Date.now();
-    let stopTypingIndicator: (() => void) | undefined;
-    if (typeof this.messaging.startTypingIndicator === 'function') {
-      try {
-        stopTypingIndicator = await this.messaging.startTypingIndicator(channelId);
-      } catch {
-        // Non-critical.
+    await this.enqueueByKey(key, async () => {
+      const statusEmoji = this.emojiForStage('received');
+      const now = Date.now();
+      let stopTypingIndicator: (() => void) | undefined;
+      if (typeof this.messaging.startTypingIndicator === 'function') {
+        try {
+          stopTypingIndicator = await this.messaging.startTypingIndicator(channelId);
+        } catch {
+          // Non-critical.
+        }
       }
-    }
-    const queue = this.pendingMessageByInstance.get(key) || [];
-    const pendingState: PendingMessageState = {
-      channelId,
-      messageId,
-      stage: 'received',
-      statusEmoji,
-      createdAtMs: now,
-      updatedAtMs: now,
-      promptTail: this.buildPromptTail(prompt),
-      stopTypingIndicator,
-    };
-    queue.push(pendingState);
-    this.pendingMessageByInstance.set(key, queue);
-    this.scheduleStuckAlert(key, pendingState);
-    await this.messaging.addReactionToMessage(channelId, messageId, statusEmoji);
+      const queue = this.pendingMessageByInstance.get(key) || [];
+      const pendingState: PendingMessageState = {
+        channelId,
+        messageId,
+        stage: 'received',
+        statusEmoji,
+        createdAtMs: now,
+        updatedAtMs: now,
+        promptTail: this.buildPromptTail(prompt),
+        stopTypingIndicator,
+      };
+      queue.push(pendingState);
+      this.pendingMessageByInstance.set(key, queue);
+      this.scheduleStuckAlert(key, pendingState);
+      await this.messaging.addReactionToMessage(channelId, messageId, statusEmoji);
+    });
   }
 
   private buildPromptTail(prompt?: string): string | undefined {
