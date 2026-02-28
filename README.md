@@ -69,6 +69,8 @@ mudcode attach my-app --instance codex
 - `mudcode health [--json]`: run diagnostics
 - `mudcode daemon <start|stop|status|restart>`: manage daemon
 - `mudcode stop [project] --instance <id>`: stop one instance
+- `mudcode skill list [--all]`: list skills from `AGENTS.md` and `.agents/skills`
+- `mudcode skill install [name]`: install local/no-api skills into Codex skills dir
 - `mudcode config --show`: print current config
 - `mudcode uninstall`: remove mudcode from machine
 

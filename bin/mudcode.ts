@@ -25,6 +25,7 @@ import { agentsCommand } from '../src/cli/commands/agents.js';
 import { daemonCommand } from '../src/cli/commands/daemon.js';
 import { diagnoseCommand } from '../src/cli/commands/diagnose.js';
 import { uninstallCommand } from '../src/cli/commands/uninstall.js';
+import { skillsInstallCommand, skillsListCommand } from '../src/cli/commands/skills.js';
 import { getDaemonStatus, restartDaemonIfRunning } from '../src/app/daemon-service.js';
 import { main as daemonMain } from '../src/index.js';
 import { config } from '../src/config/index.js';
@@ -1072,6 +1073,60 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
       (argv: any) => listCommand({ prune: argv.prune })
     )
     .command('agents', 'List available AI agent adapters', () => {}, () => agentsCommand())
+    .command(
+      'skill <action> [name]',
+      'List/install Codex skills discovered from AGENTS.md or .agents/skills',
+      (y: Argv) => y
+        .positional('action', { choices: ['list', 'install'] as const, describe: 'skill action' })
+        .positional('name', { type: 'string', describe: 'Skill name (install only; omit to install all local/no-api-ready skills)' })
+        .option('project', { type: 'string', describe: 'Project path containing AGENTS.md or .agents/skills (default: current directory)' })
+        .option('all', { type: 'boolean', default: false, describe: 'List action: show all skills including external-risk/missing ones' })
+        .option('allow-external', {
+          type: 'boolean',
+          default: false,
+          describe: 'Install action: also allow skills with external dependency hints',
+        })
+        .option('force', { type: 'boolean', default: false, describe: 'Install action: replace existing target skill path' })
+        .option('dry-run', { type: 'boolean', default: false, describe: 'Install action: preview without writing files' }),
+      (argv: any) => {
+        if (argv.action === 'list') {
+          skillsListCommand({ project: argv.project, all: argv.all });
+          return;
+        }
+        skillsInstallCommand({
+          name: argv.name,
+          project: argv.project,
+          allowExternal: argv.allowExternal,
+          force: argv.force,
+          dryRun: argv.dryRun,
+        });
+      }
+    )
+    .command(
+      'skills <action> [name]',
+      false,
+      (y: Argv) => y
+        .positional('action', { choices: ['list', 'install'] as const })
+        .positional('name', { type: 'string' })
+        .option('project', { type: 'string' })
+        .option('all', { type: 'boolean', default: false })
+        .option('allow-external', { type: 'boolean', default: false })
+        .option('force', { type: 'boolean', default: false })
+        .option('dry-run', { type: 'boolean', default: false }),
+      (argv: any) => {
+        if (argv.action === 'list') {
+          skillsListCommand({ project: argv.project, all: argv.all });
+          return;
+        }
+        skillsInstallCommand({
+          name: argv.name,
+          project: argv.project,
+          allowExternal: argv.allowExternal,
+          force: argv.force,
+          dryRun: argv.dryRun,
+        });
+      }
+    )
     .command(
       'attach [project]',
       'Attach to a project tmux session',

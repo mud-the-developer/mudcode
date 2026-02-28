@@ -69,6 +69,8 @@ mudcode attach my-app --instance codex
 - `mudcode health [--json]`: 진단 실행
 - `mudcode daemon <start|stop|status|restart>`: 데몬 관리
 - `mudcode stop [project] --instance <id>`: 특정 인스턴스 중지
+- `mudcode skill list [--all]`: `AGENTS.md`와 `.agents/skills` 기반 스킬 목록/상태 확인
+- `mudcode skill install [name]`: 로컬/no-api 스킬을 Codex 스킬 디렉토리에 설치
 - `mudcode config --show`: 현재 설정 출력
 - `mudcode uninstall`: mudcode 제거
 
