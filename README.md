@@ -124,11 +124,13 @@ Use these inside mapped channels/threads:
 - Codex now starts with `--no-alt-screen` by default for better tmux scrollback visibility.
 - Mudcode records Codex turn I/O transcript as JSONL: `~/.mudcode/io-v2/<project>/<instance>/YYYY-MM-DD.jsonl`
 - If command markers are detected in output, Mudcode posts command start/end summaries in the mapped channel.
+- Mudcode can auto-link skills from `AGENTS.md` (`### Available skills`) and append a skill hint to outgoing Codex prompts.
 
 Environment toggles:
 - `AGENT_DISCORD_CODEX_IO_V2=0` to disable tracker
 - `AGENT_DISCORD_CODEX_IO_V2_ANNOUNCE=0` to keep transcript logging but disable channel command event posts
 - `AGENT_DISCORD_CODEX_IO_V2_DIR=/path` to change transcript root directory
+- `MUDCODE_CODEX_AUTO_SKILL_LINK=0` to disable automatic skill-link hints
 
 ## Upgrade / Remove
 

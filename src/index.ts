@@ -28,6 +28,7 @@ import { BridgeMessageRouter } from './bridge/message-router.js';
 import { BridgeHookServer } from './bridge/hook-server.js';
 import { BridgeCapturePoller } from './bridge/capture-poller.js';
 import { CodexIoV2Tracker } from './bridge/codex-io-v2.js';
+import { SkillAutoLinker } from './bridge/skill-autolinker.js';
 import { PromptRefiner } from './prompt/refiner.js';
 
 export interface AgentBridgeDeps {
@@ -47,6 +48,7 @@ export class AgentBridge {
   private hookServer: BridgeHookServer;
   private capturePoller: BridgeCapturePoller;
   private codexIoTracker: CodexIoV2Tracker;
+  private skillAutoLinker: SkillAutoLinker;
   private promptRefiner: PromptRefiner;
   private stateManager: IStateManager;
   private registry: AgentRegistry;
@@ -66,6 +68,7 @@ export class AgentBridge {
     this.codexIoTracker = new CodexIoV2Tracker({
       messaging: this.messaging,
     });
+    this.skillAutoLinker = new SkillAutoLinker();
     this.pendingTracker = new PendingMessageTracker(this.messaging);
     this.projectBootstrap = new BridgeProjectBootstrap(this.stateManager, this.messaging, this.bridgeConfig.hookServerPort || 18470);
     this.messageRouter = new BridgeMessageRouter({
@@ -75,6 +78,7 @@ export class AgentBridge {
       pendingTracker: this.pendingTracker,
       sanitizeInput: (content) => this.sanitizeInput(content),
       ioTracker: this.codexIoTracker,
+      skillAutoLinker: this.skillAutoLinker,
     });
     this.hookServer = new BridgeHookServer({
       port: this.bridgeConfig.hookServerPort || 18470,

@@ -124,11 +124,13 @@ bun run prompt-refiner:export-gepa
 - Codex 기본 실행 옵션에 `--no-alt-screen`이 포함되어 tmux 스크롤백 확인이 쉬워졌습니다.
 - Codex turn I/O transcript를 JSONL로 저장합니다: `~/.mudcode/io-v2/<project>/<instance>/YYYY-MM-DD.jsonl`
 - 출력에서 명령 패턴이 감지되면, 매핑 채널에 명령 시작/종료 요약을 보냅니다.
+- `AGENTS.md`의 `### Available skills`를 기반으로 Codex 프롬프트에 자동 skill 힌트를 붙일 수 있습니다.
 
 환경 변수:
 - `AGENT_DISCORD_CODEX_IO_V2=0` : 추적기 비활성화
 - `AGENT_DISCORD_CODEX_IO_V2_ANNOUNCE=0` : transcript는 저장하고 채널 이벤트 메시지만 비활성화
 - `AGENT_DISCORD_CODEX_IO_V2_DIR=/path` : transcript 저장 루트 경로 변경
+- `MUDCODE_CODEX_AUTO_SKILL_LINK=0` : 자동 skill 힌트 비활성화
 
 ## 업그레이드 / 제거
 

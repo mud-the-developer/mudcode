@@ -1,5 +1,9 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BridgeMessageRouter } from '../../src/bridge/message-router.js';
+import { SkillAutoLinker } from '../../src/bridge/skill-autolinker.js';
 
 function createProjectState() {
   const now = new Date();
@@ -69,6 +73,8 @@ function createMessagingMock() {
 }
 
 describe('BridgeMessageRouter (codex)', () => {
+  const tempDirs: string[] = [];
+
   afterEach(() => {
     delete process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS;
     delete process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS;
@@ -76,6 +82,10 @@ describe('BridgeMessageRouter (codex)', () => {
     delete process.env.AGENT_DISCORD_CODEX_LONG_PROMPT_REENTER_DELAY_MS;
     delete process.env.AGENT_DISCORD_CODEX_AUTO_REENTER_CHUNK_BOUNDARY;
     delete process.env.AGENT_DISCORD_TMUX_SEND_KEYS_CHUNK_SIZE;
+    delete process.env.MUDCODE_CODEX_AUTO_SKILL_LINK;
+    for (const dir of tempDirs.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('relaunches codex instead of sending prompt when pane is at shell', async () => {
@@ -108,6 +118,7 @@ describe('BridgeMessageRouter (codex)', () => {
       stateManager,
       pendingTracker,
       sanitizeInput: (content) => content,
+      skillAutoLinker: new SkillAutoLinker(),
     });
     router.register();
 
@@ -158,6 +169,7 @@ describe('BridgeMessageRouter (codex)', () => {
       stateManager,
       pendingTracker,
       sanitizeInput: (content) => content,
+      skillAutoLinker: new SkillAutoLinker(),
     });
     router.register();
 
@@ -169,6 +181,68 @@ describe('BridgeMessageRouter (codex)', () => {
     expect(messaging.sendToChannel).not.toHaveBeenCalled();
     expect(pendingTracker.markError).not.toHaveBeenCalled();
     expect(pendingTracker.markRetry).not.toHaveBeenCalled();
+  });
+
+  it('auto-links AGENTS skill hint into codex prompt when applicable', async () => {
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+    process.env.MUDCODE_CODEX_AUTO_SKILL_LINK = '1';
+
+    const projectPath = mkdtempSync(join(tmpdir(), 'mudcode-router-skill-'));
+    tempDirs.push(projectPath);
+    writeFileSync(
+      join(projectPath, 'AGENTS.md'),
+      [
+        '# AGENTS',
+        '### Available skills',
+        '- rebuild-restart-daemon: Rebuild and restart the local daemon process. (file: /tmp/skill/restart/SKILL.md)',
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue({
+        ...createProjectState(),
+        projectPath,
+      }),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      skillAutoLinker: new SkillAutoLinker(),
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', 'Please rebuild and restart the daemon now.', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    const sentPrompt = String(tmux.typeKeysToWindow.mock.calls[0]?.[2] ?? '');
+    expect(sentPrompt).toContain('Please rebuild and restart the daemon now.');
+    expect(sentPrompt).toContain('[mudcode auto-skill]');
+    expect(sentPrompt).toContain('rebuild-restart-daemon');
   });
 
   it('re-sends Enter when codex submit verification still sees prompt tail', async () => {

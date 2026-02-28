@@ -12,6 +12,7 @@ import { PendingMessageTracker, type PendingRuntimeSnapshot } from './pending-me
 import { getDaemonStatus } from '../app/daemon-service.js';
 import { cleanCapture, splitForDiscord, splitForSlack } from '../capture/parser.js';
 import type { CodexIoV2Tracker } from './codex-io-v2.js';
+import type { SkillAutoLinker } from './skill-autolinker.js';
 
 export interface BridgeMessageRouterDeps {
   messaging: MessagingClient;
@@ -20,6 +21,7 @@ export interface BridgeMessageRouterDeps {
   pendingTracker: PendingMessageTracker;
   sanitizeInput: (content: string) => string | null;
   ioTracker?: CodexIoV2Tracker;
+  skillAutoLinker?: SkillAutoLinker;
 }
 
 type RouteResolutionSource = 'mapped' | 'reply' | 'conversation' | 'channel' | 'primary';
@@ -766,7 +768,16 @@ export class BridgeMessageRouter {
             await messaging.sendToChannel(channelId, '⚠️ Invalid message: empty, too long (>10000 chars), or contains invalid characters');
             return;
           }
-          promptToSend = sanitized;
+          if (resolvedAgentType === 'codex') {
+            const linked = this.deps.skillAutoLinker?.augmentPrompt({
+              agentType: resolvedAgentType,
+              projectPath: project.projectPath,
+              prompt: sanitized,
+            });
+            promptToSend = linked?.prompt || sanitized;
+          } else {
+            promptToSend = sanitized;
+          }
         }
       }
 
