@@ -27,6 +27,7 @@ import { BridgeProjectBootstrap } from './bridge/project-bootstrap.js';
 import { BridgeMessageRouter } from './bridge/message-router.js';
 import { BridgeHookServer } from './bridge/hook-server.js';
 import { BridgeCapturePoller } from './bridge/capture-poller.js';
+import { CodexIoV2Tracker } from './bridge/codex-io-v2.js';
 import { PromptRefiner } from './prompt/refiner.js';
 
 export interface AgentBridgeDeps {
@@ -45,6 +46,7 @@ export class AgentBridge {
   private messageRouter: BridgeMessageRouter;
   private hookServer: BridgeHookServer;
   private capturePoller: BridgeCapturePoller;
+  private codexIoTracker: CodexIoV2Tracker;
   private promptRefiner: PromptRefiner;
   private stateManager: IStateManager;
   private registry: AgentRegistry;
@@ -61,6 +63,9 @@ export class AgentBridge {
     this.stateManager = deps?.stateManager || defaultStateManager;
     this.registry = deps?.registry || defaultAgentRegistry;
     this.promptRefiner = new PromptRefiner(this.bridgeConfig.promptRefiner);
+    this.codexIoTracker = new CodexIoV2Tracker({
+      messaging: this.messaging,
+    });
     this.pendingTracker = new PendingMessageTracker(this.messaging);
     this.projectBootstrap = new BridgeProjectBootstrap(this.stateManager, this.messaging, this.bridgeConfig.hookServerPort || 18470);
     this.messageRouter = new BridgeMessageRouter({
@@ -69,6 +74,7 @@ export class AgentBridge {
       stateManager: this.stateManager,
       pendingTracker: this.pendingTracker,
       sanitizeInput: (content) => this.sanitizeInput(content),
+      ioTracker: this.codexIoTracker,
     });
     this.hookServer = new BridgeHookServer({
       port: this.bridgeConfig.hookServerPort || 18470,
@@ -91,6 +97,7 @@ export class AgentBridge {
       promptEchoFilterEnabled: this.bridgeConfig.capture?.filterPromptEcho,
       promptEchoSuppressionMaxPolls: this.bridgeConfig.capture?.promptEchoMaxPolls,
       redrawFallbackTailLines: this.bridgeConfig.capture?.redrawTailLines,
+      ioTracker: this.codexIoTracker,
     });
   }
 

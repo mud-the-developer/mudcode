@@ -151,8 +151,9 @@ async function fetchLatestCliVersion(timeoutMs: number = 2500): Promise<string |
 }
 
 type UpgradeInstallPlan = {
-  label: string;
+  label: 'bun';
   command: string;
+  manualHint: string;
 };
 
 function shellEscapeArg(value: string): string {
@@ -160,20 +161,37 @@ function shellEscapeArg(value: string): string {
 }
 
 function detectUpgradeInstallPlan(): UpgradeInstallPlan | null {
-  if (hasCommand('npm')) {
-    return { label: 'npm', command: `npm install -g ${CLI_PACKAGE_NAME}@latest` };
-  }
-  if (hasCommand('bun')) {
-    return { label: 'bun', command: `bun add -g ${CLI_PACKAGE_NAME}@latest` };
-  }
-  return null;
+  if (!hasCommand('bun')) return null;
+  return {
+    label: 'bun',
+    command: `bun add -g ${CLI_PACKAGE_NAME}@latest`,
+    manualHint: `bun add -g ${CLI_PACKAGE_NAME}@latest`,
+  };
 }
 
-async function performSelfUpgrade(): Promise<boolean> {
+function maybeRemoveNpmGlobalDuplicate(enabled: boolean): void {
+  if (!enabled) return;
+  if (!hasCommand('npm')) return;
+
+  try {
+    console.log(chalk.gray(`   Removing duplicate npm global install: ${CLI_PACKAGE_NAME}`));
+    execSync(`npm uninstall -g ${CLI_PACKAGE_NAME}`, { stdio: 'inherit' });
+    console.log(chalk.green('✅ Removed npm global duplicate to keep Bun as the single source.'));
+  } catch (error) {
+    console.log(
+      chalk.yellow(
+        `⚠️ Could not remove npm global duplicate automatically: ${error instanceof Error ? error.message : String(error)}`,
+      ),
+    );
+  }
+}
+
+async function performSelfUpgrade(options: { dedupeNpm?: boolean } = {}): Promise<boolean> {
   const plan = detectUpgradeInstallPlan();
   if (!plan) {
-    console.log(chalk.yellow('⚠️ No supported package manager found for auto-upgrade.'));
-    console.log(chalk.gray(`   Install manually: npm install -g ${CLI_PACKAGE_NAME}@latest`));
+    console.log(chalk.yellow('⚠️ Bun is required for auto-upgrade, but it is not installed.'));
+    console.log(chalk.gray('   Install Bun first: https://bun.sh'));
+    console.log(chalk.gray(`   Install manually: bun add -g ${CLI_PACKAGE_NAME}@latest`));
     return false;
   }
 
@@ -181,30 +199,24 @@ async function performSelfUpgrade(): Promise<boolean> {
     console.log(chalk.gray(`   Running: ${plan.command}`));
     execSync(plan.command, { stdio: 'inherit' });
     console.log(chalk.green(`✅ Updated to latest via ${plan.label}`));
+    maybeRemoveNpmGlobalDuplicate(options.dedupeNpm !== false);
     await restartDaemonIfRunningForUpgrade();
     return true;
   } catch (error) {
     console.log(chalk.yellow(`⚠️ Auto-upgrade failed: ${error instanceof Error ? error.message : String(error)}`));
-    console.log(chalk.gray(`   You can retry manually: npm install -g ${CLI_PACKAGE_NAME}@latest`));
+    console.log(chalk.gray(`   You can retry manually: ${plan.manualHint}`));
     return false;
   }
 }
 
 function detectLocalUpgradeInstallPlan(repoPath: string): UpgradeInstallPlan | null {
   const escapedRepoPath = shellEscapeArg(repoPath);
-  if (hasCommand('npm')) {
-    return {
-      label: 'npm',
-      command: `npm install -g ${escapedRepoPath}`,
-    };
-  }
-  if (hasCommand('bun')) {
-    return {
-      label: 'bun',
-      command: `bun add -g ${escapedRepoPath}`,
-    };
-  }
-  return null;
+  if (!hasCommand('bun')) return null;
+  return {
+    label: 'bun',
+    command: `bun add -g ${escapedRepoPath}`,
+    manualHint: `bun add -g ${escapedRepoPath}`,
+  };
 }
 
 function isGitRepository(repoPath: string): boolean {
@@ -218,7 +230,9 @@ function isGitRepository(repoPath: string): boolean {
   }
 }
 
-async function performGitUpgrade(options: { repo?: string }): Promise<boolean> {
+async function performGitUpgrade(
+  options: { repo?: string; dedupeNpm?: boolean } = {},
+): Promise<boolean> {
   const repoPath = resolve(options.repo?.trim() || process.env.MUDCODE_GIT_REPO_PATH?.trim() || process.cwd());
   if (!isGitRepository(repoPath)) {
     console.log(chalk.yellow(`⚠️ Not a git repository: ${repoPath}`));
@@ -240,8 +254,9 @@ async function performGitUpgrade(options: { repo?: string }): Promise<boolean> {
 
   const plan = detectLocalUpgradeInstallPlan(repoPath);
   if (!plan) {
-    console.log(chalk.yellow('⚠️ No supported package manager found for local install.'));
-    console.log(chalk.gray(`   Install manually: npm install -g ${shellEscapeArg(repoPath)}`));
+    console.log(chalk.yellow('⚠️ Bun is required for local git install, but it is not installed.'));
+    console.log(chalk.gray('   Install Bun first: https://bun.sh'));
+    console.log(chalk.gray(`   Install manually: bun add -g ${shellEscapeArg(repoPath)}`));
     return false;
   }
 
@@ -250,6 +265,7 @@ async function performGitUpgrade(options: { repo?: string }): Promise<boolean> {
     console.log(chalk.gray(`   Running: ${plan.command}`));
     execSync(plan.command, { stdio: 'inherit' });
     console.log(chalk.green(`✅ Updated from git checkout: ${repoPath}`));
+    maybeRemoveNpmGlobalDuplicate(options.dedupeNpm !== false);
     await restartDaemonIfRunningForUpgrade();
     return true;
   } catch (error) {
@@ -367,7 +383,15 @@ function shouldCheckForUpdate(rawArgs: string[]): boolean {
   const command = commandNameFromArgs(rawArgs);
   if (!command) return false;
 
-  if (command === 'interactive' || command === 'tui' || command === 'daemon' || command === 'daemon-runner' || command === 'update') return false;
+  if (
+    command === 'interactive' ||
+    command === 'tui' ||
+    command === 'daemon' ||
+    command === 'daemon-runner' ||
+    command === 'update' ||
+    command === 'align-version' ||
+    command === 'align'
+  ) return false;
   return true;
 }
 
@@ -388,16 +412,21 @@ async function maybePromptForUpgrade(rawArgs: string[]): Promise<void> {
   await performSelfUpgrade();
 }
 
-async function runUpdateCommand(options: { check?: boolean; git?: boolean; repo?: string }): Promise<void> {
+async function runUpdateCommand(options: {
+  check?: boolean;
+  git?: boolean;
+  repo?: string;
+  dedupeNpm?: boolean;
+}): Promise<void> {
   if (options.git) {
-    await performGitUpgrade({ repo: options.repo });
+    await performGitUpgrade({ repo: options.repo, dedupeNpm: options.dedupeNpm });
     return;
   }
 
   const latestVersion = await fetchLatestCliVersion(4000);
   if (!latestVersion) {
     console.log(chalk.yellow('⚠️ Could not fetch the latest version from npm registry.'));
-    console.log(chalk.gray(`   Retry later or run: npm install -g ${CLI_PACKAGE_NAME}@latest`));
+    console.log(chalk.gray(`   Retry later or run: bun add -g ${CLI_PACKAGE_NAME}@latest`));
     return;
   }
 
@@ -413,7 +442,22 @@ async function runUpdateCommand(options: { check?: boolean; git?: boolean; repo?
     return;
   }
 
-  await performSelfUpgrade();
+  await performSelfUpgrade({ dedupeNpm: options.dedupeNpm });
+}
+
+async function runVersionAlignCommand(options: {
+  check?: boolean;
+  git?: boolean;
+  repo?: string;
+  dedupeNpm?: boolean;
+} = {}): Promise<void> {
+  const dedupeNpm = options.dedupeNpm !== false;
+  await runUpdateCommand({
+    check: options.check,
+    git: options.git,
+    repo: options.repo,
+    dedupeNpm,
+  });
 }
 
 type InteractiveLauncherOptions = {
@@ -436,7 +480,7 @@ const INTERACTIVE_MENU: InteractiveMenuItem[] = [
   { id: 5, icon: '🧰', title: 'Daemon control', summary: 'Start, stop, restart, or inspect daemon state.', accent: chalk.yellowBright },
   { id: 6, icon: '🖥️', title: 'Open TUI', summary: 'Open terminal UI for realtime project management.', accent: chalk.magentaBright },
   { id: 7, icon: '⚙️', title: 'Show config', summary: 'Print current configuration and key runtime values.', accent: chalk.whiteBright },
-  { id: 8, icon: '🔄', title: 'Update from git', summary: 'Pull latest repo and reinstall global CLI from local path.', accent: chalk.hex('#ff9f43') },
+  { id: 8, icon: '🧭', title: 'Version align (Bun)', summary: 'Force Bun-based global install and clean npm duplicate path.', accent: chalk.hex('#ff9f43') },
   { id: 9, icon: '🧪', title: 'Output test', summary: 'Run capture probe or Discord E2E diagnose (send/read/history).', accent: chalk.hex('#2dd4bf') },
   { id: 10, icon: '👋', title: 'Exit', summary: 'Close interactive launcher.', accent: chalk.gray },
 ];
@@ -672,6 +716,35 @@ async function runInteractiveOutputTest(options: InteractiveLauncherOptions): Pr
   });
 }
 
+async function runInteractiveVersionAlign(): Promise<void> {
+  printInteractiveSection('🧭', 'Version Align (Bun Forced)', 'Align this machine to a Bun-based single global mudcode binary.');
+  console.log(chalk.white('\nAlign mode:'));
+  console.log(chalk.gray('  1) Bun registry latest (bun add -g @latest)'));
+  console.log(chalk.gray('  2) Bun local git repo (git pull + bun add -g <repo>) [recommended]'));
+  console.log(chalk.gray('  3) Check only (show update availability only)'));
+  const answer = await prompt(chalk.white('Select mode [1-3] (default 2): '));
+  const mode = Number((answer || '2').trim());
+  if (!Number.isFinite(mode) || mode < 1 || mode > 3) {
+    console.log(chalk.yellow('⚠️ Invalid selection.'));
+    return;
+  }
+
+  if (mode === 3) {
+    await runVersionAlignCommand({ check: true });
+    return;
+  }
+  if (mode === 2) {
+    const defaultRepo = process.cwd();
+    const repo = await prompt(chalk.white(`Repo path [${defaultRepo}]: `));
+    await runVersionAlignCommand({
+      git: true,
+      repo: repo.trim() || defaultRepo,
+    });
+    return;
+  }
+  await runVersionAlignCommand();
+}
+
 async function runInteractiveLauncher(options: InteractiveLauncherOptions = {}): Promise<void> {
   if (!isInteractiveShell()) {
     console.log(chalk.yellow('⚠️ Interactive launcher requires a TTY.'));
@@ -726,9 +799,7 @@ async function runInteractiveLauncher(options: InteractiveLauncherOptions = {}):
       continue;
     }
     if (choice === 8) {
-      const defaultRepo = process.cwd();
-      const repo = await prompt(chalk.white(`Repo path [${defaultRepo}]: `));
-      await runUpdateCommand({ git: true, repo: repo.trim() || defaultRepo });
+      await runInteractiveVersionAlign();
       continue;
     }
     if (choice === 9) {
@@ -1051,8 +1122,38 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
         y
           .option('check', { type: 'boolean', default: false, describe: 'Only check for updates (npm registry)' })
           .option('git', { type: 'boolean', default: false, describe: 'Update from a local git checkout (git pull + global reinstall)' })
-          .option('repo', { type: 'string', describe: 'Repo path for --git (default: $MUDCODE_GIT_REPO_PATH or current directory)' }),
-      async (argv: any) => runUpdateCommand({ check: argv.check, git: argv.git, repo: argv.repo })
+          .option('repo', { type: 'string', describe: 'Repo path for --git (default: $MUDCODE_GIT_REPO_PATH or current directory)' })
+          .option('dedupe-npm', {
+            type: 'boolean',
+            default: true,
+            describe: 'After Bun install, remove npm global duplicate package (default: true)',
+          }),
+      async (argv: any) => runUpdateCommand({
+        check: argv.check,
+        git: argv.git,
+        repo: argv.repo,
+        dedupeNpm: argv.dedupeNpm,
+      })
+    )
+    .command(
+      ['align-version', 'align'],
+      'Force version alignment to Bun global install (recommended for multi-PC consistency)',
+      (y: Argv) =>
+        y
+          .option('check', { type: 'boolean', default: false, describe: 'Only check for updates' })
+          .option('git', { type: 'boolean', default: false, describe: 'Pull repo first, then install globally from local path via Bun' })
+          .option('repo', { type: 'string', describe: 'Repo path for --git (default: $MUDCODE_GIT_REPO_PATH or current directory)' })
+          .option('dedupe-npm', {
+            type: 'boolean',
+            default: true,
+            describe: 'Remove npm global duplicate package after Bun install',
+          }),
+      async (argv: any) => runVersionAlignCommand({
+        check: argv.check,
+        git: argv.git,
+        repo: argv.repo,
+        dedupeNpm: argv.dedupeNpm,
+      })
     )
     .command(
       'daemon-runner',

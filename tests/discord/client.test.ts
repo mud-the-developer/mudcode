@@ -636,6 +636,10 @@ describe('DiscordClient', () => {
           description: 'Post the current tmux pane snapshot for this instance.',
         },
         {
+          name: 'io',
+          description: 'Show codex I/O tracker status for this instance.',
+        },
+        {
           name: 'controls',
           description: 'Post a button control panel in this channel.',
         },

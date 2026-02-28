@@ -127,7 +127,7 @@ export class DiscordClient implements MessagingClient {
       const commandName = interaction.commandName.toLowerCase();
       const sessionCommands = new Set(['q', 'qw']);
       const keyCommands = new Set(['enter', 'tab', 'esc', 'up', 'down']);
-      const utilityCommands = new Set(['retry', 'health', 'snapshot']);
+      const utilityCommands = new Set(['retry', 'health', 'snapshot', 'io']);
       const panelCommands = new Set(['controls']);
       if (
         !sessionCommands.has(commandName) &&
@@ -361,6 +361,10 @@ export class DiscordClient implements MessagingClient {
       {
         name: 'snapshot',
         description: 'Post the current tmux pane snapshot for this instance.',
+      },
+      {
+        name: 'io',
+        description: 'Show codex I/O tracker status for this instance.',
       },
       {
         name: 'controls',

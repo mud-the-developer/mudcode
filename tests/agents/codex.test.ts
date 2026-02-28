@@ -19,7 +19,7 @@ describe('CodexAdapter', () => {
 
     const command = adapter.getStartCommand('/path/to/project');
 
-    expect(command).toBe('cd "/path/to/project" && codex -a on-request -s danger-full-access');
+    expect(command).toBe('cd "/path/to/project" && codex --no-alt-screen -a on-request -s danger-full-access');
   });
 
   it('allows overriding codex flags via environment variable', () => {

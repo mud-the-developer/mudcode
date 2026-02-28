@@ -16,7 +16,6 @@
     "pages:dev": "vite",
     "pages:build": "vite build",
     "pages:preview": "vite preview",
-    "pages:deploy": "vite build && wrangler pages deploy ./dist-site --project-name=mudcode-landing",
     "setup:claude-plugin": "tsx scripts/setup-claude-plugin.ts",
     "setup:gemini-hook": "tsx scripts/setup-gemini-hook.ts",
     "setup:opencode-plugin": "tsx scripts/setup-opencode-plugin.ts",

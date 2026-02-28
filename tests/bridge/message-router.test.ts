@@ -517,6 +517,54 @@ describe('BridgeMessageRouter (codex)', () => {
     expect(tmux.typeKeysToWindow).not.toHaveBeenCalled();
   });
 
+  it('returns codex io tracker summary for /io command', async () => {
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+    const ioTracker = {
+      buildStatus: vi.fn().mockReturnValue('🟢 i/o idle\nlatest transcript: `/tmp/demo.jsonl`'),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      ioTracker,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', '/io', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    expect(ioTracker.buildStatus).toHaveBeenCalledWith('demo', 'codex');
+    expect(messaging.sendToChannel).toHaveBeenCalledWith(
+      'ch-1',
+      expect.stringContaining('i/o idle'),
+    );
+    expect(tmux.typeKeysToWindow).not.toHaveBeenCalled();
+  });
+
   it('returns current pane snapshot for /snapshot command', async () => {
     const { messaging, getCallback } = createMessagingMock();
     const tmux = {

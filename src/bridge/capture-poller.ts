@@ -5,12 +5,14 @@ import { TmuxManager } from '../tmux/manager.js';
 import type { IStateManager } from '../types/interfaces.js';
 import { PendingMessageTracker } from './pending-message-tracker.js';
 import { formatDiscordOutput, wrapDiscordCodeblock } from './discord-output-formatter.js';
+import type { CodexIoV2Tracker } from './codex-io-v2.js';
 
 export interface BridgeCapturePollerDeps {
   messaging: MessagingClient;
   tmux: TmuxManager;
   stateManager: IStateManager;
   pendingTracker: PendingMessageTracker;
+  ioTracker?: CodexIoV2Tracker;
   intervalMs?: number;
   quietPendingPollThreshold?: number;
   codexInitialQuietPendingPollThreshold?: number;
@@ -45,6 +47,7 @@ export class BridgeCapturePoller {
     string,
     { count: number; projectName: string; agentType: string; instanceId: string }
   >();
+  private finalOnlyQuietFlushPollsByInstance = new Map<string, number>();
   private promptEchoSuppressedPollsByInstance = new Map<string, number>();
   private bufferedOutputByInstance = new Map<string, string>();
   private bufferedOutputChannelByInstance = new Map<string, string>();
@@ -83,6 +86,7 @@ export class BridgeCapturePoller {
     this.stalePendingAlertStageByInstance.clear();
     this.completionCandidatesByInstance.clear();
     this.quietPendingPollsByInstance.clear();
+    this.finalOnlyQuietFlushPollsByInstance.clear();
     this.promptEchoSuppressedPollsByInstance.clear();
     this.bufferedOutputByInstance.clear();
     this.bufferedOutputChannelByInstance.clear();
@@ -199,6 +203,7 @@ export class BridgeCapturePoller {
   private markCaptureMutation(key: string, now: number): void {
     this.lastCaptureMutationAtByInstance.set(key, now);
     this.stalePendingAlertStageByInstance.delete(key);
+    this.finalOnlyQuietFlushPollsByInstance.delete(key);
   }
 
   private clearStalePendingAlertState(key: string): void {
@@ -365,6 +370,8 @@ export class BridgeCapturePoller {
   }
 
   private async deliverDelta(params: {
+    projectName: string;
+    instanceId: string;
     key: string;
     agentType: string;
     pendingDepth: number;
@@ -374,6 +381,14 @@ export class BridgeCapturePoller {
   }): Promise<boolean> {
     const trimmed = params.deltaText.trim();
     if (trimmed.length === 0) return false;
+    if (params.agentType === 'codex') {
+      this.deps.ioTracker?.recordOutputDelta({
+        projectName: params.projectName,
+        instanceId: params.instanceId,
+        channelId: params.channelId,
+        deltaText: trimmed,
+      });
+    }
 
     const shouldBuffer =
       this.shouldBufferUntilCompletion(params.key, params.agentType, params.pendingDepth) ||
@@ -567,6 +582,8 @@ export class BridgeCapturePoller {
               }
 
               const fallbackSent = await this.deliverDelta({
+                projectName: project.projectName,
+                instanceId: instance.instanceId,
                 key,
                 agentType: instance.agentType,
                 pendingDepth: routeInfo.pendingDepth,
@@ -636,6 +653,8 @@ export class BridgeCapturePoller {
           }
 
           const sentAnyChunk = await this.deliverDelta({
+            projectName: project.projectName,
+            instanceId: instance.instanceId,
             key,
             agentType: instance.agentType,
             pendingDepth: routeInfo.pendingDepth,
@@ -704,23 +723,49 @@ export class BridgeCapturePoller {
     captureSnapshot?: string,
   ): Promise<void> {
     if (pendingDepth <= 0) {
-      if (
-        this.codexFinalOnlyModeEnabled &&
-        agentType === 'codex' &&
-        typeof captureSnapshot === 'string' &&
-        this.hasCodexWorkingMarker(captureSnapshot)
-      ) {
-        // Tracker may temporarily desync to depth=0 while Codex is still working.
-        // Keep final-only buffer until the working marker disappears.
-        return;
-      }
       this.quietPendingPollsByInstance.delete(key);
       this.completionCandidatesByInstance.delete(key);
       if (this.codexFinalOnlyModeEnabled && agentType === 'codex') {
+        const codexStillWorking =
+          typeof captureSnapshot === 'string' &&
+          this.hasCodexWorkingMarker(captureSnapshot);
+        if (codexStillWorking) {
+          // Tracker may temporarily desync to depth=0 while Codex is still working.
+          // Keep final-only buffer until the working marker disappears.
+          this.finalOnlyQuietFlushPollsByInstance.delete(key);
+          return;
+        }
+
+        const codexReadyForInput =
+          typeof captureSnapshot === 'string' &&
+          this.isLikelyCodexReadyForInput(captureSnapshot);
+        if (codexReadyForInput) {
+          await this.flushBufferedOutput(key, channelId);
+          this.finalOnlyQuietFlushPollsByInstance.delete(key);
+          return;
+        }
+
+        const hasBufferedOutput = this.bufferedOutputByInstance.has(key);
+        if (!hasBufferedOutput) {
+          this.finalOnlyQuietFlushPollsByInstance.delete(key);
+          return;
+        }
+
+        const quietFlushThreshold = Math.max(1, this.quietPendingPollThreshold);
+        const nextQuietPolls = (this.finalOnlyQuietFlushPollsByInstance.get(key) || 0) + 1;
+        if (nextQuietPolls < quietFlushThreshold) {
+          this.finalOnlyQuietFlushPollsByInstance.set(key, nextQuietPolls);
+          return;
+        }
+
         await this.flushBufferedOutput(key, channelId);
+        this.finalOnlyQuietFlushPollsByInstance.delete(key);
+        return;
       }
       return;
     }
+
+    this.finalOnlyQuietFlushPollsByInstance.delete(key);
 
     const hasOutputCandidate = this.completionCandidatesByInstance.has(key);
     const codexStillWorking =
@@ -739,6 +784,12 @@ export class BridgeCapturePoller {
       this.isLikelyCodexReadyForInput(captureSnapshot)
     ) {
       await this.deps.pendingTracker.markCompleted(projectName, agentType, instanceId).catch(() => undefined);
+      this.deps.ioTracker?.recordTurnCompleted({
+        projectName,
+        instanceId,
+        channelId,
+        reason: 'input-ready-marker',
+      });
       this.quietPendingPollsByInstance.delete(key);
       this.completionCandidatesByInstance.delete(key);
       return;
@@ -754,6 +805,14 @@ export class BridgeCapturePoller {
     const nextCount = (current?.count || 0) + 1;
     if (nextCount >= quietThreshold) {
       await this.deps.pendingTracker.markCompleted(projectName, agentType, instanceId).catch(() => undefined);
+      if (agentType === 'codex') {
+        this.deps.ioTracker?.recordTurnCompleted({
+          projectName,
+          instanceId,
+          channelId,
+          reason: 'quiet-threshold',
+        });
+      }
       this.quietPendingPollsByInstance.delete(key);
       this.completionCandidatesByInstance.delete(key);
       return;

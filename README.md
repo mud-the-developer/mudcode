@@ -33,12 +33,6 @@ Recommended (global install with Bun):
 bun add -g @mudramo/mudcode
 ```
 
-Alternative (npm):
-
-```bash
-npm install -g @mudramo/mudcode
-```
-
 Verify:
 
 ```bash
@@ -120,9 +114,21 @@ Use these inside mapped channels/threads:
 - `/retry`
 - `/health`
 - `/snapshot`
+- `/io` (show Codex I/O tracker status + latest transcript path)
 - `/enter [count]`, `/tab [count]`, `/esc [count]`, `/up [count]`, `/down [count]`
 - `/q` (close session + channel)
 - `/qw` (archive channel + close session)
+
+## Codex I/O v2
+
+- Codex now starts with `--no-alt-screen` by default for better tmux scrollback visibility.
+- Mudcode records Codex turn I/O transcript as JSONL: `~/.mudcode/io-v2/<project>/<instance>/YYYY-MM-DD.jsonl`
+- If command markers are detected in output, Mudcode posts command start/end summaries in the mapped channel.
+
+Environment toggles:
+- `AGENT_DISCORD_CODEX_IO_V2=0` to disable tracker
+- `AGENT_DISCORD_CODEX_IO_V2_ANNOUNCE=0` to keep transcript logging but disable channel command event posts
+- `AGENT_DISCORD_CODEX_IO_V2_DIR=/path` to change transcript root directory
 
 ## Upgrade / Remove
 
@@ -130,8 +136,6 @@ Upgrade:
 
 ```bash
 bun add -g @mudramo/mudcode@latest
-# or
-npm install -g @mudramo/mudcode@latest
 ```
 
 Remove:

@@ -5,7 +5,7 @@ Mudcode를 Discord 대신 Slack에 연결하는 방법을 안내합니다.
 ## 사전 준비
 
 - Node.js 18+ 또는 Bun 1.3+
-- Mudcode 설치 완료 (`npm install -g @mudramo/mudcode`)
+- Mudcode 설치 완료 (`bun add -g @mudramo/mudcode`)
 - 앱 설치 권한이 있는 Slack 워크스페이스
 
 ## 1. Slack App 생성

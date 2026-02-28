@@ -4,7 +4,7 @@
 
 import { BaseAgentAdapter, type AgentConfig } from './base.js';
 
-const DEFAULT_CODEX_FLAGS = '-a on-request -s danger-full-access';
+const DEFAULT_CODEX_FLAGS = '--no-alt-screen -a on-request -s danger-full-access';
 
 const codexConfig: AgentConfig = {
   name: 'codex',

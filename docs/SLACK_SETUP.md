@@ -5,7 +5,7 @@ This guide walks you through connecting Mudcode to Slack instead of Discord.
 ## Prerequisites
 
 - Node.js 18+ or Bun 1.3+
-- Mudcode installed (`npm install -g @mudramo/mudcode`)
+- Mudcode installed (`bun add -g @mudramo/mudcode`)
 - A Slack workspace where you have permission to install apps
 
 ## 1. Create a Slack App

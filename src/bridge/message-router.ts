@@ -11,6 +11,7 @@ import { downloadFileAttachments, buildFileMarkers } from '../infra/file-downloa
 import { PendingMessageTracker, type PendingRuntimeSnapshot } from './pending-message-tracker.js';
 import { getDaemonStatus } from '../app/daemon-service.js';
 import { cleanCapture, splitForDiscord, splitForSlack } from '../capture/parser.js';
+import type { CodexIoV2Tracker } from './codex-io-v2.js';
 
 export interface BridgeMessageRouterDeps {
   messaging: MessagingClient;
@@ -18,6 +19,7 @@ export interface BridgeMessageRouterDeps {
   stateManager: IStateManager;
   pendingTracker: PendingMessageTracker;
   sanitizeInput: (content: string) => string | null;
+  ioTracker?: CodexIoV2Tracker;
 }
 
 type RouteResolutionSource = 'mapped' | 'reply' | 'conversation' | 'channel' | 'primary';
@@ -112,11 +114,12 @@ export class BridgeMessageRouter {
     return this.lastPromptByInstance.get(key);
   }
 
-  private parseUtilityCommand(content: string): 'retry' | 'health' | 'snapshot' | undefined {
+  private parseUtilityCommand(content: string): 'retry' | 'health' | 'snapshot' | 'io' | undefined {
     const normalized = content.trim().toLowerCase();
     if (normalized === '/retry') return 'retry';
     if (normalized === '/health') return 'health';
     if (normalized === '/snapshot') return 'snapshot';
+    if (normalized === '/io') return 'io';
     return undefined;
   }
 
@@ -711,6 +714,13 @@ export class BridgeMessageRouter {
         });
         return;
       }
+      if (utilityCommand === 'io') {
+        const status = this.deps.ioTracker
+          ? this.deps.ioTracker.buildStatus(projectName, instanceKey)
+          : 'ℹ️ codex i/o tracker is not initialized';
+        await messaging.sendToChannel(commandChannelId, status);
+        return;
+      }
 
       let promptToSend: string | null = null;
       let specialKeyCommand: SpecialKeyCommand | null = null;
@@ -812,12 +822,28 @@ export class BridgeMessageRouter {
             );
             return;
           }
+          if (promptToSend && promptToSend.trim().length > 0) {
+            this.deps.ioTracker?.recordPromptSubmitted({
+              projectName,
+              instanceId: instanceKey,
+              channelId: commandChannelId,
+              prompt: promptToSend,
+            });
+          }
           delivered = true;
         } else {
           this.deps.tmux.sendKeysToWindow(normalizedProject.tmuxSession, windowName, promptToSend || '', resolvedAgentType);
           delivered = true;
         }
       } catch (error) {
+        if (resolvedAgentType === 'codex') {
+          this.deps.ioTracker?.recordTurnFailed({
+            projectName,
+            instanceId: instanceKey,
+            channelId: commandChannelId,
+            reason: error instanceof Error ? error.message : String(error),
+          });
+        }
         await this.safePendingUpdate('message:markError', () =>
           this.deps.pendingTracker.markError(projectName, resolvedAgentType, instanceKey, 'tail'),
         );

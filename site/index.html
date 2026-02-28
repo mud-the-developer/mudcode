@@ -94,7 +94,6 @@
             aria-label="Install methods"
           >
             <button class="tab" role="tab" data-tab="bun" aria-selected="false">bun</button>
-            <button class="tab" role="tab" data-tab="npm" aria-selected="false">npm</button>
             <button class="tab tab-active" role="tab" data-tab="curl" aria-selected="true">curl</button>
             <button class="tab" role="tab" data-tab="brew" aria-selected="false">brew</button>
           </div>
@@ -198,7 +197,6 @@
     <script>
       const installCommands = {
         bun: "bun add -g @mudramo/mudcode",
-        npm: "npm install -g @mudramo/mudcode",
         curl: "curl -fsSL https://mudcode.chat/install | bash",
         brew: "# coming soon",
       };

@@ -10,8 +10,9 @@ Release 작업 시 아래 항목은 필수입니다.
 
 ## Web 배포
 
-- `site/**` 웹 코드를 변경했다면 배포까지 진행한다.
-- 배포 명령: `npm run pages:deploy`
+- `site/**` 웹 코드를 변경했다면 로컬 빌드 검증만 진행한다.
+- 검증 명령: `npm run pages:build`
+- Cloudflare Pages 배포는 이 저장소 범위에서 제외한다.
 
 ## Daemon 재시작
 

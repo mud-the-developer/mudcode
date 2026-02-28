@@ -248,5 +248,5 @@ if (devEntrypoint) {
 
 const packageName = readSelfPackageName() || `${packageScope}/mudcode`;
 console.error('No runnable mudcode binary found for this platform.');
-console.error(`Try reinstalling with: npm i -g ${packageName}`);
+console.error(`Try reinstalling with: bun add -g ${packageName}`);
 process.exit(1);

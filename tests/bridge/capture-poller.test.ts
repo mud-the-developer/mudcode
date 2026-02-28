@@ -293,7 +293,11 @@ describe('BridgeCapturePoller', () => {
     await vi.advanceTimersByTimeAsync(300);
     expect(messaging.sendToChannel).not.toHaveBeenCalled();
 
-    // Final quiet poll flushes buffered output once.
+    // First quiet poll after pending completion still waits in final-only mode.
+    await vi.advanceTimersByTimeAsync(300);
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
+
+    // Next quiet poll flushes buffered output once.
     await vi.advanceTimersByTimeAsync(300);
 
     expect(messaging.sendToChannel).toHaveBeenCalledTimes(1);
@@ -491,6 +495,75 @@ describe('BridgeCapturePoller', () => {
 
     expect(messaging.sendToChannel).toHaveBeenCalledTimes(1);
     expect(messaging.sendToChannel).toHaveBeenCalledWith('thread-ch', 'assistant: intro\nassistant: final');
+
+    poller.stop();
+  });
+
+  it('keeps buffering when pending drops to 0 during a quiet gap and flushes only after stable quiet', async () => {
+    process.env.AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY = '1';
+
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'parent-ch',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const tmux = createTmux([
+      'boot line',
+      'boot line\nassistant: step one',
+      'boot line\nassistant: step one',
+      'boot line\nassistant: step one\nassistant: step two',
+      'boot line\nassistant: step one\nassistant: step two',
+      'boot line\nassistant: step one\nassistant: step two',
+    ]);
+
+    let pendingDepth = 1;
+    let depthReads = 0;
+    const pendingTracker = {
+      getPendingChannel: vi.fn().mockImplementation(() => (pendingDepth > 0 ? 'thread-ch' : undefined)),
+      getPendingDepth: vi.fn().mockImplementation(() => {
+        depthReads += 1;
+        if (depthReads >= 3) pendingDepth = 0;
+        return pendingDepth;
+      }),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      intervalMs: 300,
+    });
+
+    poller.start();
+    await Promise.resolve();
+
+    await vi.advanceTimersByTimeAsync(300); // buffer step one
+    await vi.advanceTimersByTimeAsync(300); // pending dropped to 0 during quiet gap
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(300); // step two appears; must remain buffered
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(300); // first quiet poll
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(300); // second quiet poll flush
+    expect(messaging.sendToChannel).toHaveBeenCalledTimes(1);
+    expect(messaging.sendToChannel).toHaveBeenCalledWith('thread-ch', 'assistant: step one\nassistant: step two');
 
     poller.stop();
   });
