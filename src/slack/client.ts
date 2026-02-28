@@ -16,6 +16,7 @@ export class SlackClient implements MessagingClient {
   private messageCallback?: MessageCallback;
   private channelMapping: Map<string, ChannelInfo> = new Map();
   private botUserId?: string;
+  private progressThreadTsByChannel: Map<string, string> = new Map();
 
   constructor(botToken: string, appToken: string) {
     this.botToken = botToken;
@@ -109,6 +110,7 @@ export class SlackClient implements MessagingClient {
   }
 
   async disconnect(): Promise<void> {
+    this.progressThreadTsByChannel.clear();
     await this.app.stop();
   }
 
@@ -125,6 +127,41 @@ export class SlackClient implements MessagingClient {
       });
     } catch (error) {
       console.error(`Failed to send message to Slack channel ${channelId}:`, error);
+    }
+  }
+
+  async sendToProgressThread(channelId: string, content: string): Promise<void> {
+    const full = content.trim();
+    if (full.length === 0) return;
+
+    try {
+      let threadTs = this.progressThreadTsByChannel.get(channelId);
+      if (!threadTs) {
+        const anchor = await this.app.client.chat.postMessage({
+          token: this.botToken,
+          channel: channelId,
+          text: '🧵 Progress thread started. Live intermediate updates are posted in this thread.',
+        });
+        threadTs = anchor.ts;
+        if (typeof threadTs === 'string' && threadTs.length > 0) {
+          this.progressThreadTsByChannel.set(channelId, threadTs);
+        }
+      }
+
+      if (threadTs) {
+        await this.app.client.chat.postMessage({
+          token: this.botToken,
+          channel: channelId,
+          text: full,
+          thread_ts: threadTs,
+        });
+        return;
+      }
+
+      await this.sendToChannel(channelId, full);
+    } catch (error) {
+      console.error(`Failed to send progress message to Slack thread ${channelId}:`, error);
+      await this.sendToChannel(channelId, full);
     }
   }
 

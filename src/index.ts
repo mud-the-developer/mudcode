@@ -101,6 +101,7 @@ export class AgentBridge {
       promptEchoFilterEnabled: this.bridgeConfig.capture?.filterPromptEcho,
       promptEchoSuppressionMaxPolls: this.bridgeConfig.capture?.promptEchoMaxPolls,
       redrawFallbackTailLines: this.bridgeConfig.capture?.redrawTailLines,
+      progressOutputVisibility: this.bridgeConfig.capture?.progressOutput,
       ioTracker: this.codexIoTracker,
     });
   }

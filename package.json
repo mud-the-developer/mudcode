@@ -41,6 +41,7 @@
     "publish:release:bun:linux": "node scripts/publish-release.mjs --pm bun --profile linux",
     "publish:release:bun:linux:dry-run": "node scripts/publish-release.mjs --pm bun --profile linux --dry-run",
     "version:check": "node scripts/check-version-alignment.mjs",
+    "todo:check": "node scripts/check-todo-fixme.mjs",
     "prompt-refiner:report": "node scripts/prompt-refiner-shadow-report.mjs",
     "prompt-refiner:export-gepa": "node scripts/prompt-refiner-shadow-to-gepa.mjs",
     "typecheck": "tsc --noEmit",

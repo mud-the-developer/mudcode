@@ -50,6 +50,11 @@ export interface MessagingClient {
   onMessage(callback: MessageCallback): void;
 
   sendToChannel(channelId: string, content: string): Promise<void>;
+  /**
+   * Optional progress-output helper.
+   * Implementations may route progress text to a thread-like sub-channel.
+   */
+  sendToProgressThread?(channelId: string, content: string): Promise<void>;
   sendToChannelWithFiles(channelId: string, content: string, filePaths: string[]): Promise<void>;
   /**
    * Optional long-output delivery helper.

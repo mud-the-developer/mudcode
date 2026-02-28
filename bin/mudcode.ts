@@ -964,6 +964,11 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
           type: 'number',
           describe: 'Set thread-based long output threshold (1200-20000)',
         })
+        .option('capture-progress-output', {
+          type: 'string',
+          choices: ['off', 'thread', 'channel'],
+          describe: 'Set visibility gate for capture progress deltas',
+        })
         .option('show', { type: 'boolean', describe: 'Show current configuration' }),
       async (argv: any) =>
         configCommand({
@@ -987,6 +992,7 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
           captureHistoryLines: argv.captureHistoryLines,
           captureRedrawTailLines: argv.captureRedrawTailLines,
           longOutputThreadThreshold: argv.longOutputThreadThreshold,
+          captureProgressOutput: argv.captureProgressOutput,
           platform: argv.platform,
           slackBotToken: argv.slackBotToken,
           slackAppToken: argv.slackAppToken,

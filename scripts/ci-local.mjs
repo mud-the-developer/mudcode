@@ -28,6 +28,7 @@ function resolveE2eMode() {
 }
 
 run('npm', ['run', 'typecheck']);
+run('npm', ['run', 'todo:check']);
 run('npm', ['test']);
 
 const e2eMode = resolveE2eMode();

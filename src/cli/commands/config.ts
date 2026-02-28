@@ -28,6 +28,7 @@ export async function configCommand(options: {
   captureHistoryLines?: string | number;
   captureRedrawTailLines?: string | number;
   longOutputThreadThreshold?: string | number;
+  captureProgressOutput?: 'off' | 'thread' | 'channel';
 }) {
   const parseBoundedInt = (raw: string | number, label: string, min: number, max: number): number => {
     const valueRaw = String(raw).trim();
@@ -71,6 +72,7 @@ export async function configCommand(options: {
     console.log(chalk.gray(`   Capture History Lines: ${config.capture?.historyLines || '(auto)'}`));
     console.log(chalk.gray(`   Capture Redraw Tail Lines: ${config.capture?.redrawTailLines || '(auto)'}`));
     console.log(chalk.gray(`   Long Output Thread Threshold: ${config.capture?.longOutputThreadThreshold || '(default)'}`));
+    console.log(chalk.gray(`   Capture Progress Output: ${config.capture?.progressOutput || '(default/channel)'}`));
     console.log(chalk.gray(`   Keep Channel On Stop: ${getConfigValue('keepChannelOnStop') ? 'on' : 'off'}`));
     console.log(chalk.cyan('\n🤖 Registered Agents:\n'));
     for (const adapter of agentRegistry.getAll()) {
@@ -200,6 +202,7 @@ export async function configCommand(options: {
         captureHistoryLines: undefined,
         captureRedrawTailLines: undefined,
         longOutputThreadThreshold: undefined,
+        captureProgressOutput: undefined,
       });
       console.log(chalk.green('✅ Capture preset applied: default'));
     } else if (options.capturePreset === 'codex-final') {
@@ -208,6 +211,7 @@ export async function configCommand(options: {
         captureFilterPromptEcho: true,
         capturePromptEchoMaxPolls: 2,
         capturePendingInitialQuietPollsCodex: 0,
+        captureProgressOutput: 'thread',
       });
       console.log(chalk.green('✅ Capture preset applied: codex-final'));
     }
@@ -289,6 +293,12 @@ export async function configCommand(options: {
     updated = true;
   }
 
+  if (options.captureProgressOutput !== undefined) {
+    saveConfig({ captureProgressOutput: options.captureProgressOutput });
+    console.log(chalk.green(`✅ Capture progress output saved: ${options.captureProgressOutput}`));
+    updated = true;
+  }
+
   if (!updated) {
     console.log(chalk.yellow('No options provided. Use --help to see available options.'));
     console.log(chalk.gray('\nExample:'));
@@ -304,6 +314,7 @@ export async function configCommand(options: {
     console.log(chalk.gray('  mudcode config --prompt-refiner-log-path ~/.mudcode/prompt-refiner-shadow.jsonl'));
     console.log(chalk.gray('  mudcode config --capture-preset codex-final'));
     console.log(chalk.gray('  mudcode config --capture-codex-final-only on'));
+    console.log(chalk.gray('  mudcode config --capture-progress-output thread'));
     console.log(chalk.gray('  mudcode config --capture-filter-prompt-echo on'));
     console.log(chalk.gray('  mudcode config --show'));
   }

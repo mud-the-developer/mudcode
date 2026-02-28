@@ -113,6 +113,14 @@ export interface BridgeConfig {
      * Equivalent to AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD.
      */
     longOutputThreadThreshold?: number;
+    /**
+     * Visibility gate for capture-poller progress deltas.
+     * - off: do not emit progress deltas
+     * - thread: emit progress deltas in a thread-like sub-channel
+     * - channel: emit progress deltas in the main mapped channel
+     * Equivalent to AGENT_DISCORD_CAPTURE_PROGRESS_OUTPUT.
+     */
+    progressOutput?: 'off' | 'thread' | 'channel';
   };
   hookServerPort?: number;
   /**

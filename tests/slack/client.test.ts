@@ -283,4 +283,40 @@ describe('SlackClient message handling', () => {
       expect(callback.mock.calls[0][6]).toBeUndefined();
     });
   });
+
+  describe('progress thread output', () => {
+    it('creates and reuses one progress thread per channel', async () => {
+      const postMessage = (client as any).app.client.chat.postMessage as ReturnType<typeof vi.fn>;
+      postMessage.mockReset();
+      postMessage
+        .mockResolvedValueOnce({ ok: true, ts: '1700000000.100001' }) // anchor
+        .mockResolvedValueOnce({ ok: true, ts: '1700000000.100002' }) // first progress
+        .mockResolvedValueOnce({ ok: true, ts: '1700000000.100003' }); // second progress
+
+      await client.sendToProgressThread('C_TEST', 'progress one');
+      await client.sendToProgressThread('C_TEST', 'progress two');
+
+      expect(postMessage).toHaveBeenCalledTimes(3);
+      expect(postMessage.mock.calls[0]?.[0]).toEqual(
+        expect.objectContaining({
+          channel: 'C_TEST',
+          text: expect.stringContaining('Progress thread started'),
+        }),
+      );
+      expect(postMessage.mock.calls[1]?.[0]).toEqual(
+        expect.objectContaining({
+          channel: 'C_TEST',
+          text: 'progress one',
+          thread_ts: '1700000000.100001',
+        }),
+      );
+      expect(postMessage.mock.calls[2]?.[0]).toEqual(
+        expect.objectContaining({
+          channel: 'C_TEST',
+          text: 'progress two',
+          thread_ts: '1700000000.100001',
+        }),
+      );
+    });
+  });
 });

@@ -30,6 +30,7 @@ export interface StoredConfig {
   captureHistoryLines?: number;
   captureRedrawTailLines?: number;
   longOutputThreadThreshold?: number;
+  captureProgressOutput?: 'off' | 'thread' | 'channel';
   keepChannelOnStop?: boolean;
   slackBotToken?: string;
   slackAppToken?: string;
@@ -146,6 +147,10 @@ export class ConfigManager {
         1200,
         20000,
       );
+      const captureProgressOutput = this.resolveCaptureProgressOutput(
+        storedConfig.captureProgressOutput,
+        this.env.get('AGENT_DISCORD_CAPTURE_PROGRESS_OUTPUT'),
+      );
       const capture =
         capturePollMs !== undefined ||
         capturePendingQuietPolls !== undefined ||
@@ -156,7 +161,8 @@ export class ConfigManager {
         capturePromptEchoMaxPolls !== undefined ||
         captureHistoryLines !== undefined ||
         captureRedrawTailLines !== undefined ||
-        longOutputThreadThreshold !== undefined
+        longOutputThreadThreshold !== undefined ||
+        captureProgressOutput !== undefined
           ? {
               ...(capturePollMs !== undefined ? { pollMs: capturePollMs } : {}),
               ...(capturePendingQuietPolls !== undefined ? { pendingQuietPolls: capturePendingQuietPolls } : {}),
@@ -170,6 +176,7 @@ export class ConfigManager {
               ...(captureHistoryLines !== undefined ? { historyLines: captureHistoryLines } : {}),
               ...(captureRedrawTailLines !== undefined ? { redrawTailLines: captureRedrawTailLines } : {}),
               ...(longOutputThreadThreshold !== undefined ? { longOutputThreadThreshold } : {}),
+              ...(captureProgressOutput !== undefined ? { progressOutput: captureProgressOutput } : {}),
             }
           : undefined;
 
@@ -325,6 +332,15 @@ export class ConfigManager {
     return this.parseBooleanCandidate(envValue);
   }
 
+  private resolveCaptureProgressOutput(
+    storedValue: unknown,
+    envValue: string | undefined,
+  ): 'off' | 'thread' | 'channel' | undefined {
+    const storedCandidate = this.parseCaptureProgressOutputCandidate(storedValue);
+    if (storedCandidate !== undefined) return storedCandidate;
+    return this.parseCaptureProgressOutputCandidate(envValue);
+  }
+
   private parsePromptRefinerModeCandidate(raw: unknown): 'off' | 'shadow' | 'enforce' | undefined {
     if (typeof raw !== 'string') return undefined;
     const normalized = raw.trim().toLowerCase();
@@ -362,6 +378,16 @@ export class ConfigManager {
     const normalized = raw.trim().toLowerCase();
     if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
     if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+    return undefined;
+  }
+
+  private parseCaptureProgressOutputCandidate(raw: unknown): 'off' | 'thread' | 'channel' | undefined {
+    if (raw === undefined || raw === null || raw === '') return undefined;
+    if (typeof raw !== 'string') return undefined;
+    const normalized = raw.trim().toLowerCase();
+    if (normalized === 'off' || normalized === 'thread' || normalized === 'channel') {
+      return normalized;
+    }
     return undefined;
   }
 
@@ -514,6 +540,15 @@ export class ConfigManager {
       );
     }
 
+    if (
+      storedConfig.captureProgressOutput !== undefined &&
+      this.parseCaptureProgressOutputCandidate(storedConfig.captureProgressOutput) === undefined
+    ) {
+      errors.push(
+        `Stored captureProgressOutput must be "off", "thread", or "channel" (received: ${String(storedConfig.captureProgressOutput)})`,
+      );
+    }
+
     const rawEnvCaptureHistoryLines = this.env.get('AGENT_DISCORD_CAPTURE_HISTORY_LINES');
     if (rawEnvCaptureHistoryLines !== undefined && this.parseCaptureLineCountCandidate(rawEnvCaptureHistoryLines, 300, 4000) === undefined) {
       errors.push(
@@ -599,6 +634,16 @@ export class ConfigManager {
     ) {
       errors.push(
         `AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD must be an integer between 1200 and 20000 (received: ${rawEnvLongOutputThreadThreshold})`,
+      );
+    }
+
+    const rawEnvCaptureProgressOutput = this.env.get('AGENT_DISCORD_CAPTURE_PROGRESS_OUTPUT');
+    if (
+      rawEnvCaptureProgressOutput !== undefined &&
+      this.parseCaptureProgressOutputCandidate(rawEnvCaptureProgressOutput) === undefined
+    ) {
+      errors.push(
+        `AGENT_DISCORD_CAPTURE_PROGRESS_OUTPUT must be "off", "thread", or "channel" (received: ${rawEnvCaptureProgressOutput})`,
       );
     }
 

@@ -11,6 +11,7 @@ function createMessaging(platform: 'discord' | 'slack' = 'discord') {
   return {
     platform,
     sendToChannel: vi.fn().mockResolvedValue(undefined),
+    sendToProgressThread: vi.fn().mockResolvedValue(undefined),
     sendLongOutput: vi.fn().mockResolvedValue(undefined),
   } as any;
 }
@@ -96,6 +97,92 @@ describe('BridgeCapturePoller', () => {
     // Without a pending request, completion should not be attempted.
     await vi.advanceTimersByTimeAsync(500);
     expect(pendingTracker.markCompleted).not.toHaveBeenCalled();
+
+    poller.stop();
+  });
+
+  it('routes progress deltas to thread output when visibility gate is thread', async () => {
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        instances: {
+          claude: {
+            instanceId: 'claude',
+            agentType: 'claude',
+            tmuxWindow: 'demo-claude',
+            channelId: 'ch-1',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const tmux = createTmux([
+      'boot line',
+      'boot line\nprogress chunk',
+    ]);
+    const pendingTracker = createPendingTracker();
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      intervalMs: 500,
+      progressOutputVisibility: 'thread',
+    });
+
+    poller.start();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(messaging.sendToProgressThread).toHaveBeenCalledWith('ch-1', 'progress chunk');
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
+
+    poller.stop();
+  });
+
+  it('suppresses progress deltas when visibility gate is off', async () => {
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        instances: {
+          claude: {
+            instanceId: 'claude',
+            agentType: 'claude',
+            tmuxWindow: 'demo-claude',
+            channelId: 'ch-1',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const tmux = createTmux([
+      'boot line',
+      'boot line\nprogress chunk',
+    ]);
+    const pendingTracker = createPendingTracker();
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      intervalMs: 500,
+      progressOutputVisibility: 'off',
+    });
+
+    poller.start();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(messaging.sendToProgressThread).not.toHaveBeenCalled();
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
 
     poller.stop();
   });
@@ -431,6 +518,70 @@ describe('BridgeCapturePoller', () => {
     await vi.advanceTimersByTimeAsync(300);
     expect(messaging.sendToChannel).toHaveBeenCalledTimes(1);
     expect(messaging.sendToChannel).toHaveBeenCalledWith('parent-ch', 'assistant: step two');
+
+    poller.stop();
+  });
+
+  it('does not leak codex progress when final-only mode is enabled and pending depth is 0', async () => {
+    process.env.AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY = '1';
+
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'parent-ch',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const tmux = createTmux([
+      'boot line',
+      ['boot line', 'assistant: step one'].join('\n'),
+      ['boot line', 'assistant: step one', 'assistant: step two'].join('\n'),
+      ['boot line', 'assistant: step one', 'assistant: step two'].join('\n'),
+      ['boot line', 'assistant: step one', 'assistant: step two'].join('\n'),
+    ]);
+    const pendingTracker = {
+      getPendingChannel: vi.fn().mockReturnValue(undefined),
+      getPendingDepth: vi.fn().mockReturnValue(0),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      intervalMs: 300,
+      progressOutputVisibility: 'thread',
+    });
+
+    poller.start();
+    await Promise.resolve();
+
+    // While output is changing, final-only mode should keep buffering.
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
+    expect(messaging.sendToProgressThread).not.toHaveBeenCalled();
+
+    // First quiet poll after output change still waits.
+    await vi.advanceTimersByTimeAsync(300);
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
+
+    // Next quiet poll flushes consolidated final output once.
+    await vi.advanceTimersByTimeAsync(300);
+    expect(messaging.sendToChannel).toHaveBeenCalledTimes(1);
+    expect(messaging.sendToChannel).toHaveBeenCalledWith('parent-ch', 'assistant: step two');
+    expect(messaging.sendToProgressThread).not.toHaveBeenCalled();
 
     poller.stop();
   });

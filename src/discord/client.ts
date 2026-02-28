@@ -39,6 +39,7 @@ export class DiscordClient implements MessagingClient {
   private channelMapping: Map<string, ChannelInfo> = new Map();
   private typingIndicators: Map<string, { timer: ReturnType<typeof setInterval>; refs: number }> = new Map();
   private sendQueues: Map<string, Promise<void>> = new Map();
+  private progressThreadByChannel: Map<string, string> = new Map();
   private registry: AgentRegistry;
 
   constructor(token: string, registry?: AgentRegistry) {
@@ -704,6 +705,7 @@ export class DiscordClient implements MessagingClient {
       clearInterval(state.timer);
     }
     this.typingIndicators.clear();
+    this.progressThreadByChannel.clear();
     await this.client.destroy();
   }
 
@@ -1126,6 +1128,75 @@ export class DiscordClient implements MessagingClient {
         });
       }
     });
+  }
+
+  private async resolveProgressThreadTarget(
+    channelId: string,
+  ): Promise<{ queueKey: string; target: { send: (payload: unknown) => Promise<unknown> } } | null> {
+    const rootChannel = await this.client.channels.fetch(channelId);
+    if (!rootChannel?.isTextBased()) return null;
+
+    const asThreadLike = rootChannel as { isThread?: () => boolean };
+    const isAlreadyThread = typeof asThreadLike.isThread === 'function' && asThreadLike.isThread();
+    if (isAlreadyThread) {
+      return {
+        queueKey: channelId,
+        target: rootChannel as { send: (payload: unknown) => Promise<unknown> },
+      };
+    }
+
+    const cachedThreadId = this.progressThreadByChannel.get(channelId);
+    if (cachedThreadId) {
+      const cachedThread = await this.client.channels.fetch(cachedThreadId).catch(() => null);
+      if (cachedThread?.isTextBased()) {
+        return {
+          queueKey: cachedThreadId,
+          target: cachedThread as { send: (payload: unknown) => Promise<unknown> },
+        };
+      }
+      this.progressThreadByChannel.delete(channelId);
+    }
+
+    const textChannel = rootChannel as TextChannel;
+    const anchor = await this.sendWithRetry(`progress-thread-anchor:${channelId}`, async () =>
+      textChannel.send(
+        this.buildTextSendPayload(
+          '🧵 **Progress thread started**\nLive intermediate updates for this channel are posted in this thread.',
+        ),
+      ),
+    );
+    const threadName = `progress-${new Date().toISOString().slice(11, 19).replace(/:/g, '')}`;
+    const thread = await (anchor as any)?.startThread({
+      name: threadName,
+      autoArchiveDuration: 60,
+      reason: 'mudcode progress output thread',
+    });
+
+    const threadId = typeof thread?.id === 'string' && thread.id.length > 0 ? thread.id : undefined;
+    if (!threadId) return null;
+    this.progressThreadByChannel.set(channelId, threadId);
+    return {
+      queueKey: threadId,
+      target: thread as { send: (payload: unknown) => Promise<unknown> },
+    };
+  }
+
+  async sendToProgressThread(channelId: string, content: string): Promise<void> {
+    const full = content.trim();
+    if (full.length === 0) return;
+
+    try {
+      const target = await this.resolveProgressThreadTarget(channelId);
+      if (!target) {
+        await this.sendToChannel(channelId, full);
+        return;
+      }
+
+      await this.sendSplitText(target.queueKey, target.target, full, 'Part');
+    } catch (error) {
+      console.warn(`Failed to send progress output to thread for ${channelId}:`, error);
+      await this.sendToChannel(channelId, full);
+    }
   }
 
   async sendLongOutput(channelId: string, content: string): Promise<void> {

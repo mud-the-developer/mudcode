@@ -110,6 +110,7 @@ describe('ConfigManager', () => {
         captureHistoryLines: 1800,
         captureRedrawTailLines: 120,
         longOutputThreadThreshold: 2500,
+        captureProgressOutput: 'thread',
       };
       storage.setFile(configFile, JSON.stringify(storedConfig));
 
@@ -135,6 +136,7 @@ describe('ConfigManager', () => {
       expect(config.capture?.historyLines).toBe(1800);
       expect(config.capture?.redrawTailLines).toBe(120);
       expect(config.capture?.longOutputThreadThreshold).toBe(2500);
+      expect(config.capture?.progressOutput).toBe('thread');
     });
 
     it('falls back to env var when no stored config', () => {
@@ -157,6 +159,7 @@ describe('ConfigManager', () => {
       env.set('AGENT_DISCORD_CAPTURE_HISTORY_LINES', '2000');
       env.set('AGENT_DISCORD_CAPTURE_REDRAW_TAIL_LINES', '140');
       env.set('AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD', '3000');
+      env.set('AGENT_DISCORD_CAPTURE_PROGRESS_OUTPUT', 'off');
 
       const manager = new ConfigManager(storage, env, configDir);
       const config = manager.config;
@@ -178,6 +181,7 @@ describe('ConfigManager', () => {
       expect(config.capture?.historyLines).toBe(2000);
       expect(config.capture?.redrawTailLines).toBe(140);
       expect(config.capture?.longOutputThreadThreshold).toBe(3000);
+      expect(config.capture?.progressOutput).toBe('off');
     });
 
     it('stored config takes priority over env vars', () => {
@@ -347,6 +351,17 @@ describe('ConfigManager', () => {
       const manager = new ConfigManager(storage, env, configDir);
 
       expect(() => manager.validateConfig()).toThrow(/AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY/);
+    });
+
+    it('validateConfig throws for invalid capture progress output value', () => {
+      const storage = new MockStorage();
+      const env = new MockEnvironment();
+      env.set('DISCORD_BOT_TOKEN', 'valid-token');
+      env.set('AGENT_DISCORD_CAPTURE_PROGRESS_OUTPUT', 'subthread');
+
+      const manager = new ConfigManager(storage, env, configDir);
+
+      expect(() => manager.validateConfig()).toThrow(/AGENT_DISCORD_CAPTURE_PROGRESS_OUTPUT/);
     });
 
     it('validateConfig throws for invalid stored capture polling values', () => {

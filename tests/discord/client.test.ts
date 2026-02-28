@@ -396,6 +396,40 @@ describe('DiscordClient', () => {
       expect(String(firstThreadPayload?.content || '')).toContain('Page');
     });
 
+    it('sendToProgressThread creates and reuses a progress thread per channel', async () => {
+      const client = new DiscordClient('test-token');
+      const threadSend = vi.fn().mockResolvedValue(undefined);
+      const threadChannel = {
+        id: 'th-progress',
+        isTextBased: () => true,
+        isThread: () => true,
+        send: threadSend,
+      };
+      const anchorMessage = {
+        id: 'm-progress-anchor',
+        startThread: vi.fn().mockResolvedValue(threadChannel),
+      };
+      const rootChannel = {
+        isTextBased: () => true,
+        send: vi.fn().mockResolvedValue(anchorMessage),
+      };
+
+      const mockClient = getMockClient();
+      mockClient.channels.fetch.mockImplementation(async (id: string) => {
+        if (id === 'th-progress') return threadChannel;
+        return rootChannel;
+      });
+
+      await client.sendToProgressThread('ch-123', 'first progress');
+      await client.sendToProgressThread('ch-123', 'second progress');
+
+      expect(rootChannel.send).toHaveBeenCalledTimes(1);
+      expect(anchorMessage.startThread).toHaveBeenCalledTimes(1);
+      expect(threadSend).toHaveBeenCalledTimes(2);
+      expect(String(threadSend.mock.calls[0]?.[0]?.content || '')).toContain('first progress');
+      expect(String(threadSend.mock.calls[1]?.[0]?.content || '')).toContain('second progress');
+    });
+
     it('retries sendToChannel when the first send is rate-limited', async () => {
       vi.useFakeTimers();
       try {

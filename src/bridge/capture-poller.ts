@@ -7,6 +7,10 @@ import { PendingMessageTracker } from './pending-message-tracker.js';
 import { formatDiscordOutput, wrapDiscordCodeblock } from './discord-output-formatter.js';
 import type { CodexIoV2Tracker } from './codex-io-v2.js';
 
+type ProgressOutputVisibility = 'off' | 'thread' | 'channel';
+type OutputEventType = 'progress' | 'final';
+type DeltaDeliveryResult = { observedOutput: boolean; emittedOutput: boolean };
+
 export interface BridgeCapturePollerDeps {
   messaging: MessagingClient;
   tmux: TmuxManager;
@@ -22,6 +26,7 @@ export interface BridgeCapturePollerDeps {
   promptEchoFilterEnabled?: boolean;
   promptEchoSuppressionMaxPolls?: number;
   redrawFallbackTailLines?: number;
+  progressOutputVisibility?: ProgressOutputVisibility;
 }
 
 export class BridgeCapturePoller {
@@ -34,6 +39,7 @@ export class BridgeCapturePoller {
   private readonly promptEchoFilterEnabled: boolean;
   private readonly promptEchoSuppressionMaxPolls: number;
   private readonly redrawFallbackTailLines: number;
+  private readonly progressOutputVisibility: ProgressOutputVisibility;
   private timer?: ReturnType<typeof setInterval>;
   private running = false;
   private snapshotsByInstance = new Map<string, string>();
@@ -64,6 +70,7 @@ export class BridgeCapturePoller {
     this.promptEchoFilterEnabled = this.resolvePromptEchoFilterEnabled(deps.promptEchoFilterEnabled);
     this.promptEchoSuppressionMaxPolls = this.resolvePromptEchoSuppressionMaxPolls(deps.promptEchoSuppressionMaxPolls);
     this.redrawFallbackTailLines = this.resolveRedrawFallbackTailLines(deps.redrawFallbackTailLines);
+    this.progressOutputVisibility = this.resolveProgressOutputVisibility(deps.progressOutputVisibility);
   }
 
   start(): void {
@@ -193,6 +200,19 @@ export class BridgeCapturePoller {
     return 60;
   }
 
+  private resolveProgressOutputVisibility(configured?: ProgressOutputVisibility): ProgressOutputVisibility {
+    if (configured === 'off' || configured === 'thread' || configured === 'channel') {
+      return configured;
+    }
+    const raw = process.env.AGENT_DISCORD_CAPTURE_PROGRESS_OUTPUT;
+    if (!raw) return 'channel';
+    const normalized = raw.trim().toLowerCase();
+    if (normalized === 'off' || normalized === 'thread' || normalized === 'channel') {
+      return normalized;
+    }
+    return 'channel';
+  }
+
   private formatDuration(ms: number): string {
     const sec = Math.max(1, Math.round(ms / 1000));
     if (sec < 60) return `${sec}s`;
@@ -268,7 +288,25 @@ export class BridgeCapturePoller {
     );
   }
 
-  private async sendOutput(channelId: string, text: string): Promise<boolean> {
+  private async sendProgressChunk(channelId: string, payload: string): Promise<boolean> {
+    if (this.progressOutputVisibility === 'off') {
+      return false;
+    }
+
+    if (this.progressOutputVisibility === 'thread') {
+      if (typeof this.deps.messaging.sendToProgressThread === 'function') {
+        await this.deps.messaging.sendToProgressThread(channelId, payload);
+        return true;
+      }
+      await this.deps.messaging.sendToChannel(channelId, payload);
+      return true;
+    }
+
+    await this.deps.messaging.sendToChannel(channelId, payload);
+    return true;
+  }
+
+  private async sendOutput(channelId: string, text: string, eventType: OutputEventType): Promise<boolean> {
     const discordFormatted =
       this.deps.messaging.platform === 'discord'
         ? formatDiscordOutput(text)
@@ -276,7 +314,10 @@ export class BridgeCapturePoller {
     const content = discordFormatted.text;
     if (content.trim().length === 0) return false;
 
-    if (this.shouldUseThreadedLongOutput(content)) {
+    const shouldUseLongOutputThread =
+      this.shouldUseThreadedLongOutput(content) &&
+      (eventType === 'final' || this.progressOutputVisibility === 'channel');
+    if (shouldUseLongOutputThread) {
       await this.deps.messaging.sendLongOutput!(channelId, content);
       return true;
     }
@@ -289,8 +330,13 @@ export class BridgeCapturePoller {
         this.deps.messaging.platform === 'discord' && discordFormatted.useCodeblock
           ? wrapDiscordCodeblock(chunk, discordFormatted.language)
           : chunk;
-      await this.deps.messaging.sendToChannel(channelId, payload);
-      sentAnyChunk = true;
+      if (eventType === 'progress') {
+        const sent = await this.sendProgressChunk(channelId, payload);
+        sentAnyChunk = sentAnyChunk || sent;
+      } else {
+        await this.deps.messaging.sendToChannel(channelId, payload);
+        sentAnyChunk = true;
+      }
     }
     return sentAnyChunk;
   }
@@ -465,7 +511,7 @@ export class BridgeCapturePoller {
       return true;
     }
     const output = prepared.trim().length > 0 ? prepared : buffered.trim();
-    const sent = await this.sendOutput(targetChannelId, output);
+    const sent = await this.sendOutput(targetChannelId, output, 'final');
     if (!sent) return false;
 
     this.bufferedOutputByInstance.delete(key);
@@ -482,9 +528,9 @@ export class BridgeCapturePoller {
     codexWorkingHint?: boolean;
     channelId?: string;
     deltaText: string;
-  }): Promise<boolean> {
+  }): Promise<DeltaDeliveryResult> {
     const trimmed = params.deltaText.trim();
-    if (trimmed.length === 0) return false;
+    if (trimmed.length === 0) return { observedOutput: false, emittedOutput: false };
     if (params.agentType === 'codex') {
       this.deps.ioTracker?.recordOutputDelta({
         projectName: params.projectName,
@@ -500,19 +546,24 @@ export class BridgeCapturePoller {
     }
 
     const shouldBuffer =
+      (
+        this.codexFinalOnlyModeEnabled &&
+        params.agentType === 'codex'
+      ) ||
       this.shouldBufferUntilCompletion(params.key, params.agentType, params.pendingDepth) ||
       (
         this.codexFinalOnlyModeEnabled &&
         params.agentType === 'codex' &&
         params.codexWorkingHint === true
-      );
+    );
     if (shouldBuffer) {
       this.appendBufferedOutput(params.key, trimmed, params.channelId, params.agentType);
-      return true;
+      return { observedOutput: true, emittedOutput: false };
     }
 
-    if (!params.channelId) return false;
-    return this.sendOutput(params.channelId, trimmed);
+    if (!params.channelId) return { observedOutput: true, emittedOutput: false };
+    const sent = await this.sendOutput(params.channelId, trimmed, 'progress');
+    return { observedOutput: true, emittedOutput: sent };
   }
 
   private async pollOnce(): Promise<void> {
@@ -690,7 +741,7 @@ export class BridgeCapturePoller {
                 continue;
               }
 
-              const fallbackSent = await this.deliverDelta({
+              const fallbackDelivery = await this.deliverDelta({
                 projectName: project.projectName,
                 instanceId: instance.instanceId,
                 key,
@@ -700,7 +751,7 @@ export class BridgeCapturePoller {
                 channelId: outputChannelId,
                 deltaText: delta,
               });
-              if (fallbackSent) {
+              if (fallbackDelivery.observedOutput) {
                 this.quietPendingPollsByInstance.delete(key);
                 if (routeInfo.pendingDepth > 0) {
                   this.completionCandidatesByInstance.set(key, {
@@ -761,7 +812,7 @@ export class BridgeCapturePoller {
             continue;
           }
 
-          const sentAnyChunk = await this.deliverDelta({
+          const delivery = await this.deliverDelta({
             projectName: project.projectName,
             instanceId: instance.instanceId,
             key,
@@ -772,7 +823,7 @@ export class BridgeCapturePoller {
             deltaText: trimmedDelta,
           });
 
-          if (sentAnyChunk) {
+          if (delivery.observedOutput) {
             this.quietPendingPollsByInstance.delete(key);
             if (routeInfo.pendingDepth > 0) {
               // Keep completion buffered until output has been quiet long enough.
