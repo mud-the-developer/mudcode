@@ -855,6 +855,254 @@ describe('BridgeMessageRouter (codex)', () => {
     expect(tmux.typeKeysToWindow).not.toHaveBeenCalled();
   });
 
+  it('runs /doctor and sends summary to channel', async () => {
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+    const doctorRunner = vi.fn().mockResolvedValue({
+      ok: true,
+      fixed: false,
+      issues: [],
+      fixes: [],
+      summary: {
+        configPath: '/tmp/config.json',
+        storedThreshold: 20000,
+        envThresholdRaw: undefined,
+        effectiveThreshold: 20000,
+      },
+    });
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      doctorRunner,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', '/doctor', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    expect(doctorRunner).toHaveBeenCalledWith({ fix: false });
+    expect(messaging.sendToChannel).toHaveBeenCalledWith(
+      'ch-1',
+      expect.stringContaining('Mudcode Doctor'),
+    );
+    expect(tmux.typeKeysToWindow).not.toHaveBeenCalled();
+  });
+
+  it('runs /doctor fix with auto-fix enabled', async () => {
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+    const doctorRunner = vi.fn().mockResolvedValue({
+      ok: true,
+      fixed: true,
+      issues: [{ level: 'warn', code: 'threshold-conflict', message: 'conflict resolved' }],
+      fixes: [{ code: 'save-config-threshold', message: 'saved 20000' }],
+      summary: {
+        configPath: '/tmp/config.json',
+        storedThreshold: 20000,
+        envThresholdRaw: undefined,
+        effectiveThreshold: 20000,
+      },
+    });
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      doctorRunner,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', '/doctor fix', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    expect(doctorRunner).toHaveBeenCalledWith({ fix: true });
+    expect(messaging.sendToChannel).toHaveBeenCalledWith(
+      'ch-1',
+      expect.stringContaining('auto-fixed'),
+    );
+    expect(tmux.typeKeysToWindow).not.toHaveBeenCalled();
+  });
+
+  it('schedules /update command in background', async () => {
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+    const backgroundCliRunner = vi.fn();
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      backgroundCliRunner,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', '/update', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    expect(backgroundCliRunner).toHaveBeenCalledWith(['update'], 350);
+    expect(messaging.sendToChannel).toHaveBeenCalledWith(
+      'ch-1',
+      expect.stringContaining('Starting mudcode update'),
+    );
+    expect(tmux.typeKeysToWindow).not.toHaveBeenCalled();
+  });
+
+  it('schedules /update --git command in background', async () => {
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+    const backgroundCliRunner = vi.fn();
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      backgroundCliRunner,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', '/update --git', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    expect(backgroundCliRunner).toHaveBeenCalledWith(['update', '--git'], 350);
+    expect(tmux.typeKeysToWindow).not.toHaveBeenCalled();
+  });
+
+  it('schedules /daemon-restart in background', async () => {
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+    const backgroundCliRunner = vi.fn();
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      backgroundCliRunner,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', '/daemon-restart', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    expect(backgroundCliRunner).toHaveBeenCalledWith(['daemon', 'restart'], 350);
+    expect(messaging.sendToChannel).toHaveBeenCalledWith(
+      'ch-1',
+      expect.stringContaining('Scheduling daemon restart'),
+    );
+    expect(tmux.typeKeysToWindow).not.toHaveBeenCalled();
+  });
+
   it('returns current pane snapshot for /snapshot command', async () => {
     const { messaging, getCallback } = createMessagingMock();
     const tmux = {

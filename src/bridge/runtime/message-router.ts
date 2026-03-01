@@ -14,6 +14,8 @@ import { cleanCapture, splitForDiscord, splitForSlack } from '../../capture/pars
 import type { CodexIoV2Tracker } from '../events/codex-io-v2.js';
 import type { SkillAutoLinker } from '../skills/skill-autolinker.js';
 import type { AgentEventHookClient } from '../events/agent-event-hook.js';
+import { spawn } from 'child_process';
+import { runDoctor, type DoctorResult } from '../../cli/commands/doctor.js';
 
 export interface BridgeMessageRouterDeps {
   messaging: MessagingClient;
@@ -24,6 +26,8 @@ export interface BridgeMessageRouterDeps {
   ioTracker?: CodexIoV2Tracker;
   skillAutoLinker?: SkillAutoLinker;
   eventHookClient?: AgentEventHookClient;
+  doctorRunner?: (options: { fix?: boolean }) => Promise<DoctorResult>;
+  backgroundCliRunner?: (args: string[], delayMs?: number) => void;
 }
 
 type RouteResolutionSource = 'mapped' | 'reply' | 'conversation' | 'channel' | 'primary';
@@ -45,6 +49,10 @@ type SpecialKeyCommandParse =
   | { kind: 'valid'; command: SpecialKeyCommand };
 
 type SessionControlCommand = 'q' | 'qw';
+type MaintenanceCommand =
+  | { kind: 'doctor'; fix: boolean }
+  | { kind: 'update'; git: boolean }
+  | { kind: 'daemon-restart' };
 
 export class BridgeMessageRouter {
   private routeByMessageId: Map<string, RouteMemory> = new Map();
@@ -124,6 +132,34 @@ export class BridgeMessageRouter {
     if (normalized === '/health') return 'health';
     if (normalized === '/snapshot') return 'snapshot';
     if (normalized === '/io') return 'io';
+    return undefined;
+  }
+
+  private parseMaintenanceCommand(content: string): MaintenanceCommand | undefined {
+    const parts = content.trim().split(/\s+/).filter(Boolean);
+    if (parts.length === 0) return undefined;
+    const command = parts[0]!.toLowerCase();
+
+    if (command === '/doctor') {
+      const fix = parts.slice(1).some((part) => {
+        const token = part.toLowerCase();
+        return token === 'fix' || token === '--fix';
+      });
+      return { kind: 'doctor', fix };
+    }
+
+    if (command === '/update') {
+      const git = parts.slice(1).some((part) => {
+        const token = part.toLowerCase();
+        return token === 'git' || token === '--git';
+      });
+      return { kind: 'update', git };
+    }
+
+    if (command === '/daemon-restart' || command === '/restart-daemon') {
+      return { kind: 'daemon-restart' };
+    }
+
     return undefined;
   }
 
@@ -395,6 +431,149 @@ export class BridgeMessageRouter {
       }
     } catch (error) {
       await this.deps.messaging.sendToChannel(params.channelId, this.buildDeliveryFailureGuidance(params.projectName, error));
+    }
+  }
+
+  private async sendSplitMessage(channelId: string, content: string): Promise<void> {
+    const split = this.deps.messaging.platform === 'slack' ? splitForSlack : splitForDiscord;
+    for (const chunk of split(content)) {
+      if (chunk.trim().length === 0) continue;
+      await this.deps.messaging.sendToChannel(channelId, chunk);
+    }
+  }
+
+  private formatDoctorSummary(result: DoctorResult): string {
+    const warnCount = result.issues.filter((issue) => issue.level === 'warn').length;
+    const failCount = result.issues.filter((issue) => issue.level === 'fail').length;
+    const issueLines = result.issues
+      .slice(0, 4)
+      .map((issue) => `- [${issue.level.toUpperCase()}] ${issue.code}: ${issue.message}`);
+    const fixLines = result.fixes
+      .slice(0, 4)
+      .map((fix) => `- ${fix.code}: ${fix.message}`);
+
+    const lines = [
+      '🩺 **Mudcode Doctor**',
+      `result: ${result.ok ? '✅ ok' : '❌ fail'}${result.fixed ? ' (auto-fixed)' : ''}`,
+      `issues: fail=${failCount}, warn=${warnCount}`,
+      `effective threshold: \`${result.summary.effectiveThreshold ?? 'unset'}\``,
+    ];
+
+    if (issueLines.length > 0) {
+      lines.push('');
+      lines.push('top issues:');
+      lines.push(...issueLines);
+      if (result.issues.length > issueLines.length) {
+        lines.push(`- ... ${result.issues.length - issueLines.length} more`);
+      }
+    }
+
+    if (fixLines.length > 0) {
+      lines.push('');
+      lines.push('applied fixes:');
+      lines.push(...fixLines);
+      if (result.fixes.length > fixLines.length) {
+        lines.push(`- ... ${result.fixes.length - fixLines.length} more`);
+      }
+    }
+
+    return lines.join('\n');
+  }
+
+  private resolveMudcodeCliInvocation(args: string[]): { command: string; args: string[] } {
+    const execPath = process.execPath || '';
+    const execName = execPath.split(/[\\/]/).pop()?.toLowerCase() || '';
+    const scriptPath = process.argv[1];
+
+    if (execName === 'mudcode' || execName === 'mudcode.exe') {
+      return { command: execPath, args };
+    }
+
+    if (
+      (execName === 'bun' || execName === 'bun.exe' || execName === 'node' || execName === 'node.exe') &&
+      scriptPath
+    ) {
+      return { command: execPath, args: [scriptPath, ...args] };
+    }
+
+    return { command: 'mudcode', args };
+  }
+
+  private scheduleBackgroundCli(args: string[], delayMs: number = 0): void {
+    if (this.deps.backgroundCliRunner) {
+      this.deps.backgroundCliRunner(args, delayMs);
+      return;
+    }
+
+    const invocation = this.resolveMudcodeCliInvocation(args);
+    const run = () => {
+      const child = spawn(invocation.command, invocation.args, {
+        cwd: process.cwd(),
+        detached: true,
+        stdio: 'ignore',
+        env: process.env,
+      });
+      child.unref();
+    };
+
+    if (delayMs > 0) {
+      const timer = setTimeout(run, delayMs);
+      timer.unref();
+      return;
+    }
+
+    run();
+  }
+
+  private async handleMaintenanceCommand(params: {
+    command: MaintenanceCommand;
+    channelId: string;
+  }): Promise<void> {
+    if (params.command.kind === 'doctor') {
+      try {
+        const runner = this.deps.doctorRunner || runDoctor;
+        const result = await runner({ fix: params.command.fix });
+        await this.sendSplitMessage(params.channelId, this.formatDoctorSummary(result));
+      } catch (error) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          `⚠️ Doctor command failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      return;
+    }
+
+    if (params.command.kind === 'update') {
+      const args = ['update', ...(params.command.git ? ['--git'] : [])];
+      const suffix = params.command.git ? ' (`--git`)' : '';
+      await this.deps.messaging.sendToChannel(
+        params.channelId,
+        `⬆️ Starting mudcode update${suffix}. This may restart the daemon shortly.`,
+      );
+      try {
+        // Give Discord send a brief head start before daemon lifecycle changes.
+        this.scheduleBackgroundCli(args, 350);
+      } catch (error) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          `⚠️ Failed to schedule update: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      return;
+    }
+
+    await this.deps.messaging.sendToChannel(
+      params.channelId,
+      '♻️ Scheduling daemon restart...',
+    );
+    try {
+      // Delay to increase chance the acknowledgement message is delivered first.
+      this.scheduleBackgroundCli(['daemon', 'restart'], 350);
+    } catch (error) {
+      await this.deps.messaging.sendToChannel(
+        params.channelId,
+        `⚠️ Failed to schedule daemon restart: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
@@ -811,6 +990,15 @@ export class BridgeMessageRouter {
           ? this.deps.ioTracker.buildStatus(projectName, instanceKey)
           : 'ℹ️ codex i/o tracker is not initialized';
         await messaging.sendToChannel(commandChannelId, status);
+        return;
+      }
+
+      const maintenanceCommand = this.parseMaintenanceCommand(content);
+      if (maintenanceCommand) {
+        await this.handleMaintenanceCommand({
+          command: maintenanceCommand,
+          channelId: commandChannelId,
+        });
         return;
       }
 

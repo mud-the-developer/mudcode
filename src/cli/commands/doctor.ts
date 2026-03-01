@@ -22,18 +22,18 @@ export interface DoctorCommandOptions {
 
 type DoctorIssueLevel = 'warn' | 'fail';
 
-type DoctorIssue = {
+export type DoctorIssue = {
   level: DoctorIssueLevel;
   code: string;
   message: string;
 };
 
-type DoctorFix = {
+export type DoctorFix = {
   code: string;
   message: string;
 };
 
-type DoctorResult = {
+export type DoctorResult = {
   ok: boolean;
   fixed: boolean;
   issues: DoctorIssue[];
@@ -224,6 +224,23 @@ function safeErrorMessage(error: unknown): string {
 }
 
 export async function doctorCommand(options: DoctorCommandOptions = {}): Promise<void> {
+  const result = await runDoctor(options);
+
+  if (options.json) {
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    printHumanResult(result);
+    if (!options.fix && result.issues.length > 0) {
+      console.log(chalk.gray('\nTip: run `mudcode doctor --fix` to apply safe auto-fixes.'));
+    }
+  }
+
+  if (!result.ok) {
+    process.exitCode = 1;
+  }
+}
+
+export async function runDoctor(options: { fix?: boolean } = {}): Promise<DoctorResult> {
   const storedRaw = getConfigValue('longOutputThreadThreshold');
   const envRaw = process.env.AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD;
   const issues = buildIssues(storedRaw, envRaw);
@@ -288,17 +305,5 @@ export async function doctorCommand(options: DoctorCommandOptions = {}): Promise
       effectiveThreshold: config.capture?.longOutputThreadThreshold,
     },
   };
-
-  if (options.json) {
-    console.log(JSON.stringify(result, null, 2));
-  } else {
-    printHumanResult(result);
-    if (!options.fix && result.issues.length > 0) {
-      console.log(chalk.gray('\nTip: run `mudcode doctor --fix` to apply safe auto-fixes.'));
-    }
-  }
-
-  if (!result.ok) {
-    process.exitCode = 1;
-  }
+  return result;
 }
