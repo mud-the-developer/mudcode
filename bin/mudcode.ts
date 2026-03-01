@@ -231,6 +231,44 @@ function isGitRepository(repoPath: string): boolean {
   }
 }
 
+function readPackageName(repoPath: string): string | null {
+  const packageJsonPath = resolve(repoPath, 'package.json');
+  if (!existsSync(packageJsonPath)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(packageJsonPath, 'utf-8')) as { name?: unknown };
+    return typeof parsed.name === 'string' ? parsed.name : null;
+  } catch {
+    return null;
+  }
+}
+
+function isMudcodeRepository(repoPath: string): boolean {
+  const name = readPackageName(repoPath);
+  if (!name) return false;
+  if (name === '@mudramo/mudcode') return true;
+  if (name === CLI_PACKAGE_NAME) return true;
+  return false;
+}
+
+function resolveAutoGitRepoPath(options: { repo?: string }): string | null {
+  const candidates: string[] = [];
+  const fromOption = options.repo?.trim();
+  const fromEnv = process.env.MUDCODE_GIT_REPO_PATH?.trim();
+  if (fromOption) candidates.push(resolve(fromOption));
+  if (fromEnv) candidates.push(resolve(fromEnv));
+  candidates.push(process.cwd());
+
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    if (seen.has(candidate)) continue;
+    seen.add(candidate);
+    if (!isGitRepository(candidate)) continue;
+    if (!isMudcodeRepository(candidate)) continue;
+    return candidate;
+  }
+  return null;
+}
+
 async function performGitUpgrade(
   options: { repo?: string; dedupeNpm?: boolean } = {},
 ): Promise<boolean> {
@@ -419,9 +457,19 @@ async function runUpdateCommand(options: {
   repo?: string;
   dedupeNpm?: boolean;
 }): Promise<void> {
-  if (options.git) {
+  if (options.git === true) {
     await performGitUpgrade({ repo: options.repo, dedupeNpm: options.dedupeNpm });
     return;
+  }
+
+  if (!options.check && options.git !== false) {
+    const autoGitRepoPath = resolveAutoGitRepoPath({ repo: options.repo });
+    if (autoGitRepoPath) {
+      console.log(chalk.gray(`   Auto-detected mudcode git checkout: ${autoGitRepoPath}`));
+      console.log(chalk.gray(`   Using git update mode (use \`${CLI_COMMAND_NAME} update --no-git\` to force npm registry mode).`));
+      await performGitUpgrade({ repo: autoGitRepoPath, dedupeNpm: options.dedupeNpm });
+      return;
+    }
   }
 
   const latestVersion = await fetchLatestCliVersion(4000);
@@ -1182,7 +1230,7 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
       (y: Argv) =>
         y
           .option('check', { type: 'boolean', default: false, describe: 'Only check for updates (npm registry)' })
-          .option('git', { type: 'boolean', default: false, describe: 'Update from a local git checkout (git pull + global reinstall)' })
+          .option('git', { type: 'boolean', describe: 'Update from a local git checkout (git pull + global reinstall). If omitted, mudcode auto-detects git mode from repo/env/cwd.' })
           .option('repo', { type: 'string', describe: 'Repo path for --git (default: $MUDCODE_GIT_REPO_PATH or current directory)' })
           .option('dedupe-npm', {
             type: 'boolean',
@@ -1202,7 +1250,7 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
       (y: Argv) =>
         y
           .option('check', { type: 'boolean', default: false, describe: 'Only check for updates' })
-          .option('git', { type: 'boolean', default: false, describe: 'Pull repo first, then install globally from local path via Bun' })
+          .option('git', { type: 'boolean', describe: 'Pull repo first, then install globally from local path via Bun' })
           .option('repo', { type: 'string', describe: 'Repo path for --git (default: $MUDCODE_GIT_REPO_PATH or current directory)' })
           .option('dedupe-npm', {
             type: 'boolean',
