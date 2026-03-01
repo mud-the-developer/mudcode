@@ -25,6 +25,7 @@ import { agentsCommand } from '../src/cli/commands/agents.js';
 import { daemonCommand } from '../src/cli/commands/daemon.js';
 import { diagnoseCommand } from '../src/cli/commands/diagnose.js';
 import { uninstallCommand } from '../src/cli/commands/uninstall.js';
+import { doctorCommand } from '../src/cli/commands/doctor.js';
 import { skillsInstallCommand, skillsListCommand } from '../src/cli/commands/skills.js';
 import { getDaemonStatus, restartDaemonIfRunning } from '../src/app/daemon-service.js';
 import { main as daemonMain } from '../src/index.js';
@@ -1229,6 +1230,18 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
           describe: 'Probe active tmux panes and auto-tune capture settings before start/restart',
         }),
       async (argv: any) => daemonCommand(argv.action, { clearSession: argv.clearSession, autoTuneCapture: argv.autoTuneCapture })
+    )
+    .command(
+      'doctor',
+      'Detect config/env conflicts and optionally auto-fix them',
+      (y: Argv) => y
+        .option('fix', { type: 'boolean', default: false, describe: 'Apply safe auto-fixes for known conflicts' })
+        .option('json', { type: 'boolean', default: false, describe: 'Print machine-readable doctor report' }),
+      async (argv: any) =>
+        doctorCommand({
+          fix: argv.fix,
+          json: argv.json,
+        })
     )
     .command(
       'update',
