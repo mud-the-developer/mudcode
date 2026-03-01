@@ -168,9 +168,9 @@ Workflow files:
 
 ## Docs
 
-- `docs/DISCORD_SETUP.md`
-- `docs/SLACK_SETUP.md`
-- `docs/RELEASE_NPM.ko.md`
+- `docs/setup/DISCORD_SETUP.md`
+- `docs/setup/SLACK_SETUP.md`
+- `docs/release/RELEASE_NPM.ko.md`
 - `ARCHITECTURE.md`
 - `DEVELOPMENT.md`
 

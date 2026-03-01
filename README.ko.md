@@ -168,9 +168,9 @@ GitHub Actions로 릴리즈 자동화가 구성되어 있습니다.
 
 ## 문서
 
-- `docs/DISCORD_SETUP.ko.md`
-- `docs/SLACK_SETUP.ko.md`
-- `docs/RELEASE_NPM.ko.md`
+- `docs/setup/DISCORD_SETUP.ko.md`
+- `docs/setup/SLACK_SETUP.ko.md`
+- `docs/release/RELEASE_NPM.ko.md`
 - `ARCHITECTURE.md`
 - `DEVELOPMENT.md`
 

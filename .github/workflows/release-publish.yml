@@ -161,4 +161,4 @@ jobs:
           if [ "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}" = "true" ]; then
             ARGS="$ARGS --dry-run"
           fi
-          node scripts/publish-release.mjs $ARGS
+          node scripts/release/publish-release.mjs $ARGS

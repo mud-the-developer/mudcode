@@ -88,13 +88,13 @@
 목적: `src/index.ts` 단일 클래스 과책임 해소
 
 - 제안 모듈
-  - `src/bridge/message-router.ts`
+  - `src/bridge/runtime/message-router.ts`
     - Discord → agent 전송 라우팅, 첨부파일 처리, 입력 검증
-  - `src/bridge/hook-server.ts`
+  - `src/bridge/runtime/hook-server.ts`
     - HTTP 서버 시작/종료, `/reload`, `/opencode-event` 처리
-  - `src/bridge/project-bootstrap.ts`
+  - `src/bridge/bootstrap/project-bootstrap.ts`
     - 시작 시 상태 로드, 플러그인/훅 설치, 채널 매핑 초기화
-  - `src/bridge/pending-message-tracker.ts`
+  - `src/bridge/runtime/pending-message-tracker.ts`
     - ⏳/✅/❌ 반응 상태 추적
 - `AgentBridge`는 위 컴포넌트 조립 및 라이프사이클만 담당
 

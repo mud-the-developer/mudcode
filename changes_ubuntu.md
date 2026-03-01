@@ -61,7 +61,7 @@
 ### 3-2. Codex 중간 진행 상태 필터링 강화
 
 수정 파일:
-- `src/bridge/capture-poller.ts`
+- `src/bridge/runtime/capture-poller.ts`
 - `tests/bridge/capture-poller.test.ts`
 
 주요 반영:
@@ -89,7 +89,7 @@
 - 메시지: `Fix codex final-only flush timing and channel retention`
 
 수정 파일:
-- `src/bridge/capture-poller.ts`
+- `src/bridge/runtime/capture-poller.ts`
 - `tests/bridge/capture-poller.test.ts`
 
 핵심 수정점:

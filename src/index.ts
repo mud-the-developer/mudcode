@@ -22,13 +22,14 @@ import { installMudcodeSendScript } from './infra/send-script.js';
 import { buildAgentLaunchEnv, buildExportPrefix, withClaudePluginDir } from './policy/agent-launch.js';
 import { installAgentIntegration } from './policy/agent-integration.js';
 import { toProjectScopedName } from './policy/window-naming.js';
-import { PendingMessageTracker } from './bridge/pending-message-tracker.js';
-import { BridgeProjectBootstrap } from './bridge/project-bootstrap.js';
-import { BridgeMessageRouter } from './bridge/message-router.js';
-import { BridgeHookServer } from './bridge/hook-server.js';
-import { BridgeCapturePoller } from './bridge/capture-poller.js';
-import { CodexIoV2Tracker } from './bridge/codex-io-v2.js';
-import { SkillAutoLinker } from './bridge/skill-autolinker.js';
+import { PendingMessageTracker } from './bridge/runtime/pending-message-tracker.js';
+import { BridgeProjectBootstrap } from './bridge/bootstrap/project-bootstrap.js';
+import { BridgeMessageRouter } from './bridge/runtime/message-router.js';
+import { BridgeHookServer } from './bridge/runtime/hook-server.js';
+import { BridgeCapturePoller } from './bridge/runtime/capture-poller.js';
+import { LocalAgentEventHookClient } from './bridge/events/agent-event-hook.js';
+import { CodexIoV2Tracker } from './bridge/events/codex-io-v2.js';
+import { SkillAutoLinker } from './bridge/skills/skill-autolinker.js';
 import { PromptRefiner } from './prompt/refiner.js';
 
 export interface AgentBridgeDeps {
@@ -47,6 +48,7 @@ export class AgentBridge {
   private messageRouter: BridgeMessageRouter;
   private hookServer: BridgeHookServer;
   private capturePoller: BridgeCapturePoller;
+  private eventHookClient: LocalAgentEventHookClient;
   private codexIoTracker: CodexIoV2Tracker;
   private skillAutoLinker: SkillAutoLinker;
   private promptRefiner: PromptRefiner;
@@ -68,6 +70,9 @@ export class AgentBridge {
     this.codexIoTracker = new CodexIoV2Tracker({
       messaging: this.messaging,
     });
+    this.eventHookClient = new LocalAgentEventHookClient({
+      port: this.bridgeConfig.hookServerPort || 18470,
+    });
     this.skillAutoLinker = new SkillAutoLinker();
     this.pendingTracker = new PendingMessageTracker(this.messaging);
     this.projectBootstrap = new BridgeProjectBootstrap(this.stateManager, this.messaging, this.bridgeConfig.hookServerPort || 18470);
@@ -79,6 +84,7 @@ export class AgentBridge {
       sanitizeInput: (content) => this.sanitizeInput(content),
       ioTracker: this.codexIoTracker,
       skillAutoLinker: this.skillAutoLinker,
+      eventHookClient: this.eventHookClient,
     });
     this.hookServer = new BridgeHookServer({
       port: this.bridgeConfig.hookServerPort || 18470,
@@ -103,6 +109,9 @@ export class AgentBridge {
       redrawFallbackTailLines: this.bridgeConfig.capture?.redrawTailLines,
       progressOutputVisibility: this.bridgeConfig.capture?.progressOutput,
       ioTracker: this.codexIoTracker,
+      eventHookClient: this.eventHookClient,
+      eventLifecycleStaleChecker: (projectName, instanceId) =>
+        this.hookServer.isEventLifecycleMissingOrStale(projectName, instanceId),
     });
   }
 

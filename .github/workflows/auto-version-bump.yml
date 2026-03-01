@@ -33,7 +33,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          NEXT_VERSION="$(bun scripts/auto-bump-version.mjs)"
+          NEXT_VERSION="$(bun scripts/release/auto-bump-version.mjs)"
           bun run version:check
           echo "next_version=${NEXT_VERSION}" >> "${GITHUB_OUTPUT}"
           echo "Next version: ${NEXT_VERSION}"

@@ -9,8 +9,8 @@
 
 ## 모듈 경계 문서화
 
-- [x] 모듈 경계 문서 추가: `docs/MODULE_BOUNDARIES.md`
-- [x] 한국어 모듈 경계 문서 추가: `docs/MODULE_BOUNDARIES.ko.md`
+- [x] 모듈 경계 문서 추가: `docs/architecture/MODULE_BOUNDARIES.md`
+- [x] 한국어 모듈 경계 문서 추가: `docs/architecture/MODULE_BOUNDARIES.ko.md`
 - [x] README 링크 추가:
   - `README.md`
   - `README.ko.md`
