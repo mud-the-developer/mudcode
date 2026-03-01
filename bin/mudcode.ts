@@ -1017,6 +1017,11 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
           choices: ['off', 'thread', 'channel'],
           describe: 'Set visibility gate for capture progress deltas',
         })
+        .option('freeze', {
+          type: 'boolean',
+          default: false,
+          describe: 'Write current effective values (including env-resolved values) into config.json',
+        })
         .option('show', { type: 'boolean', describe: 'Show current configuration' }),
       async (argv: any) =>
         configCommand({
@@ -1041,6 +1046,7 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
           captureRedrawTailLines: argv.captureRedrawTailLines,
           longOutputThreadThreshold: argv.longOutputThreadThreshold,
           captureProgressOutput: argv.captureProgressOutput,
+          freeze: argv.freeze,
           platform: argv.platform,
           slackBotToken: argv.slackBotToken,
           slackAppToken: argv.slackAppToken,

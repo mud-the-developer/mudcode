@@ -403,6 +403,19 @@ describe('ConfigManager', () => {
       expect(() => manager.validateConfig()).toThrow(/AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD/);
     });
 
+    it('validateConfig ignores invalid env long-output threshold when stored value is valid', () => {
+      const storage = new MockStorage();
+      const env = new MockEnvironment();
+      env.set('DISCORD_BOT_TOKEN', 'valid-token');
+      env.set('AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD', '100001');
+      storage.setFile(configFile, JSON.stringify({ longOutputThreadThreshold: 20000 }));
+
+      const manager = new ConfigManager(storage, env, configDir);
+
+      expect(() => manager.validateConfig()).not.toThrow();
+      expect(manager.config.capture?.longOutputThreadThreshold).toBe(20000);
+    });
+
     it('validateConfig throws for invalid stored capture polling values', () => {
       const storage = new MockStorage();
       const env = new MockEnvironment();

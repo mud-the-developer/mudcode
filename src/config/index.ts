@@ -578,6 +578,9 @@ export class ConfigManager {
     }
 
     const rawStoredLongOutputThreadThreshold = storedConfig.longOutputThreadThreshold;
+    const hasValidStoredLongOutputThreadThreshold =
+      rawStoredLongOutputThreadThreshold !== undefined &&
+      this.parseLongOutputThreadThresholdCandidate(rawStoredLongOutputThreadThreshold, true) !== undefined;
     if (
       rawStoredLongOutputThreadThreshold !== undefined &&
       this.parseLongOutputThreadThresholdCandidate(rawStoredLongOutputThreadThreshold, true) === undefined
@@ -676,6 +679,7 @@ export class ConfigManager {
 
     const rawEnvLongOutputThreadThreshold = this.env.get('AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD');
     if (
+      !hasValidStoredLongOutputThreadThreshold &&
       rawEnvLongOutputThreadThreshold !== undefined &&
       this.parseLongOutputThreadThresholdCandidate(rawEnvLongOutputThreadThreshold, true) === undefined
     ) {

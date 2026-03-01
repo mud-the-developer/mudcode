@@ -2,6 +2,7 @@ import chalk from 'chalk';
 import { agentRegistry } from '../../agents/index.js';
 import { stateManager } from '../../state/index.js';
 import { config, getConfigPath, getConfigValue, saveConfig } from '../../config/index.js';
+import type { StoredConfig } from '../../config/index.js';
 import { normalizeDiscordToken } from '../../config/token.js';
 
 export async function configCommand(options: {
@@ -29,6 +30,7 @@ export async function configCommand(options: {
   captureRedrawTailLines?: string | number;
   longOutputThreadThreshold?: string | number;
   captureProgressOutput?: 'off' | 'thread' | 'channel';
+  freeze?: boolean;
 }) {
   const parseBoundedInt = (raw: string | number, label: string, min: number, max: number): number => {
     const valueRaw = String(raw).trim();
@@ -47,6 +49,41 @@ export async function configCommand(options: {
   };
 
   const onOffToBool = (raw: 'on' | 'off'): boolean => raw === 'on';
+
+  if (options.freeze) {
+    const frozen: Partial<StoredConfig> = {
+      token: config.discord.token || undefined,
+      serverId: stateManager.getGuildId() || config.discord.guildId || undefined,
+      channelId: config.discord.channelId || undefined,
+      hookServerPort: config.hookServerPort,
+      defaultAgentCli: config.defaultAgentCli,
+      opencodePermissionMode: config.opencode?.permissionMode,
+      promptRefinerMode: config.promptRefiner?.mode,
+      promptRefinerLogPath: config.promptRefiner?.logPath,
+      promptRefinerMaxLogChars: config.promptRefiner?.maxLogChars,
+      capturePollMs: config.capture?.pollMs,
+      capturePendingQuietPolls: config.capture?.pendingQuietPolls,
+      capturePendingInitialQuietPollsCodex: config.capture?.pendingInitialQuietPollsCodex,
+      captureCodexFinalOnly: config.capture?.codexFinalOnly,
+      captureStaleAlertMs: config.capture?.staleAlertMs,
+      captureFilterPromptEcho: config.capture?.filterPromptEcho,
+      capturePromptEchoMaxPolls: config.capture?.promptEchoMaxPolls,
+      captureHistoryLines: config.capture?.historyLines,
+      captureRedrawTailLines: config.capture?.redrawTailLines,
+      longOutputThreadThreshold: config.capture?.longOutputThreadThreshold,
+      captureProgressOutput: config.capture?.progressOutput,
+      keepChannelOnStop: getConfigValue('keepChannelOnStop'),
+      messagingPlatform: config.messagingPlatform,
+      slackBotToken: config.slack?.botToken,
+      slackAppToken: config.slack?.appToken,
+    };
+
+    saveConfig(frozen);
+    console.log(chalk.green('✅ Current effective configuration was frozen into config.json'));
+    console.log(chalk.gray(`   Path: ${getConfigPath()}`));
+    console.log(chalk.gray('   Tip: remove stale shell env vars to avoid confusion in other tools/shells.'));
+    return;
+  }
 
   if (options.show) {
     console.log(chalk.cyan('\n📋 Current configuration:\n'));
