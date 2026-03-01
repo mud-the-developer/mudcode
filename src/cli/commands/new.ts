@@ -2,7 +2,7 @@ import { basename } from 'path';
 import chalk from 'chalk';
 import { stateManager } from '../../state/index.js';
 import { validateConfig, config } from '../../config/index.js';
-import { TmuxManager } from '../../tmux/manager.js';
+import { createTmuxManager } from '../../tmux/factory.js';
 import { agentRegistry } from '../../agents/index.js';
 import {
   buildNextInstanceId,
@@ -31,9 +31,9 @@ export async function newCommand(
   options: TmuxCliOptions & { name?: string; attach?: boolean; instance?: string }
 ) {
   try {
-    ensureTmuxInstalled();
-    validateConfig();
     const effectiveConfig = applyTmuxCliOverrides(config, options);
+    ensureTmuxInstalled(effectiveConfig.tmux);
+    validateConfig();
 
     const isSlack = effectiveConfig.messagingPlatform === 'slack';
     if (!(isSlack ? stateManager.getWorkspaceId() : stateManager.getGuildId())) {
@@ -52,7 +52,7 @@ export async function newCommand(
 
     console.log(chalk.cyan(`\n🚀 mudcode new — ${projectName}\n`));
 
-    const tmux = new TmuxManager(effectiveConfig.tmux.sessionPrefix);
+    const tmux = createTmuxManager(effectiveConfig);
     const prunedProjects = pruneStaleProjects(tmux, effectiveConfig.tmux);
     if (prunedProjects.length > 0) {
       console.log(chalk.yellow(`⚠️ Pruned stale project state: ${prunedProjects.join(', ')}`));
@@ -236,7 +236,7 @@ export async function newCommand(
       const windowName = statusWindowName;
       const attachTarget = `${sessionName}:${windowName}`;
       console.log(chalk.cyan(`\n📺 Attaching to ${attachTarget}...\n`));
-      attachToTmux(sessionName, windowName);
+      attachToTmux(effectiveConfig.tmux, sessionName, windowName);
       return;
     }
 

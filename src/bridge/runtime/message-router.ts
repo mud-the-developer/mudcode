@@ -53,6 +53,7 @@ type MaintenanceCommand =
   | { kind: 'doctor'; fix: boolean }
   | { kind: 'update'; git: boolean }
   | { kind: 'daemon-restart' };
+type CodexLongTaskReportMode = 'off' | 'continue' | 'auto' | 'always';
 
 export class BridgeMessageRouter {
   private routeByMessageId: Map<string, RouteMemory> = new Map();
@@ -169,6 +170,24 @@ export class BridgeMessageRouter {
       return Math.trunc(fromEnv);
     }
     return 30;
+  }
+
+  private resolveSnapshotCaptureHistoryLines(tailLines: number): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_SNAPSHOT_CAPTURE_HISTORY_LINES || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 1 && fromEnv <= 5000) {
+      return Math.max(tailLines, Math.trunc(fromEnv));
+    }
+    return Math.max(tailLines, 120);
+  }
+
+  private shouldUseSnapshotThreadDelivery(payload: string): boolean {
+    if (this.deps.messaging.platform !== 'discord') return false;
+    if (typeof this.deps.messaging.sendLongOutput !== 'function') return false;
+    const fromEnv = Number(process.env.AGENT_DISCORD_SNAPSHOT_LONG_OUTPUT_THREAD_THRESHOLD || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 1200 && fromEnv <= 20000) {
+      return payload.length >= Math.trunc(fromEnv);
+    }
+    return payload.length >= 1800;
   }
 
   private getPendingDepth(projectName: string, agentType: string, instanceId?: string): number {
@@ -296,6 +315,62 @@ export class BridgeMessageRouter {
     return { prompt: augmented, applied: true };
   }
 
+  private resolveCodexLongTaskReportMode(): CodexLongTaskReportMode {
+    const raw = (process.env.AGENT_DISCORD_CODEX_AUTO_LONGTASK_REPORT_MODE || '').trim().toLowerCase();
+    if (raw === 'off' || raw === 'continue' || raw === 'auto' || raw === 'always') {
+      return raw;
+    }
+    if (['1', 'true', 'yes', 'on'].includes(raw)) return 'auto';
+    if (['0', 'false', 'no'].includes(raw)) return 'off';
+    return 'continue';
+  }
+
+  private isCodexContinuationPrompt(prompt: string): boolean {
+    const normalized = prompt.trim().toLowerCase();
+    if (normalized.length === 0) return false;
+    if (normalized === 'continue') return true;
+    if (normalized.startsWith('continue ')) return true;
+    if (normalized === 'go on' || normalized.startsWith('go on ')) return true;
+    if (normalized === 'keep going' || normalized.startsWith('keep going ')) return true;
+    if (normalized === '계속' || normalized.startsWith('계속 ')) return true;
+    if (normalized === '계속해' || normalized.startsWith('계속해 ')) return true;
+    if (normalized === '계속 진행' || normalized.startsWith('계속 진행')) return true;
+    if (normalized === '쭉' || normalized.startsWith('쭉 ')) return true;
+    if (normalized === '진행' || normalized.startsWith('진행 ')) return true;
+    return false;
+  }
+
+  private maybeAugmentCodexPromptForLongTaskReport(prompt: string): { prompt: string; applied: boolean } {
+    if (prompt.trim().length === 0) return { prompt, applied: false };
+    if (/\[mudcode longtask-report\]/i.test(prompt)) return { prompt, applied: false };
+
+    const mode = this.resolveCodexLongTaskReportMode();
+    if (mode === 'off') return { prompt, applied: false };
+
+    const continuationPrompt = this.isCodexContinuationPrompt(prompt);
+    const largeContextPrompt = this.isLargeContextPrompt(prompt);
+    const shouldApply =
+      mode === 'always' ||
+      (mode === 'auto' && (continuationPrompt || largeContextPrompt)) ||
+      (mode === 'continue' && continuationPrompt);
+    if (!shouldApply) return { prompt, applied: false };
+
+    const hint = [
+      '[mudcode longtask-report]',
+      'Execution policy for long tasks:',
+      '- Keep going autonomously until done or a hard blocker appears.',
+      '- Do not ask for intermediate confirmation unless a manual decision/check is required.',
+      '- Final response should be concise and include only:',
+      '  1) Need your check (manual actions only, or "none")',
+      '  2) Changes (file/behavior deltas only)',
+      '  3) Verification (commands run + pass/fail)',
+      '[/mudcode longtask-report]',
+    ].join('\n');
+
+    const augmented = `${prompt.trimEnd()}\n\n${hint}`;
+    return { prompt: augmented, applied: true };
+  }
+
   private shouldRetryCodexSubmit(sessionName: string, windowName: string, prompt: string): boolean {
     try {
       const captureRaw = this.deps.tmux.capturePaneFromWindow(sessionName, windowName, 'codex');
@@ -403,10 +478,13 @@ export class BridgeMessageRouter {
     windowName: string;
   }): Promise<void> {
     try {
+      const tailLineLimit = this.resolveSnapshotTailLines();
+      const captureHistoryLines = this.resolveSnapshotCaptureHistoryLines(tailLineLimit);
       const pane = this.deps.tmux.capturePaneFromWindow(
         params.normalizedProject.tmuxSession,
         params.windowName,
         params.resolvedAgentType,
+        captureHistoryLines,
       );
       const snapshot = cleanCapture(pane);
       if (!snapshot || snapshot.trim().length === 0) {
@@ -418,16 +496,16 @@ export class BridgeMessageRouter {
       }
 
       const lines = snapshot.split('\n');
-      const tailLines = lines.slice(-this.resolveSnapshotTailLines());
+      const tailLines = lines.slice(-tailLineLimit);
       const title =
         tailLines.length < lines.length
           ? `📸 Snapshot \`${params.projectName}/${params.instanceId}\` (last ${tailLines.length}/${lines.length} lines)`
           : `📸 Snapshot \`${params.projectName}/${params.instanceId}\``;
       const payload = `${title}\n\`\`\`text\n${tailLines.join('\n')}\n\`\`\``;
-      const split = this.deps.messaging.platform === 'slack' ? splitForSlack : splitForDiscord;
-      for (const chunk of split(payload)) {
-        if (chunk.trim().length === 0) continue;
-        await this.deps.messaging.sendToChannel(params.channelId, chunk);
+      if (this.shouldUseSnapshotThreadDelivery(payload)) {
+        await this.deps.messaging.sendLongOutput!(params.channelId, payload);
+      } else {
+        await this.deps.messaging.sendToChannel(params.channelId, payload);
       }
     } catch (error) {
       await this.deps.messaging.sendToChannel(params.channelId, this.buildDeliveryFailureGuidance(params.projectName, error));
@@ -445,19 +523,35 @@ export class BridgeMessageRouter {
   private formatDoctorSummary(result: DoctorResult): string {
     const warnCount = result.issues.filter((issue) => issue.level === 'warn').length;
     const failCount = result.issues.filter((issue) => issue.level === 'fail').length;
+    const contractIssues = result.issues.filter((issue) => issue.code.startsWith('event-contract'));
     const issueLines = result.issues
       .slice(0, 4)
       .map((issue) => `- [${issue.level.toUpperCase()}] ${issue.code}: ${issue.message}`);
     const fixLines = result.fixes
       .slice(0, 4)
       .map((fix) => `- ${fix.code}: ${fix.message}`);
+    const contractLines = contractIssues
+      .slice(0, 3)
+      .map((issue) => `- [${issue.level.toUpperCase()}] ${issue.code}: ${issue.message}`);
 
     const lines = [
       '🩺 **Mudcode Doctor**',
       `result: ${result.ok ? '✅ ok' : '❌ fail'}${result.fixed ? ' (auto-fixed)' : ''}`,
       `issues: fail=${failCount}, warn=${warnCount}`,
+      `contract: ${contractIssues.length > 0 ? `${contractIssues.length} issue(s)` : 'clean'}`,
+      `progress modes: off=${result.summary.runtimeProgressModeOff ?? 0}, thread=${result.summary.runtimeProgressModeThread ?? 0}, channel=${result.summary.runtimeProgressModeChannel ?? 0}, unknown=${result.summary.runtimeProgressModeUnknown ?? 0}`,
+      `codex channel-mode: ${result.summary.runtimeCodexProgressModeChannel ?? 0}`,
       `effective threshold: \`${result.summary.effectiveThreshold ?? 'unset'}\``,
     ];
+
+    if (contractLines.length > 0) {
+      lines.push('');
+      lines.push('contract highlights:');
+      lines.push(...contractLines);
+      if (contractIssues.length > contractLines.length) {
+        lines.push(`- ... ${contractIssues.length - contractLines.length} more`);
+      }
+    }
 
     if (issueLines.length > 0) {
       lines.push('');
@@ -1059,7 +1153,13 @@ export class BridgeMessageRouter {
                 `🧩 [${projectName}/${resolvedAgentType}] auto sub-agent hint injected (${withSkillHint.length} chars)`,
               );
             }
-            promptToSend = subAgentHinted.prompt;
+            const longTaskHinted = this.maybeAugmentCodexPromptForLongTaskReport(subAgentHinted.prompt);
+            if (longTaskHinted.applied) {
+              console.log(
+                `🧭 [${projectName}/${resolvedAgentType}] long-task report hint injected`,
+              );
+            }
+            promptToSend = longTaskHinted.prompt;
           } else {
             promptToSend = sanitized;
           }

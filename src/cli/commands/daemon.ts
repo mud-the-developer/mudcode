@@ -3,7 +3,7 @@ import { ensureDaemonRunning, getDaemonStatus, stopDaemon, stopDaemonAndWait } f
 import { ensureTmuxInstalled } from '../common/tmux.js';
 import { config } from '../../config/index.js';
 import { stateManager } from '../../state/index.js';
-import { TmuxManager } from '../../tmux/manager.js';
+import { createTmuxManager } from '../../tmux/factory.js';
 import { autoTuneCaptureSettings } from '../common/capture-autotune.js';
 
 export type DaemonCommandOptions = {
@@ -12,7 +12,7 @@ export type DaemonCommandOptions = {
 };
 
 function clearManagedTmuxSessions(): { cleared: string[]; failed: string[] } {
-  const tmux = new TmuxManager(config.tmux.sessionPrefix);
+  const tmux = createTmuxManager(config);
   const stateSessions = stateManager
     .listProjects()
     .map((project) => project.tmuxSession)
@@ -53,7 +53,7 @@ export async function daemonCommand(action: string, options: DaemonCommandOption
 
   switch (action) {
     case 'start': {
-      ensureTmuxInstalled();
+      ensureTmuxInstalled(config.tmux);
       runCaptureAutoTune();
       const result = await ensureDaemonRunning();
       if (result.alreadyRunning) {
@@ -87,7 +87,7 @@ export async function daemonCommand(action: string, options: DaemonCommandOption
       break;
     }
     case 'restart': {
-      ensureTmuxInstalled();
+      ensureTmuxInstalled(config.tmux);
       const status = await getDaemonStatus();
       if (status.running) {
         const stopped = await stopDaemonAndWait();

@@ -1,14 +1,14 @@
 import chalk from 'chalk';
 import { stateManager } from '../../state/index.js';
 import { config } from '../../config/index.js';
-import { TmuxManager } from '../../tmux/manager.js';
+import { createTmuxManager } from '../../tmux/factory.js';
 import { listProjectInstances } from '../../state/instances.js';
 import { agentRegistry } from '../../agents/index.js';
 import { resolveProjectWindowName } from '../common/tmux.js';
 
 export function listCommand(options?: { prune?: boolean }) {
   const projects = stateManager.listProjects();
-  const tmux = new TmuxManager(config.tmux.sessionPrefix);
+  const tmux = createTmuxManager(config);
   const prune = !!options?.prune;
 
   if (projects.length === 0) {

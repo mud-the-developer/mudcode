@@ -6,6 +6,7 @@ import { DiscordClient } from './discord/client.js';
 import { SlackClient } from './slack/client.js';
 import type { MessagingClient } from './messaging/interface.js';
 import { TmuxManager } from './tmux/manager.js';
+import { createTmuxManager } from './tmux/factory.js';
 import { stateManager as defaultStateManager } from './state/index.js';
 import { config as defaultConfig } from './config/index.js';
 import { agentRegistry as defaultAgentRegistry, AgentRegistry } from './agents/index.js';
@@ -61,9 +62,7 @@ export class AgentBridge {
     this.messaging = deps?.messaging || this.createMessagingClient();
     this.tmux =
       deps?.tmux ||
-      new TmuxManager(this.bridgeConfig.tmux.sessionPrefix, undefined, {
-        captureHistoryLines: this.bridgeConfig.capture?.historyLines,
-      });
+      createTmuxManager(this.bridgeConfig);
     this.stateManager = deps?.stateManager || defaultStateManager;
     this.registry = deps?.registry || defaultAgentRegistry;
     this.promptRefiner = new PromptRefiner(this.bridgeConfig.promptRefiner);

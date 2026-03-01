@@ -25,7 +25,7 @@ const mocks = vi.hoisted(() => {
     windowExists: vi.fn().mockReturnValue(true),
     capturePaneFromWindow: vi.fn().mockReturnValue(''),
   };
-  const TmuxManager = vi.fn().mockImplementation(function MockTmuxManager() {
+  const createTmuxManager = vi.fn().mockImplementation(function MockTmuxManager() {
     return tmux;
   });
   const fetchMock = vi.fn();
@@ -37,7 +37,7 @@ const mocks = vi.hoisted(() => {
     stateManager,
     getDaemonStatus,
     tmux,
-    TmuxManager,
+    createTmuxManager,
     fetchMock,
   };
 });
@@ -57,13 +57,21 @@ vi.mock('../../../src/app/daemon-service.js', () => ({
 }));
 
 vi.mock('../../../src/tmux/manager.js', () => ({
-  TmuxManager: mocks.TmuxManager,
+  TmuxManager: vi.fn(),
+}));
+
+vi.mock('../../../src/tmux/factory.js', () => ({
+  createTmuxManager: mocks.createTmuxManager,
 }));
 
 describe('healthCommand', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     process.exitCode = 0;
+    delete process.env.AGENT_DISCORD_CODEX_EVENT_ONLY;
+    delete process.env.AGENT_DISCORD_CODEX_EVENT_PROGRESS_MODE;
+    delete process.env.AGENT_DISCORD_EVENT_PROGRESS_FORWARD;
+    delete process.env.AGENT_DISCORD_EVENT_PROGRESS_MODE_STALE_WARN_MS;
     mocks.stateManager.listProjects.mockReturnValue([]);
     mocks.getDaemonStatus.mockResolvedValue({
       running: true,
@@ -82,6 +90,10 @@ describe('healthCommand', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    delete process.env.AGENT_DISCORD_CODEX_EVENT_ONLY;
+    delete process.env.AGENT_DISCORD_CODEX_EVENT_PROGRESS_MODE;
+    delete process.env.AGENT_DISCORD_EVENT_PROGRESS_FORWARD;
+    delete process.env.AGENT_DISCORD_EVENT_PROGRESS_MODE_STALE_WARN_MS;
   });
 
   it('reports healthy summary in json mode when checks pass', async () => {
@@ -149,6 +161,8 @@ describe('healthCommand', () => {
             pendingDepth: 1,
             oldestStage: 'processing',
             oldestAgeMs: 2000,
+            eventProgressMode: 'thread',
+            eventProgressModeTurnId: 'msg-runtime-1',
           },
         ],
       }),
@@ -164,6 +178,8 @@ describe('healthCommand', () => {
     expect(payload.instances[0].projectName).toBe('demo');
     expect(payload.instances[0].runtime.pendingDepth).toBe(1);
     expect(payload.instances[0].runtime.oldestStage).toBe('processing');
+    expect(payload.instances[0].runtime.eventProgressMode).toBe('thread');
+    expect(payload.instances[0].runtime.eventProgressModeTurnId).toBe('msg-runtime-1');
     expect(payload.instances[0].paneWorkingHint).toBe(true);
     expect(mocks.fetchMock).toHaveBeenCalled();
 
@@ -277,6 +293,179 @@ describe('healthCommand', () => {
       payload.checks.some(
         (c: { name?: string; level?: string; detail?: string }) =>
           c.name === 'hook:demo/codex' && c.level === 'warn' && String(c.detail || '').includes('ignored 3'),
+      ),
+    ).toBe(true);
+
+    logSpy.mockRestore();
+  });
+
+  it('reports lifecycle strict rejects from runtime status', async () => {
+    mocks.stateManager.listProjects.mockReturnValue([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'bridge',
+        agents: { codex: true },
+        discordChannels: { codex: 'ch-1' },
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'ch-1',
+          },
+        },
+        createdAt: new Date(),
+        lastActive: new Date(),
+      },
+    ]);
+    mocks.fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        generatedAt: new Date().toISOString(),
+        instances: [
+          {
+            projectName: 'demo',
+            instanceId: 'codex',
+            agentType: 'codex',
+            pendingDepth: 0,
+            lifecycleRejectedEventCount: 2,
+            lifecycleRejectedEventTypes: { 'session.final': 2 },
+            lifecycleRejectedLastAt: new Date().toISOString(),
+          },
+        ],
+      }),
+    });
+
+    const { healthCommand } = await import('../../../src/cli/commands/health.js');
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await healthCommand({ json: true });
+
+    const payload = JSON.parse(String(logSpy.mock.calls[0]?.[0] || '{}'));
+    expect(payload.instances[0].runtime.lifecycleRejectedEventCount).toBe(2);
+    expect(
+      payload.checks.some(
+        (c: { name?: string; level?: string; detail?: string }) =>
+          c.name === 'contract:demo/codex' && c.level === 'warn' && String(c.detail || '').includes('rejected 2'),
+      ),
+    ).toBe(true);
+
+    logSpy.mockRestore();
+  });
+
+  it('warns when codex event-only runtime mode is channel', async () => {
+    process.env.AGENT_DISCORD_CODEX_EVENT_ONLY = '1';
+    process.env.AGENT_DISCORD_CODEX_EVENT_PROGRESS_MODE = 'thread';
+    mocks.stateManager.listProjects.mockReturnValue([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'bridge',
+        agents: { codex: true },
+        discordChannels: { codex: 'ch-1' },
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'ch-1',
+          },
+        },
+        createdAt: new Date(),
+        lastActive: new Date(),
+      },
+    ]);
+    mocks.fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        generatedAt: new Date().toISOString(),
+        instances: [
+          {
+            projectName: 'demo',
+            instanceId: 'codex',
+            agentType: 'codex',
+            pendingDepth: 1,
+            oldestStage: 'processing',
+            oldestAgeMs: 2000,
+            eventProgressMode: 'channel',
+            eventProgressModeAgeMs: 1500,
+          },
+        ],
+      }),
+    });
+
+    const { healthCommand } = await import('../../../src/cli/commands/health.js');
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await healthCommand({ json: true });
+
+    const payload = JSON.parse(String(logSpy.mock.calls[0]?.[0] || '{}'));
+    const contractWarns = payload.checks.filter((c: { name?: string; level?: string; detail?: string }) =>
+      c.name === 'contract:demo/codex' &&
+      c.level === 'warn' &&
+      (String(c.detail || '').includes('progressMode=channel') || String(c.detail || '').includes('differs from expected')),
+    );
+    expect(contractWarns.length).toBeGreaterThanOrEqual(1);
+
+    logSpy.mockRestore();
+  });
+
+  it('warns when progress mode runtime signal is stale while pending', async () => {
+    process.env.AGENT_DISCORD_EVENT_PROGRESS_MODE_STALE_WARN_MS = '5000';
+    mocks.stateManager.listProjects.mockReturnValue([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'bridge',
+        agents: { codex: true },
+        discordChannels: { codex: 'ch-1' },
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'ch-1',
+          },
+        },
+        createdAt: new Date(),
+        lastActive: new Date(),
+      },
+    ]);
+    mocks.fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        generatedAt: new Date().toISOString(),
+        instances: [
+          {
+            projectName: 'demo',
+            instanceId: 'codex',
+            agentType: 'codex',
+            pendingDepth: 2,
+            oldestStage: 'processing',
+            oldestAgeMs: 3000,
+            eventProgressMode: 'thread',
+            eventProgressModeAgeMs: 12000,
+          },
+        ],
+      }),
+    });
+
+    const { healthCommand } = await import('../../../src/cli/commands/health.js');
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await healthCommand({ json: true });
+
+    const payload = JSON.parse(String(logSpy.mock.calls[0]?.[0] || '{}'));
+    expect(
+      payload.checks.some(
+        (c: { name?: string; level?: string; detail?: string }) =>
+          c.name === 'contract:demo/codex' &&
+          c.level === 'warn' &&
+          String(c.detail || '').includes('signal stale'),
       ),
     ).toBe(true);
 

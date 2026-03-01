@@ -94,6 +94,10 @@ describe('ConfigManager', () => {
         token: 'stored-token-123',
         channelId: 'stored-channel-123',
         serverId: 'stored-guild-456',
+        tmuxTransport: 'ssh',
+        tmuxSshTarget: 'user@remote',
+        tmuxSshIdentity: '/home/test/.ssh/id_ed25519',
+        tmuxSshPort: 2222,
         hookServerPort: 9999,
         defaultAgentCli: 'gemini',
         opencodePermissionMode: 'allow',
@@ -120,6 +124,10 @@ describe('ConfigManager', () => {
       expect(config.discord.token).toBe('stored-token-123');
       expect(config.discord.channelId).toBe('stored-channel-123');
       expect(config.discord.guildId).toBe('stored-guild-456');
+      expect(config.tmux.transport).toBe('ssh');
+      expect(config.tmux.sshTarget).toBe('user@remote');
+      expect(config.tmux.sshIdentity).toBe('/home/test/.ssh/id_ed25519');
+      expect(config.tmux.sshPort).toBe(2222);
       expect(config.hookServerPort).toBe(9999);
       expect(config.defaultAgentCli).toBe('gemini');
       expect(config.opencode?.permissionMode).toBe('allow');
@@ -146,6 +154,9 @@ describe('ConfigManager', () => {
       env.set('DISCORD_CHANNEL_ID', 'env-channel-789');
       env.set('DISCORD_GUILD_ID', 'env-guild-abc');
       env.set('HOOK_SERVER_PORT', '7777');
+      env.set('TMUX_TRANSPORT', 'ssh');
+      env.set('TMUX_SSH_TARGET', 'user@env-host');
+      env.set('TMUX_SSH_PORT', '2201');
       env.set('MUDCODE_PROMPT_REFINER_MODE', 'shadow');
       env.set('MUDCODE_PROMPT_REFINER_LOG_PATH', '/tmp/env-shadow-log.jsonl');
       env.set('MUDCODE_PROMPT_REFINER_MAX_LOG_CHARS', '7000');
@@ -167,6 +178,9 @@ describe('ConfigManager', () => {
       expect(config.discord.token).toBe('env-token-789');
       expect(config.discord.channelId).toBe('env-channel-789');
       expect(config.discord.guildId).toBe('env-guild-abc');
+      expect(config.tmux.transport).toBe('ssh');
+      expect(config.tmux.sshTarget).toBe('user@env-host');
+      expect(config.tmux.sshPort).toBe(2201);
       expect(config.hookServerPort).toBe(7777);
       expect(config.promptRefiner?.mode).toBe('shadow');
       expect(config.promptRefiner?.logPath).toBe('/tmp/env-shadow-log.jsonl');
@@ -318,6 +332,41 @@ describe('ConfigManager', () => {
       const manager = new ConfigManager(storage, env, configDir);
 
       expect(() => manager.validateConfig()).toThrow(/OPENCODE_PERMISSION_MODE/);
+    });
+
+    it('validateConfig throws for invalid TMUX_TRANSPORT value', () => {
+      const storage = new MockStorage();
+      const env = new MockEnvironment();
+      env.set('DISCORD_BOT_TOKEN', 'valid-token');
+      env.set('TMUX_TRANSPORT', 'remote');
+
+      const manager = new ConfigManager(storage, env, configDir);
+
+      expect(() => manager.validateConfig()).toThrow(/TMUX_TRANSPORT/);
+    });
+
+    it('validateConfig throws when TMUX_TRANSPORT=ssh without TMUX_SSH_TARGET', () => {
+      const storage = new MockStorage();
+      const env = new MockEnvironment();
+      env.set('DISCORD_BOT_TOKEN', 'valid-token');
+      env.set('TMUX_TRANSPORT', 'ssh');
+
+      const manager = new ConfigManager(storage, env, configDir);
+
+      expect(() => manager.validateConfig()).toThrow(/TMUX_TRANSPORT=ssh requires TMUX_SSH_TARGET/);
+    });
+
+    it('validateConfig throws for invalid TMUX_SSH_PORT value', () => {
+      const storage = new MockStorage();
+      const env = new MockEnvironment();
+      env.set('DISCORD_BOT_TOKEN', 'valid-token');
+      env.set('TMUX_TRANSPORT', 'ssh');
+      env.set('TMUX_SSH_TARGET', 'user@host');
+      env.set('TMUX_SSH_PORT', '70000');
+
+      const manager = new ConfigManager(storage, env, configDir);
+
+      expect(() => manager.validateConfig()).toThrow(/TMUX_SSH_PORT/);
     });
 
     it('validateConfig throws for invalid MUDCODE_PROMPT_REFINER_MODE value', () => {

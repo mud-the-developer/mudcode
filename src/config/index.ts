@@ -14,6 +14,10 @@ export interface StoredConfig {
   token?: string;
   serverId?: string;
   channelId?: string;
+  tmuxTransport?: 'local' | 'ssh';
+  tmuxSshTarget?: string;
+  tmuxSshIdentity?: string;
+  tmuxSshPort?: number;
   hookServerPort?: number;
   defaultAgentCli?: string;
   opencodePermissionMode?: 'allow' | 'default';
@@ -181,6 +185,22 @@ export class ConfigManager {
               ...(captureProgressOutput !== undefined ? { progressOutput: captureProgressOutput } : {}),
             }
           : undefined;
+      const tmuxTransport = this.resolveTmuxTransport(
+        storedConfig.tmuxTransport,
+        this.env.get('TMUX_TRANSPORT'),
+      );
+      const tmuxSshTarget = this.resolveTmuxSshTarget(
+        storedConfig.tmuxSshTarget,
+        this.env.get('TMUX_SSH_TARGET'),
+      );
+      const tmuxSshIdentity = this.resolveTmuxSshIdentity(
+        storedConfig.tmuxSshIdentity,
+        this.env.get('TMUX_SSH_IDENTITY'),
+      );
+      const tmuxSshPort = this.resolveTmuxSshPort(
+        storedConfig.tmuxSshPort,
+        this.env.get('TMUX_SSH_PORT'),
+      );
 
       const slackBotToken = storedConfig.slackBotToken || this.env.get('SLACK_BOT_TOKEN');
       const slackAppToken = storedConfig.slackAppToken || this.env.get('SLACK_APP_TOKEN');
@@ -203,6 +223,10 @@ export class ConfigManager {
         tmux: {
           sessionPrefix: this.env.get('TMUX_SESSION_PREFIX') || '',
           sharedSessionName: this.env.get('TMUX_SHARED_SESSION_NAME') || 'bridge',
+          ...(tmuxTransport !== undefined ? { transport: tmuxTransport } : {}),
+          ...(tmuxSshTarget !== undefined ? { sshTarget: tmuxSshTarget } : {}),
+          ...(tmuxSshIdentity !== undefined ? { sshIdentity: tmuxSshIdentity } : {}),
+          ...(tmuxSshPort !== undefined ? { sshPort: tmuxSshPort } : {}),
         },
         ...(capture ? { capture } : {}),
         hookServerPort: resolvedHookPort,
@@ -352,6 +376,33 @@ export class ConfigManager {
     return this.parseCaptureProgressOutputCandidate(envValue);
   }
 
+  private resolveTmuxTransport(
+    storedValue: unknown,
+    envValue: string | undefined,
+  ): 'local' | 'ssh' | undefined {
+    const storedCandidate = this.parseTmuxTransportCandidate(storedValue);
+    if (storedCandidate !== undefined) return storedCandidate;
+    return this.parseTmuxTransportCandidate(envValue);
+  }
+
+  private resolveTmuxSshTarget(storedValue: unknown, envValue: string | undefined): string | undefined {
+    const storedCandidate = this.parseTmuxSshTargetCandidate(storedValue);
+    if (storedCandidate !== undefined) return storedCandidate;
+    return this.parseTmuxSshTargetCandidate(envValue);
+  }
+
+  private resolveTmuxSshIdentity(storedValue: unknown, envValue: string | undefined): string | undefined {
+    const storedCandidate = this.parseTmuxSshIdentityCandidate(storedValue);
+    if (storedCandidate !== undefined) return storedCandidate;
+    return this.parseTmuxSshIdentityCandidate(envValue);
+  }
+
+  private resolveTmuxSshPort(storedValue: unknown, envValue: string | undefined): number | undefined {
+    const storedCandidate = this.parseTmuxSshPortCandidate(storedValue);
+    if (storedCandidate !== undefined) return storedCandidate;
+    return this.parseTmuxSshPortCandidate(envValue);
+  }
+
   private parsePromptRefinerModeCandidate(raw: unknown): 'off' | 'shadow' | 'enforce' | undefined {
     if (typeof raw !== 'string') return undefined;
     const normalized = raw.trim().toLowerCase();
@@ -438,6 +489,41 @@ export class ConfigManager {
     return undefined;
   }
 
+  private parseTmuxTransportCandidate(raw: unknown): 'local' | 'ssh' | undefined {
+    if (raw === undefined || raw === null || raw === '') return undefined;
+    if (typeof raw !== 'string') return undefined;
+    const normalized = raw.trim().toLowerCase();
+    if (normalized === 'local' || normalized === 'ssh') return normalized;
+    return undefined;
+  }
+
+  private parseTmuxSshTargetCandidate(raw: unknown): string | undefined {
+    if (raw === undefined || raw === null || raw === '') return undefined;
+    if (typeof raw !== 'string') return undefined;
+    const normalized = raw.trim();
+    if (normalized.length === 0) return undefined;
+    if (/\s/.test(normalized)) return undefined;
+    if (normalized.startsWith('-')) return undefined;
+    return normalized;
+  }
+
+  private parseTmuxSshIdentityCandidate(raw: unknown): string | undefined {
+    if (raw === undefined || raw === null || raw === '') return undefined;
+    if (typeof raw !== 'string') return undefined;
+    const normalized = raw.trim();
+    if (normalized.length === 0) return undefined;
+    if (/\0/.test(normalized)) return undefined;
+    return normalized;
+  }
+
+  private parseTmuxSshPortCandidate(raw: unknown): number | undefined {
+    if (raw === undefined || raw === null || raw === '') return undefined;
+    const value = Number(raw);
+    if (!Number.isInteger(value)) return undefined;
+    if (value < 1 || value > 65535) return undefined;
+    return value;
+  }
+
   private validateRawInputs(): void {
     const errors: string[] = [];
     const storedConfig = this.migrateLegacyStoredLongOutputThreadThreshold(this.loadStoredConfig());
@@ -447,6 +533,76 @@ export class ConfigManager {
       errors.push(
         `MESSAGING_PLATFORM must be "discord" or "slack" (received: ${rawPlatform})`,
       );
+    }
+
+    if (
+      storedConfig.tmuxTransport !== undefined &&
+      this.parseTmuxTransportCandidate(storedConfig.tmuxTransport) === undefined
+    ) {
+      errors.push(
+        `Stored tmuxTransport must be "local" or "ssh" (received: ${String(storedConfig.tmuxTransport)})`,
+      );
+    }
+
+    const rawEnvTmuxTransport = this.env.get('TMUX_TRANSPORT');
+    if (rawEnvTmuxTransport !== undefined && this.parseTmuxTransportCandidate(rawEnvTmuxTransport) === undefined) {
+      errors.push(
+        `TMUX_TRANSPORT must be "local" or "ssh" (received: ${rawEnvTmuxTransport})`,
+      );
+    }
+
+    if (
+      storedConfig.tmuxSshTarget !== undefined &&
+      this.parseTmuxSshTargetCandidate(storedConfig.tmuxSshTarget) === undefined
+    ) {
+      errors.push(
+        `Stored tmuxSshTarget must be a non-empty SSH destination without spaces (received: ${String(storedConfig.tmuxSshTarget)})`,
+      );
+    }
+
+    const rawEnvTmuxSshTarget = this.env.get('TMUX_SSH_TARGET');
+    if (rawEnvTmuxSshTarget !== undefined && this.parseTmuxSshTargetCandidate(rawEnvTmuxSshTarget) === undefined) {
+      errors.push(
+        `TMUX_SSH_TARGET must be a non-empty SSH destination without spaces (received: ${rawEnvTmuxSshTarget})`,
+      );
+    }
+
+    if (
+      storedConfig.tmuxSshIdentity !== undefined &&
+      this.parseTmuxSshIdentityCandidate(storedConfig.tmuxSshIdentity) === undefined
+    ) {
+      errors.push(
+        `Stored tmuxSshIdentity must be a valid non-empty path string (received: ${String(storedConfig.tmuxSshIdentity)})`,
+      );
+    }
+
+    const rawEnvTmuxSshIdentity = this.env.get('TMUX_SSH_IDENTITY');
+    if (rawEnvTmuxSshIdentity !== undefined && this.parseTmuxSshIdentityCandidate(rawEnvTmuxSshIdentity) === undefined) {
+      errors.push(
+        `TMUX_SSH_IDENTITY must be a valid non-empty path string (received: ${rawEnvTmuxSshIdentity})`,
+      );
+    }
+
+    if (
+      storedConfig.tmuxSshPort !== undefined &&
+      this.parseTmuxSshPortCandidate(storedConfig.tmuxSshPort) === undefined
+    ) {
+      errors.push(
+        `Stored tmuxSshPort must be an integer between 1 and 65535 (received: ${String(storedConfig.tmuxSshPort)})`,
+      );
+    }
+
+    const rawEnvTmuxSshPort = this.env.get('TMUX_SSH_PORT');
+    if (rawEnvTmuxSshPort !== undefined && this.parseTmuxSshPortCandidate(rawEnvTmuxSshPort) === undefined) {
+      errors.push(
+        `TMUX_SSH_PORT must be an integer between 1 and 65535 (received: ${rawEnvTmuxSshPort})`,
+      );
+    }
+
+    const effectiveTmuxTransport = this.resolveTmuxTransport(storedConfig.tmuxTransport, rawEnvTmuxTransport);
+    const effectiveTmuxSshTarget = this.resolveTmuxSshTarget(storedConfig.tmuxSshTarget, rawEnvTmuxSshTarget);
+    if (effectiveTmuxTransport === 'ssh' && !effectiveTmuxSshTarget) {
+      errors.push('TMUX_TRANSPORT=ssh requires TMUX_SSH_TARGET (or stored tmuxSshTarget)');
     }
 
     const envPermissionMode = this.env.get('OPENCODE_PERMISSION_MODE');

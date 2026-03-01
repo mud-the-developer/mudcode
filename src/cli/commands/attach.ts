@@ -2,7 +2,7 @@ import { basename } from 'path';
 import chalk from 'chalk';
 import { stateManager } from '../../state/index.js';
 import { config } from '../../config/index.js';
-import { TmuxManager } from '../../tmux/manager.js';
+import { createTmuxManager } from '../../tmux/factory.js';
 import { listProjectInstances, getProjectInstance } from '../../state/instances.js';
 import type { TmuxCliOptions } from '../common/types.js';
 import {
@@ -13,9 +13,9 @@ import {
 } from '../common/tmux.js';
 
 export function attachCommand(projectName: string | undefined, options: TmuxCliOptions & { instance?: string }) {
-  ensureTmuxInstalled();
   const effectiveConfig = applyTmuxCliOverrides(config, options);
-  const tmux = new TmuxManager(effectiveConfig.tmux.sessionPrefix);
+  ensureTmuxInstalled(effectiveConfig.tmux);
+  const tmux = createTmuxManager(effectiveConfig);
 
   if (!projectName) {
     projectName = basename(process.cwd());
@@ -60,5 +60,5 @@ export function attachCommand(projectName: string | undefined, options: TmuxCliO
   }
 
   console.log(chalk.cyan(`\n📺 Attaching to ${attachTarget}...\n`));
-  attachToTmux(sessionName, windowName);
+  attachToTmux(effectiveConfig.tmux, sessionName, windowName);
 }

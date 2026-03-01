@@ -133,6 +133,7 @@ Environment toggles:
 - `AGENT_DISCORD_CODEX_IO_V2_ANNOUNCE=0` to keep transcript logging but disable channel command event posts
 - `AGENT_DISCORD_CODEX_IO_V2_DIR=/path` to change transcript root directory
 - `MUDCODE_CODEX_AUTO_SKILL_LINK=0` to disable automatic skill-link hints
+- `AGENT_DISCORD_CODEX_AUTO_LONGTASK_REPORT_MODE=continue|auto|always|off` to auto-append long-task execution/reporting policy hints (`continue` default)
 
 ## Upgrade / Remove
 

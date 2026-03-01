@@ -472,6 +472,15 @@ describe('TmuxManager', () => {
 
       expect(executor.getLastCommand()).toContain("tmux capture-pane -t 'agent-session:window1.0' -p -S -120");
     });
+
+    it('allows per-call capture history depth override', () => {
+      executor.nextResult = '0\n';
+      process.env.AGENT_DISCORD_CAPTURE_HISTORY_LINES = '120';
+
+      tmux.capturePaneFromWindow('agent-session', 'window1', undefined, 40);
+
+      expect(executor.getLastCommand()).toContain("tmux capture-pane -t 'agent-session:window1.0' -p -S -40");
+    });
   });
 
   describe('setSessionEnv', () => {

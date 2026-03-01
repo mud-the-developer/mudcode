@@ -34,21 +34,39 @@ describe('BridgeCapturePoller', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     process.env.AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY = '0';
+    delete process.env.AGENT_DISCORD_CODEX_EVENT_ONLY;
     delete process.env.AGENT_DISCORD_CAPTURE_PENDING_INITIAL_QUIET_POLLS_CODEX;
     delete process.env.AGENT_DISCORD_CAPTURE_STALE_ALERT_MS;
     delete process.env.AGENT_DISCORD_CAPTURE_FILTER_PROMPT_ECHO;
     delete process.env.AGENT_DISCORD_CAPTURE_PROMPT_ECHO_MAX_POLLS;
     delete process.env.AGENT_DISCORD_CAPTURE_REDRAW_TAIL_LINES;
+    delete process.env.AGENT_DISCORD_CODEX_EVENT_PROGRESS_MODE;
+    delete process.env.AGENT_DISCORD_CODEX_EVENT_PROGRESS_BLOCK_STREAMING;
+    delete process.env.AGENT_DISCORD_CODEX_EVENT_PROGRESS_BLOCK_WINDOW_MS;
+    delete process.env.AGENT_DISCORD_CODEX_EVENT_PROGRESS_BLOCK_MAX_CHARS;
+    delete process.env.AGENT_DISCORD_EVENT_PROGRESS_FORWARD;
+    delete process.env.AGENT_DISCORD_EVENT_PROGRESS_BLOCK_STREAMING;
+    delete process.env.AGENT_DISCORD_EVENT_PROGRESS_BLOCK_WINDOW_MS;
+    delete process.env.AGENT_DISCORD_EVENT_PROGRESS_BLOCK_MAX_CHARS;
   });
 
   afterEach(() => {
     vi.useRealTimers();
     delete process.env.AGENT_DISCORD_CAPTURE_PENDING_INITIAL_QUIET_POLLS_CODEX;
     delete process.env.AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY;
+    delete process.env.AGENT_DISCORD_CODEX_EVENT_ONLY;
     delete process.env.AGENT_DISCORD_CAPTURE_STALE_ALERT_MS;
     delete process.env.AGENT_DISCORD_CAPTURE_FILTER_PROMPT_ECHO;
     delete process.env.AGENT_DISCORD_CAPTURE_PROMPT_ECHO_MAX_POLLS;
     delete process.env.AGENT_DISCORD_CAPTURE_REDRAW_TAIL_LINES;
+    delete process.env.AGENT_DISCORD_CODEX_EVENT_PROGRESS_MODE;
+    delete process.env.AGENT_DISCORD_CODEX_EVENT_PROGRESS_BLOCK_STREAMING;
+    delete process.env.AGENT_DISCORD_CODEX_EVENT_PROGRESS_BLOCK_WINDOW_MS;
+    delete process.env.AGENT_DISCORD_CODEX_EVENT_PROGRESS_BLOCK_MAX_CHARS;
+    delete process.env.AGENT_DISCORD_EVENT_PROGRESS_FORWARD;
+    delete process.env.AGENT_DISCORD_EVENT_PROGRESS_BLOCK_STREAMING;
+    delete process.env.AGENT_DISCORD_EVENT_PROGRESS_BLOCK_WINDOW_MS;
+    delete process.env.AGENT_DISCORD_EVENT_PROGRESS_BLOCK_MAX_CHARS;
   });
 
   it('sends delta output for non-hook instances', async () => {
@@ -473,6 +491,11 @@ describe('BridgeCapturePoller', () => {
   });
 
   it('emits throttled codex session.progress hook while output is still streaming', async () => {
+    process.env.AGENT_DISCORD_CODEX_EVENT_PROGRESS_MODE = 'thread';
+    process.env.AGENT_DISCORD_CODEX_EVENT_PROGRESS_BLOCK_STREAMING = '1';
+    process.env.AGENT_DISCORD_CODEX_EVENT_PROGRESS_BLOCK_WINDOW_MS = '320';
+    process.env.AGENT_DISCORD_CODEX_EVENT_PROGRESS_BLOCK_MAX_CHARS = '1700';
+
     const stateManager = createStateManager([
       {
         projectName: 'demo',
@@ -531,8 +554,227 @@ describe('BridgeCapturePoller', () => {
       instanceId: 'codex',
       turnId: 'msg-progress-1',
       channelId: 'thread-ch',
-      text: undefined,
+      text: 'assistant: step one',
+      progressMode: 'thread',
+      progressBlockStreaming: true,
+      progressBlockWindowMs: 320,
+      progressBlockMaxChars: 1700,
     });
+
+    poller.stop();
+  });
+
+  it('suppresses direct codex progress delivery in event-only mode and routes through hook events', async () => {
+    process.env.AGENT_DISCORD_CODEX_EVENT_ONLY = '1';
+    process.env.AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY = '0';
+
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'parent-ch',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const tmux = createTmux([
+      'boot line',
+      'boot line\nassistant: step one',
+    ]);
+
+    const pendingTracker = {
+      getPendingChannel: vi.fn().mockReturnValue('thread-ch'),
+      getPendingDepth: vi.fn().mockReturnValue(1),
+      getPendingMessageId: vi.fn().mockReturnValue('msg-event-only-progress-1'),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+    } as any;
+    const eventHookClient = {
+      enabled: true,
+      post: vi.fn().mockResolvedValue(true),
+      emitCodexStart: vi.fn().mockResolvedValue(true),
+      emitCodexProgress: vi.fn().mockResolvedValue(true),
+      emitCodexFinal: vi.fn().mockResolvedValue(true),
+      emitCodexError: vi.fn().mockResolvedValue(true),
+    } as any;
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      eventHookClient,
+      intervalMs: 300,
+    });
+
+    poller.start();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(eventHookClient.emitCodexProgress).toHaveBeenCalledTimes(1);
+    expect(eventHookClient.emitCodexProgress).toHaveBeenCalledWith({
+      projectName: 'demo',
+      instanceId: 'codex',
+      turnId: 'msg-event-only-progress-1',
+      channelId: 'thread-ch',
+      text: 'assistant: step one',
+    });
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
+
+    poller.stop();
+  });
+
+  it('emits codex session.final lifecycle event in event-only mode even without final-only buffering', async () => {
+    process.env.AGENT_DISCORD_CODEX_EVENT_ONLY = '1';
+    process.env.AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY = '0';
+
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'parent-ch',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const tmux = createTmux([
+      'boot line',
+      'boot line\nassistant: step one',
+      'boot line\nassistant: step one',
+      'boot line\nassistant: step one',
+    ]);
+
+    let pendingDepth = 1;
+    const pendingTracker = {
+      getPendingChannel: vi.fn().mockImplementation(() => (pendingDepth > 0 ? 'thread-ch' : undefined)),
+      getPendingDepth: vi.fn().mockImplementation(() => pendingDepth),
+      getPendingMessageId: vi.fn().mockImplementation(() => (pendingDepth > 0 ? 'msg-event-only-final-1' : undefined)),
+      markCompleted: vi.fn().mockImplementation(async () => {
+        pendingDepth = 0;
+      }),
+    } as any;
+    const eventHookClient = {
+      enabled: true,
+      post: vi.fn().mockResolvedValue(true),
+      emitCodexStart: vi.fn().mockResolvedValue(true),
+      emitCodexProgress: vi.fn().mockResolvedValue(true),
+      emitCodexFinal: vi.fn().mockResolvedValue(true),
+      emitCodexError: vi.fn().mockResolvedValue(true),
+    } as any;
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      eventHookClient,
+      intervalMs: 300,
+    });
+
+    poller.start();
+    await Promise.resolve();
+
+    await vi.advanceTimersByTimeAsync(300); // output observed via progress event only
+    await vi.advanceTimersByTimeAsync(300); // quiet #1 while pending
+    await vi.advanceTimersByTimeAsync(300); // quiet #2 -> markCompleted
+    await vi.advanceTimersByTimeAsync(300); // pending=0 -> emit final lifecycle
+
+    expect(pendingTracker.markCompleted).toHaveBeenCalledWith('demo', 'codex', 'codex');
+    expect(eventHookClient.emitCodexFinal).toHaveBeenCalledWith({
+      projectName: 'demo',
+      instanceId: 'codex',
+      turnId: 'msg-event-only-final-1',
+      channelId: 'parent-ch',
+      text: '',
+    });
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
+
+    poller.stop();
+  });
+
+  it('does not fall back to direct channel output when codex final hook fails in event-only mode', async () => {
+    process.env.AGENT_DISCORD_CODEX_EVENT_ONLY = '1';
+    delete process.env.AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY;
+
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'parent-ch',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const tmux = createTmux([
+      'boot line',
+      'boot line\nassistant: step one',
+      'boot line\nassistant: step one',
+      'boot line\nassistant: step one',
+      'boot line\nassistant: step one',
+      'boot line\nassistant: step one',
+    ]);
+
+    let pendingDepth = 1;
+    const pendingTracker = {
+      getPendingChannel: vi.fn().mockImplementation(() => (pendingDepth > 0 ? 'thread-ch' : undefined)),
+      getPendingDepth: vi.fn().mockImplementation(() => pendingDepth),
+      getPendingMessageId: vi.fn().mockImplementation(() => (pendingDepth > 0 ? 'msg-event-only-fail-1' : undefined)),
+      markCompleted: vi.fn().mockImplementation(async () => {
+        pendingDepth = 0;
+      }),
+    } as any;
+    const eventHookClient = {
+      enabled: true,
+      post: vi.fn().mockResolvedValue(true),
+      emitCodexStart: vi.fn().mockResolvedValue(true),
+      emitCodexProgress: vi.fn().mockResolvedValue(true),
+      emitCodexFinal: vi.fn().mockResolvedValue(false),
+      emitCodexError: vi.fn().mockResolvedValue(true),
+    } as any;
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      eventHookClient,
+      intervalMs: 300,
+    });
+
+    poller.start();
+    await Promise.resolve();
+
+    await vi.advanceTimersByTimeAsync(300); // output buffered
+    await vi.advanceTimersByTimeAsync(300); // quiet #1 while pending
+    await vi.advanceTimersByTimeAsync(300); // quiet #2 -> markCompleted
+    await vi.advanceTimersByTimeAsync(300); // final-only flush quiet #1
+    await vi.advanceTimersByTimeAsync(300); // final-only flush quiet #2 -> attempt final hook (fails)
+
+    expect(eventHookClient.emitCodexFinal).toHaveBeenCalled();
+    expect(messaging.sendToChannel).not.toHaveBeenCalled();
 
     poller.stop();
   });

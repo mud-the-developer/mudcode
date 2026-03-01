@@ -61,6 +61,25 @@ export interface BridgeConfig {
      * Full session name becomes `${sessionPrefix}${sharedSessionName}`.
      */
     sharedSessionName?: string;
+    /**
+     * tmux command transport.
+     * - local: execute tmux on the local machine
+     * - ssh: execute tmux on a remote host over SSH
+     */
+    transport?: 'local' | 'ssh';
+    /**
+     * SSH destination for remote tmux transport (e.g. "user@host").
+     * Required when `transport` is "ssh".
+     */
+    sshTarget?: string;
+    /**
+     * Optional SSH identity file path (`ssh -i`).
+     */
+    sshIdentity?: string;
+    /**
+     * Optional SSH port (`ssh -p`).
+     */
+    sshPort?: number;
   };
   capture?: {
     /**

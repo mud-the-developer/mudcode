@@ -2,7 +2,7 @@ import type { ProjectState } from '../../types/index.js';
 import { config, getConfigValue, saveConfig } from '../../config/index.js';
 import { stateManager } from '../../state/index.js';
 import { listProjectInstances, normalizeProjectState } from '../../state/instances.js';
-import { TmuxManager } from '../../tmux/manager.js';
+import { createTmuxManager } from '../../tmux/factory.js';
 import { cleanCapture } from '../../capture/parser.js';
 
 export type CaptureTuning = {
@@ -50,7 +50,7 @@ function resolveWindowName(project: ProjectState, instanceId: string): string {
 }
 
 export function autoTuneCaptureSettings(): CaptureAutoTuneResult {
-  const tmux = new TmuxManager(config.tmux.sessionPrefix);
+  const tmux = createTmuxManager(config);
   const projects = stateManager.listProjects();
 
   let scannedInstances = 0;

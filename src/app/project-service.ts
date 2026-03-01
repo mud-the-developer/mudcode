@@ -2,7 +2,7 @@ import { request as httpRequest } from 'http';
 import { AgentBridge } from '../index.js';
 import { stateManager, type ProjectState } from '../state/index.js';
 import type { BridgeConfig, ProjectInstanceState } from '../types/index.js';
-import { TmuxManager } from '../tmux/manager.js';
+import { createTmuxManager } from '../tmux/factory.js';
 import { agentRegistry } from '../agents/index.js';
 import { normalizeProjectState } from '../state/instances.js';
 import { buildAgentLaunchEnv, buildExportPrefix, withClaudePluginDir } from '../policy/agent-launch.js';
@@ -76,7 +76,7 @@ export async function resumeProjectInstance(params: {
   const infoMessages: string[] = [];
   const warningMessages: string[] = [];
 
-  const tmux = new TmuxManager(params.config.tmux.sessionPrefix);
+  const tmux = createTmuxManager(params.config);
   const fullSessionName = params.project.tmuxSession;
   const prefix = params.config.tmux.sessionPrefix;
   if (fullSessionName.startsWith(prefix)) {

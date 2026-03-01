@@ -1,7 +1,7 @@
 import chalk from 'chalk';
 import { stateManager } from '../../state/index.js';
 import { config, getConfigPath } from '../../config/index.js';
-import { TmuxManager } from '../../tmux/manager.js';
+import { createTmuxManager } from '../../tmux/factory.js';
 import { listProjectInstances } from '../../state/instances.js';
 import { agentRegistry } from '../../agents/index.js';
 import { getDaemonStatus } from '../../app/daemon-service.js';
@@ -11,7 +11,7 @@ import { applyTmuxCliOverrides } from '../common/tmux.js';
 export async function statusCommand(options: TmuxCliOptions) {
   const effectiveConfig = applyTmuxCliOverrides(config, options);
   const projects = stateManager.listProjects();
-  const tmux = new TmuxManager(effectiveConfig.tmux.sessionPrefix);
+  const tmux = createTmuxManager(effectiveConfig);
   const sessions = tmux.listSessions();
   const daemonStatus = await getDaemonStatus().catch(() => undefined);
 
@@ -22,6 +22,13 @@ export async function statusCommand(options: TmuxCliOptions) {
   console.log(chalk.gray(`   Server ID: ${stateManager.getGuildId() || '(not configured)'}`));
   console.log(chalk.gray(`   Token: ${config.discord.token ? '****' + config.discord.token.slice(-4) : '(not set)'}`));
   console.log(chalk.gray(`   Hook Port: ${config.hookServerPort || 18470}`));
+  console.log(chalk.gray(`   tmux transport: ${effectiveConfig.tmux.transport || 'local'}`));
+  if (effectiveConfig.tmux.transport === 'ssh') {
+    console.log(chalk.gray(`   tmux ssh target: ${effectiveConfig.tmux.sshTarget || '(not set)'}`));
+    if (effectiveConfig.tmux.sshPort) {
+      console.log(chalk.gray(`   tmux ssh port: ${effectiveConfig.tmux.sshPort}`));
+    }
+  }
   if (daemonStatus) {
     console.log(
       chalk.gray(

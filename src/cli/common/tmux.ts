@@ -11,26 +11,43 @@ import {
   normalizeProjectState,
 } from '../../state/instances.js';
 import { escapeShellArg } from '../../infra/shell-escape.js';
+import { buildSshExecCommand } from '../../infra/ssh.js';
 import { resolveProjectWindowName, toSharedWindowName } from '../../policy/window-naming.js';
 import type { TmuxCliOptions } from './types.js';
 
 export { escapeShellArg, resolveProjectWindowName, toSharedWindowName };
 
-export function attachToTmux(sessionName: string, windowName?: string): void {
+function isSshTmuxTransport(tmuxConfig: BridgeConfig['tmux']): boolean {
+  return tmuxConfig.transport === 'ssh' && typeof tmuxConfig.sshTarget === 'string' && tmuxConfig.sshTarget.trim().length > 0;
+}
+
+function wrapTmuxCommand(tmuxConfig: BridgeConfig['tmux'], tmuxCommand: string): string {
+  if (!isSshTmuxTransport(tmuxConfig)) {
+    return tmuxCommand;
+  }
+  return buildSshExecCommand(tmuxConfig.sshTarget!.trim(), tmuxCommand, {
+    port: tmuxConfig.sshPort,
+    identity: tmuxConfig.sshIdentity,
+  });
+}
+
+export function attachToTmux(tmuxConfig: BridgeConfig['tmux'], sessionName: string, windowName?: string): void {
   const sessionTarget = sessionName;
   const windowTarget = windowName ? `${sessionName}:${windowName}` : undefined;
   const tmuxAction = process.env.TMUX ? 'switch-client' : 'attach-session';
+  const sessionCommand = wrapTmuxCommand(tmuxConfig, `tmux ${tmuxAction} -t ${escapeShellArg(sessionTarget)}`);
 
   if (!windowTarget) {
-    execSync(`tmux ${tmuxAction} -t ${escapeShellArg(sessionTarget)}`, { stdio: 'inherit' });
+    execSync(sessionCommand, { stdio: 'inherit' });
     return;
   }
 
+  const windowCommand = wrapTmuxCommand(tmuxConfig, `tmux ${tmuxAction} -t ${escapeShellArg(windowTarget)}`);
   try {
-    execSync(`tmux ${tmuxAction} -t ${escapeShellArg(windowTarget)}`, { stdio: 'inherit' });
+    execSync(windowCommand, { stdio: 'inherit' });
   } catch {
     console.log(chalk.yellow(`⚠️ Window '${windowName}' not found, attaching to session '${sessionName}' instead.`));
-    execSync(`tmux ${tmuxAction} -t ${escapeShellArg(sessionTarget)}`, { stdio: 'inherit' });
+    execSync(sessionCommand, { stdio: 'inherit' });
   }
 }
 
@@ -207,11 +224,21 @@ export function cleanupStaleMudcodeTuiProcesses(): number {
   return cleaned;
 }
 
-export function ensureTmuxInstalled(): void {
+export function ensureTmuxInstalled(tmuxConfig?: BridgeConfig['tmux']): void {
   if (process.platform === 'win32') {
     console.error(chalk.red('tmux is required but not available on native Windows.'));
     console.log(chalk.gray('Use WSL, or run on macOS/Linux with tmux installed.'));
     process.exit(1);
+  }
+
+  if (tmuxConfig && isSshTmuxTransport(tmuxConfig)) {
+    try {
+      execSync('ssh -V', { stdio: ['ignore', 'pipe', 'ignore'] });
+      return;
+    } catch {
+      console.error(chalk.red('ssh is required for TMUX_TRANSPORT=ssh but not available in PATH.'));
+      process.exit(1);
+    }
   }
 
   try {
@@ -232,9 +259,11 @@ export function ensureTmuxInstalled(): void {
 
 export function applyTmuxCliOverrides(base: BridgeConfig, options: TmuxCliOptions): BridgeConfig {
   const baseDiscord = base.discord;
+  const baseCapture = base.capture;
   const baseTmux = base.tmux;
   const baseHookPort = base.hookServerPort;
   const baseDefaultAgentCli = base.defaultAgentCli;
+  const basePromptRefiner = base.promptRefiner;
   const baseOpencode = base.opencode;
 
   const sharedNameRaw = options?.tmuxSharedSessionName as string | undefined;
@@ -243,8 +272,10 @@ export function applyTmuxCliOverrides(base: BridgeConfig, options: TmuxCliOption
     discord: baseDiscord,
     ...(base.slack ? { slack: base.slack } : {}),
     ...(base.messagingPlatform ? { messagingPlatform: base.messagingPlatform } : {}),
+    ...(baseCapture ? { capture: baseCapture } : {}),
     hookServerPort: baseHookPort,
     defaultAgentCli: baseDefaultAgentCli,
+    ...(basePromptRefiner ? { promptRefiner: basePromptRefiner } : {}),
     opencode: baseOpencode,
     tmux: {
       ...baseTmux,

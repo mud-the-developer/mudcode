@@ -17,6 +17,33 @@ import { formatDiscordOutput, wrapDiscordCodeblock } from '../formatting/discord
 const LONG_OUTPUT_THREAD_THRESHOLD_MIN = 1200;
 const LONG_OUTPUT_THREAD_THRESHOLD_MAX = 20000;
 const LEGACY_LONG_OUTPUT_THREAD_THRESHOLD_MAX = 100000;
+type EventProgressForwardMode = 'off' | 'thread' | 'channel';
+type EventProgressActiveMode = Exclude<EventProgressForwardMode, 'off'>;
+type EventLifecycleStrictMode = 'off' | 'warn' | 'reject';
+
+interface ProgressBlockState {
+  key: string;
+  projectName: string;
+  agentType: string;
+  instanceId?: string;
+  turnId?: string;
+  channelId: string;
+  mode: EventProgressActiveMode;
+  text: string;
+}
+
+interface ResolvedProgressEventConfig {
+  mode: EventProgressForwardMode;
+  blockStreamingEnabled: boolean;
+  blockWindowMs: number;
+  blockMaxChars: number;
+}
+
+interface EventOnlyProgressGateResult {
+  mode: EventProgressForwardMode;
+  adjusted: boolean;
+  reason?: 'event-only-channel-blocked' | 'event-only-thread-unavailable';
+}
 
 export interface BridgeHookServerDeps {
   port: number;
@@ -32,6 +59,10 @@ export class BridgeHookServer {
     string,
     { count: number; byType: Record<string, number>; lastIgnoredAtMs: number }
   >();
+  private lifecycleRejectedEventsByInstance = new Map<
+    string,
+    { count: number; byType: Record<string, number>; lastRejectedAtMs: number }
+  >();
   private processedEventIds = new Map<string, number>();
   private eventLifecycleByInstance = new Map<
     string,
@@ -44,6 +75,11 @@ export class BridgeHookServer {
     }
   >();
   private latestSeqByTurn = new Map<string, { seq: number; updatedAtMs: number }>();
+  private startedTurnsByKey = new Map<string, number>();
+  private progressBlocksByKey = new Map<string, ProgressBlockState>();
+  private progressBlockTimersByKey = new Map<string, ReturnType<typeof setTimeout>>();
+  private progressTranscriptByTurn = new Map<string, { text: string; updatedAtMs: number }>();
+  private progressModeByTurn = new Map<string, { mode: EventProgressForwardMode; updatedAtMs: number }>();
 
   constructor(private deps: BridgeHookServerDeps) {}
 
@@ -83,6 +119,42 @@ export class BridgeHookServer {
     };
   }
 
+  private markLifecycleRejectedEvent(
+    projectName: string,
+    instanceId: string,
+    eventType?: string,
+  ): void {
+    const key = this.runtimeKey(projectName, instanceId);
+    const current = this.lifecycleRejectedEventsByInstance.get(key) || {
+      count: 0,
+      byType: {},
+      lastRejectedAtMs: Date.now(),
+    };
+    current.count += 1;
+    const typeKey = typeof eventType === 'string' && eventType.trim().length > 0 ? eventType.trim() : 'unknown';
+    current.byType[typeKey] = (current.byType[typeKey] || 0) + 1;
+    current.lastRejectedAtMs = Date.now();
+    this.lifecycleRejectedEventsByInstance.set(key, current);
+  }
+
+  private getLifecycleRejectedEventSnapshot(
+    projectName: string,
+    instanceId: string,
+  ): {
+    lifecycleRejectedEventCount: number;
+    lifecycleRejectedEventTypes: Record<string, number>;
+    lifecycleRejectedLastAt: string;
+  } | undefined {
+    const key = this.runtimeKey(projectName, instanceId);
+    const snapshot = this.lifecycleRejectedEventsByInstance.get(key);
+    if (!snapshot || snapshot.count <= 0) return undefined;
+    return {
+      lifecycleRejectedEventCount: snapshot.count,
+      lifecycleRejectedEventTypes: { ...snapshot.byType },
+      lifecycleRejectedLastAt: new Date(snapshot.lastRejectedAtMs).toISOString(),
+    };
+  }
+
   private resolveIgnoredEventRetentionMs(): number {
     const fromEnv = Number(process.env.AGENT_DISCORD_IGNORED_EVENT_RETENTION_MS || '');
     if (Number.isFinite(fromEnv) && fromEnv >= 60_000) {
@@ -99,6 +171,17 @@ export class BridgeHookServer {
       if (activeInstanceKeys.has(key)) continue;
       if (now - snapshot.lastIgnoredAtMs <= retentionMs) continue;
       this.ignoredEventsByInstance.delete(key);
+    }
+  }
+
+  private pruneLifecycleRejectedEvents(activeInstanceKeys: Set<string>): void {
+    if (this.lifecycleRejectedEventsByInstance.size === 0) return;
+    const now = Date.now();
+    const retentionMs = this.resolveIgnoredEventRetentionMs();
+    for (const [key, snapshot] of this.lifecycleRejectedEventsByInstance.entries()) {
+      if (activeInstanceKeys.has(key)) continue;
+      if (now - snapshot.lastRejectedAtMs <= retentionMs) continue;
+      this.lifecycleRejectedEventsByInstance.delete(key);
     }
   }
 
@@ -142,6 +225,22 @@ export class BridgeHookServer {
     return 100_000;
   }
 
+  private resolveEventLifecycleStrictMode(): EventLifecycleStrictMode {
+    const raw = (process.env.AGENT_DISCORD_EVENT_LIFECYCLE_STRICT_MODE || '').trim().toLowerCase();
+    if (raw === 'off' || raw === 'warn' || raw === 'reject') {
+      return raw;
+    }
+    return 'off';
+  }
+
+  private resolveStartedTurnRetentionMs(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_EVENT_STARTED_TURN_RETENTION_MS || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 5_000) {
+      return Math.trunc(fromEnv);
+    }
+    return 30 * 60 * 1000;
+  }
+
   private pruneProcessedEventIds(nowMs: number): void {
     if (this.processedEventIds.size === 0) return;
     const retentionMs = this.resolveEventDedupeRetentionMs();
@@ -174,6 +273,64 @@ export class BridgeHookServer {
       if (oldest.done) return;
       this.latestSeqByTurn.delete(oldest.value);
     }
+  }
+
+  private buildTurnLifecycleKey(params: {
+    projectName: string;
+    agentType: string;
+    instanceId?: string;
+    turnId?: string;
+  }): string | undefined {
+    const turnId = params.turnId?.trim();
+    if (!turnId) return undefined;
+    return `${params.projectName}:${params.agentType}:${params.instanceId || 'na'}:${turnId}`;
+  }
+
+  private pruneStartedTurns(nowMs: number): void {
+    if (this.startedTurnsByKey.size === 0) return;
+    const retentionMs = this.resolveStartedTurnRetentionMs();
+    for (const [key, updatedAtMs] of this.startedTurnsByKey.entries()) {
+      if (nowMs - updatedAtMs > retentionMs) {
+        this.startedTurnsByKey.delete(key);
+      }
+    }
+  }
+
+  private markTurnStarted(params: {
+    projectName: string;
+    agentType: string;
+    instanceId?: string;
+    turnId?: string;
+  }): void {
+    const key = this.buildTurnLifecycleKey(params);
+    if (!key) return;
+    const now = Date.now();
+    this.pruneStartedTurns(now);
+    this.startedTurnsByKey.set(key, now);
+  }
+
+  private hasTurnStarted(params: {
+    projectName: string;
+    agentType: string;
+    instanceId?: string;
+    turnId?: string;
+  }): boolean {
+    const key = this.buildTurnLifecycleKey(params);
+    if (!key) return false;
+    const now = Date.now();
+    this.pruneStartedTurns(now);
+    return this.startedTurnsByKey.has(key);
+  }
+
+  private clearStartedTurn(params: {
+    projectName: string;
+    agentType: string;
+    instanceId?: string;
+    turnId?: string;
+  }): void {
+    const key = this.buildTurnLifecycleKey(params);
+    if (!key) return;
+    this.startedTurnsByKey.delete(key);
   }
 
   private shouldSkipBySequence(params: {
@@ -323,6 +480,501 @@ export class BridgeHookServer {
     );
   }
 
+  private resolveEventProgressForwardMode(): EventProgressForwardMode {
+    const raw = process.env.AGENT_DISCORD_EVENT_PROGRESS_FORWARD;
+    if (!raw) return 'off';
+    const normalized = raw.trim().toLowerCase();
+    if (normalized === 'off' || normalized === 'thread' || normalized === 'channel') {
+      return normalized;
+    }
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) return 'thread';
+    if (['0', 'false', 'no'].includes(normalized)) return 'off';
+    return 'off';
+  }
+
+  private resolveCodexEventOnlyModeEnabled(): boolean {
+    const raw = process.env.AGENT_DISCORD_CODEX_EVENT_ONLY;
+    if (!raw) return false;
+    const normalized = raw.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+    return false;
+  }
+
+  private applyEventOnlyProgressModeGate(params: {
+    agentType: string;
+    mode: EventProgressForwardMode;
+  }): EventOnlyProgressGateResult {
+    if (params.agentType !== 'codex' || !this.resolveCodexEventOnlyModeEnabled()) {
+      return { mode: params.mode, adjusted: false };
+    }
+    if (params.mode === 'off') {
+      return { mode: 'off', adjusted: false };
+    }
+
+    const canUseProgressThread =
+      this.deps.messaging.platform === 'discord' &&
+      typeof this.deps.messaging.sendToProgressThread === 'function';
+    if (!canUseProgressThread) {
+      return {
+        mode: 'off',
+        adjusted: true,
+        reason: 'event-only-thread-unavailable',
+      };
+    }
+
+    if (params.mode === 'channel') {
+      return {
+        mode: 'thread',
+        adjusted: true,
+        reason: 'event-only-channel-blocked',
+      };
+    }
+
+    return { mode: params.mode, adjusted: false };
+  }
+
+  private parseEventProgressForwardMode(raw: unknown): EventProgressForwardMode | undefined {
+    if (raw === undefined || raw === null || raw === '') return undefined;
+    if (typeof raw !== 'string') return undefined;
+    const normalized = raw.trim().toLowerCase();
+    if (normalized === 'off' || normalized === 'thread' || normalized === 'channel') {
+      return normalized;
+    }
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) return 'thread';
+    if (['0', 'false', 'no'].includes(normalized)) return 'off';
+    return undefined;
+  }
+
+  private resolveEventProgressBlockStreamingEnabled(): boolean {
+    const raw = process.env.AGENT_DISCORD_EVENT_PROGRESS_BLOCK_STREAMING;
+    if (!raw) return true;
+    const normalized = raw.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+    return true;
+  }
+
+  private resolveEventProgressBlockWindowMs(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_EVENT_PROGRESS_BLOCK_WINDOW_MS || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 50 && fromEnv <= 5000) {
+      return Math.trunc(fromEnv);
+    }
+    return 450;
+  }
+
+  private resolveEventProgressBlockMaxChars(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_EVENT_PROGRESS_BLOCK_MAX_CHARS || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 200 && fromEnv <= 8000) {
+      return Math.trunc(fromEnv);
+    }
+    return 1800;
+  }
+
+  private parseEventBoolean(raw: unknown): boolean | undefined {
+    if (raw === undefined || raw === null || raw === '') return undefined;
+    if (typeof raw === 'boolean') return raw;
+    if (typeof raw === 'number') {
+      if (raw === 1) return true;
+      if (raw === 0) return false;
+      return undefined;
+    }
+    if (typeof raw !== 'string') return undefined;
+    const normalized = raw.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+    return undefined;
+  }
+
+  private parseEventInt(raw: unknown, min: number, max: number): number | undefined {
+    if (raw === undefined || raw === null || raw === '') return undefined;
+    const value = Number(raw);
+    if (!Number.isFinite(value) || !Number.isInteger(value)) return undefined;
+    if (value < min || value > max) return undefined;
+    return value;
+  }
+
+  private resolveProgressEventConfig(event: Record<string, unknown>): ResolvedProgressEventConfig {
+    const mode =
+      this.parseEventProgressForwardMode(event.progressMode) ||
+      this.resolveEventProgressForwardMode();
+    const blockStreamingEnabled =
+      this.parseEventBoolean(event.progressBlockStreaming) ??
+      this.resolveEventProgressBlockStreamingEnabled();
+    const blockWindowMs =
+      this.parseEventInt(event.progressBlockWindowMs, 50, 5000) ??
+      this.resolveEventProgressBlockWindowMs();
+    const blockMaxChars =
+      this.parseEventInt(event.progressBlockMaxChars, 200, 8000) ??
+      this.resolveEventProgressBlockMaxChars();
+    return {
+      mode,
+      blockStreamingEnabled,
+      blockWindowMs,
+      blockMaxChars,
+    };
+  }
+
+  private resolveEventProgressTranscriptMaxChars(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_EVENT_PROGRESS_TRANSCRIPT_MAX_CHARS || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 500 && fromEnv <= 100_000) {
+      return Math.trunc(fromEnv);
+    }
+    return 24_000;
+  }
+
+  private resolveEventFinalFallbackFromProgressEnabled(): boolean {
+    const raw = process.env.AGENT_DISCORD_EVENT_FINAL_FROM_PROGRESS_ON_EMPTY;
+    if (!raw) return true;
+    const normalized = raw.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+    return true;
+  }
+
+  private buildProgressBlockKey(params: {
+    projectName: string;
+    agentType: string;
+    instanceId?: string;
+    channelId: string;
+    turnId?: string;
+  }): string {
+    return `${params.projectName}:${params.agentType}:${params.instanceId || 'na'}:${params.channelId}:${params.turnId || 'na'}`;
+  }
+
+  private longestSuffixPrefix(previous: string, incoming: string): number {
+    const max = Math.min(previous.length, incoming.length);
+    for (let len = max; len > 0; len -= 1) {
+      if (previous.slice(previous.length - len) === incoming.slice(0, len)) {
+        return len;
+      }
+    }
+    return 0;
+  }
+
+  private mergeProgressBlockText(previous: string, incoming: string): string {
+    const overlap = this.longestSuffixPrefix(previous, incoming);
+    const merged = overlap > 0 ? `${previous}${incoming.slice(overlap)}` : `${previous}\n${incoming}`;
+    return merged.trim();
+  }
+
+  private scheduleProgressBlockFlush(key: string, delayMs: number): void {
+    if (this.progressBlockTimersByKey.has(key)) return;
+    const timer = setTimeout(() => {
+      this.progressBlockTimersByKey.delete(key);
+      void this.flushProgressBlock(key).catch((error) => {
+        console.warn(`Progress block flush failed (${key}): ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }, Math.max(0, Math.trunc(delayMs)));
+    timer.unref?.();
+    this.progressBlockTimersByKey.set(key, timer);
+  }
+
+  private clearProgressBlock(key: string): void {
+    const timer = this.progressBlockTimersByKey.get(key);
+    if (timer) {
+      clearTimeout(timer);
+      this.progressBlockTimersByKey.delete(key);
+    }
+    this.progressBlocksByKey.delete(key);
+  }
+
+  private clearAllProgressBlocks(): void {
+    for (const key of this.progressBlocksByKey.keys()) {
+      this.clearProgressBlock(key);
+    }
+  }
+
+  private buildProgressTurnKey(params: {
+    projectName: string;
+    agentType: string;
+    instanceId?: string;
+    turnId?: string;
+  }): string | undefined {
+    const turnId = params.turnId?.trim();
+    if (!turnId) return undefined;
+    return `${params.projectName}:${params.agentType}:${params.instanceId || 'na'}:${turnId}`;
+  }
+
+  private buildProgressRouteKey(params: {
+    projectName: string;
+    agentType: string;
+    instanceId?: string;
+  }): string {
+    return `${params.projectName}:${params.agentType}:${params.instanceId || 'na'}`;
+  }
+
+  private buildProgressModeKey(params: {
+    projectName: string;
+    agentType: string;
+    instanceId?: string;
+    turnId?: string;
+  }): string {
+    const turnKey = this.buildProgressTurnKey(params);
+    if (turnKey) return `turn:${turnKey}`;
+    return `route:${this.buildProgressRouteKey(params)}`;
+  }
+
+  private appendProgressTranscript(params: {
+    projectName: string;
+    agentType: string;
+    instanceId?: string;
+    turnId?: string;
+    text: string;
+  }): void {
+    const key = this.buildProgressTurnKey(params);
+    if (!key) return;
+    const incoming = params.text.trim();
+    if (incoming.length === 0) return;
+
+    const current = this.progressTranscriptByTurn.get(key);
+    const merged = current ? this.mergeProgressBlockText(current.text, incoming) : incoming;
+    const maxChars = this.resolveEventProgressTranscriptMaxChars();
+    const clamped = merged.length > maxChars ? merged.slice(merged.length - maxChars) : merged;
+    this.progressTranscriptByTurn.set(key, {
+      text: clamped,
+      updatedAtMs: Date.now(),
+    });
+  }
+
+  private getProgressTranscript(params: {
+    projectName: string;
+    agentType: string;
+    instanceId?: string;
+    turnId?: string;
+  }): string | undefined {
+    const key = this.buildProgressTurnKey(params);
+    if (!key) return undefined;
+    const snapshot = this.progressTranscriptByTurn.get(key);
+    return snapshot?.text;
+  }
+
+  private clearProgressTranscript(params: {
+    projectName: string;
+    agentType: string;
+    instanceId?: string;
+    turnId?: string;
+  }): void {
+    const key = this.buildProgressTurnKey(params);
+    if (!key) return;
+    this.progressTranscriptByTurn.delete(key);
+  }
+
+  private rememberProgressModeForTurn(params: {
+    projectName: string;
+    agentType: string;
+    instanceId?: string;
+    turnId?: string;
+    mode: EventProgressForwardMode;
+  }): void {
+    const now = Date.now();
+    const key = this.buildProgressModeKey(params);
+    this.progressModeByTurn.set(key, {
+      mode: params.mode,
+      updatedAtMs: now,
+    });
+    const routeKey = this.buildProgressModeKey({
+      projectName: params.projectName,
+      agentType: params.agentType,
+      instanceId: params.instanceId,
+      turnId: undefined,
+    });
+    this.progressModeByTurn.set(routeKey, {
+      mode: params.mode,
+      updatedAtMs: now,
+    });
+  }
+
+  private resolveProgressModeForTurn(params: {
+    projectName: string;
+    agentType: string;
+    instanceId?: string;
+    turnId?: string;
+  }): EventProgressForwardMode {
+    const key = this.buildProgressModeKey(params);
+    const snapshot = this.progressModeByTurn.get(key);
+    if (snapshot) return snapshot.mode;
+    return this.resolveEventProgressForwardMode();
+  }
+
+  private clearProgressModesForRoute(params: {
+    projectName: string;
+    agentType: string;
+    instanceId?: string;
+    turnId?: string;
+  }): void {
+    if (params.turnId && params.turnId.trim().length > 0) {
+      this.progressModeByTurn.delete(this.buildProgressModeKey(params));
+      return;
+    }
+    const routePrefix = `route:${this.buildProgressRouteKey(params)}`;
+    const turnPrefix = `turn:${this.buildProgressRouteKey(params)}:`;
+    for (const key of this.progressModeByTurn.keys()) {
+      if (key === routePrefix || key.startsWith(turnPrefix)) {
+        this.progressModeByTurn.delete(key);
+      }
+    }
+  }
+
+  private clearProgressTranscriptsForRoute(params: {
+    projectName: string;
+    agentType: string;
+    instanceId?: string;
+    turnId?: string;
+  }): void {
+    if (params.turnId && params.turnId.trim().length > 0) {
+      this.clearProgressTranscript(params);
+      return;
+    }
+    const prefix = `${params.projectName}:${params.agentType}:${params.instanceId || 'na'}:`;
+    for (const key of this.progressTranscriptByTurn.keys()) {
+      if (key.startsWith(prefix)) {
+        this.progressTranscriptByTurn.delete(key);
+      }
+    }
+  }
+
+  private pruneProgressTranscripts(activeInstanceKeys: Set<string>): void {
+    if (this.progressTranscriptByTurn.size === 0) return;
+    const now = Date.now();
+    const retentionMs = this.resolveIgnoredEventRetentionMs();
+    for (const [key, snapshot] of this.progressTranscriptByTurn.entries()) {
+      const parts = key.split(':');
+      const runtimeKey = parts.length >= 3 ? `${parts[0]}:${parts[2]}` : key;
+      if (activeInstanceKeys.has(runtimeKey)) continue;
+      if (now - snapshot.updatedAtMs <= retentionMs) continue;
+      this.progressTranscriptByTurn.delete(key);
+    }
+  }
+
+  private pruneProgressModes(activeInstanceKeys: Set<string>): void {
+    if (this.progressModeByTurn.size === 0) return;
+    const now = Date.now();
+    const retentionMs = this.resolveIgnoredEventRetentionMs();
+    for (const [key, snapshot] of this.progressModeByTurn.entries()) {
+      const raw = key.startsWith('turn:') ? key.slice(5) : key.startsWith('route:') ? key.slice(6) : key;
+      const parts = raw.split(':');
+      const runtimeKey = parts.length >= 3 ? `${parts[0]}:${parts[2]}` : raw;
+      if (activeInstanceKeys.has(runtimeKey)) continue;
+      if (now - snapshot.updatedAtMs <= retentionMs) continue;
+      this.progressModeByTurn.delete(key);
+    }
+  }
+
+  private getLatestProgressModeSnapshot(params: {
+    projectName: string;
+    agentType: string;
+    instanceId?: string;
+  }): {
+    eventProgressMode: EventProgressForwardMode;
+    eventProgressModeTurnId?: string;
+    eventProgressModeUpdatedAt: string;
+    eventProgressModeAgeMs: number;
+  } | undefined {
+    const routeKey = this.buildProgressRouteKey(params);
+    const routePrefix = `route:${routeKey}`;
+    const turnPrefix = `turn:${routeKey}:`;
+
+    let latest:
+      | {
+          key: string;
+          mode: EventProgressForwardMode;
+          updatedAtMs: number;
+        }
+      | undefined;
+
+    for (const [key, snapshot] of this.progressModeByTurn.entries()) {
+      if (key !== routePrefix && !key.startsWith(turnPrefix)) continue;
+      const preferTurnForTie =
+        !!latest &&
+        snapshot.updatedAtMs === latest.updatedAtMs &&
+        key.startsWith(turnPrefix) &&
+        !latest.key.startsWith(turnPrefix);
+      if (!latest || snapshot.updatedAtMs > latest.updatedAtMs || preferTurnForTie) {
+        latest = {
+          key,
+          mode: snapshot.mode,
+          updatedAtMs: snapshot.updatedAtMs,
+        };
+      }
+    }
+
+    if (!latest) return undefined;
+
+    const turnId = latest.key.startsWith(turnPrefix)
+      ? latest.key.slice(turnPrefix.length)
+      : undefined;
+
+    return {
+      eventProgressMode: latest.mode,
+      ...(turnId ? { eventProgressModeTurnId: turnId } : {}),
+      eventProgressModeUpdatedAt: new Date(latest.updatedAtMs).toISOString(),
+      eventProgressModeAgeMs: Math.max(0, Date.now() - latest.updatedAtMs),
+    };
+  }
+
+  private async flushProgressBlock(key: string): Promise<void> {
+    const state = this.progressBlocksByKey.get(key);
+    this.clearProgressBlock(key);
+    if (!state) return;
+    if (!state.text || state.text.trim().length === 0) return;
+    await this.sendProgressEventOutput(state.channelId, state.text, state.mode);
+  }
+
+  private async enqueueProgressBlock(params: {
+    projectName: string;
+    agentType: string;
+    instanceId?: string;
+    turnId?: string;
+    channelId: string;
+    mode: EventProgressActiveMode;
+    text: string;
+    blockWindowMs: number;
+    blockMaxChars: number;
+  }): Promise<void> {
+    const key = this.buildProgressBlockKey(params);
+    const existing = this.progressBlocksByKey.get(key);
+    const merged = existing ? this.mergeProgressBlockText(existing.text, params.text) : params.text.trim();
+    if (merged.length === 0) return;
+
+    this.progressBlocksByKey.set(key, {
+      ...params,
+      key,
+      text: merged,
+    });
+
+    if (merged.length >= params.blockMaxChars) {
+      await this.flushProgressBlock(key);
+      return;
+    }
+
+    this.scheduleProgressBlockFlush(key, params.blockWindowMs);
+  }
+
+  private clearProgressBlocksForRoute(params: {
+    projectName: string;
+    agentType: string;
+    instanceId?: string;
+    channelId: string;
+    turnId?: string;
+  }): void {
+    const keys = new Set<string>();
+    if (params.turnId) {
+      keys.add(this.buildProgressBlockKey(params));
+      keys.add(this.buildProgressBlockKey({ ...params, turnId: undefined }));
+    } else {
+      const prefix = `${params.projectName}:${params.agentType}:${params.instanceId || 'na'}:${params.channelId}:`;
+      for (const key of this.progressBlocksByKey.keys()) {
+        if (key.startsWith(prefix)) {
+          keys.add(key);
+        }
+      }
+    }
+    for (const key of keys) {
+      this.clearProgressBlock(key);
+    }
+  }
+
   private async sendEventOutput(channelId: string, text: string): Promise<void> {
     const discordFormatted =
       this.deps.messaging.platform === 'discord'
@@ -344,6 +996,39 @@ export class BridgeHookServer {
           ? wrapDiscordCodeblock(chunk, discordFormatted.language)
           : chunk;
       await this.deps.messaging.sendToChannel(channelId, payload);
+    }
+  }
+
+  private async sendProgressEventOutput(
+    channelId: string,
+    text: string,
+    mode: EventProgressForwardMode = this.resolveEventProgressForwardMode(),
+  ): Promise<void> {
+    if (mode === 'off') return;
+
+    const discordFormatted =
+      this.deps.messaging.platform === 'discord'
+        ? formatDiscordOutput(text)
+        : { text, useCodeblock: false, language: 'text' };
+    const content = discordFormatted.text;
+    if (content.trim().length === 0) return;
+
+    const split = this.deps.messaging.platform === 'slack' ? splitForSlack : splitForDiscord;
+    for (const chunk of split(content)) {
+      if (chunk.trim().length === 0) continue;
+      const payload =
+        this.deps.messaging.platform === 'discord' && discordFormatted.useCodeblock
+          ? wrapDiscordCodeblock(chunk, discordFormatted.language)
+          : chunk;
+      if (
+        mode === 'thread' &&
+        this.deps.messaging.platform === 'discord' &&
+        typeof this.deps.messaging.sendToProgressThread === 'function'
+      ) {
+        await this.deps.messaging.sendToProgressThread(channelId, payload);
+      } else {
+        await this.deps.messaging.sendToChannel(channelId, payload);
+      }
     }
   }
 
@@ -385,6 +1070,13 @@ export class BridgeHookServer {
       ignoredEventCount?: number;
       ignoredEventTypes?: Record<string, number>;
       ignoredLastAt?: string;
+      lifecycleRejectedEventCount?: number;
+      lifecycleRejectedEventTypes?: Record<string, number>;
+      lifecycleRejectedLastAt?: string;
+      eventProgressMode?: EventProgressForwardMode;
+      eventProgressModeTurnId?: string;
+      eventProgressModeUpdatedAt?: string;
+      eventProgressModeAgeMs?: number;
       eventLifecycleStage?: 'idle' | 'started' | 'progress' | 'final' | 'error' | 'cancelled';
       eventLifecycleTurnId?: string;
       eventLifecycleEventId?: string;
@@ -406,19 +1098,30 @@ export class BridgeHookServer {
       for (const instance of listProjectInstances(project)) {
         activeInstanceKeys.add(this.runtimeKey(project.projectName, instance.instanceId));
         const ignored = this.getIgnoredEventSnapshot(project.projectName, instance.instanceId);
+        const lifecycleRejected = this.getLifecycleRejectedEventSnapshot(project.projectName, instance.instanceId);
         const lifecycle = this.getEventLifecycleSnapshot(project.projectName, instance.instanceId);
+        const progressMode = this.getLatestProgressModeSnapshot({
+          projectName: project.projectName,
+          agentType: instance.agentType,
+          instanceId: instance.instanceId,
+        });
         instances.push({
           projectName: project.projectName,
           instanceId: instance.instanceId,
           agentType: instance.agentType,
           ...this.getRuntimeSnapshotForInstance(project.projectName, instance.agentType, instance.instanceId),
           ...(ignored || {}),
+          ...(lifecycleRejected || {}),
+          ...(progressMode || {}),
           ...(lifecycle || {}),
         });
       }
     }
     this.pruneIgnoredEvents(activeInstanceKeys);
+    this.pruneLifecycleRejectedEvents(activeInstanceKeys);
     this.pruneEventLifecycle(activeInstanceKeys);
+    this.pruneProgressTranscripts(activeInstanceKeys);
+    this.pruneProgressModes(activeInstanceKeys);
 
     return {
       generatedAt: new Date().toISOString(),
@@ -516,6 +1219,11 @@ export class BridgeHookServer {
   }
 
   stop(): void {
+    this.clearAllProgressBlocks();
+    this.progressTranscriptByTurn.clear();
+    this.progressModeByTurn.clear();
+    this.startedTurnsByKey.clear();
+    this.lifecycleRejectedEventsByInstance.clear();
     this.httpServer?.close();
     this.httpServer = undefined;
   }
@@ -684,6 +1392,43 @@ export class BridgeHookServer {
     );
     const channelId = routeInfo.channelId;
     if (!channelId) return false;
+    const lifecycleStrictMode = this.resolveEventLifecycleStrictMode();
+    const requiresStartEvent =
+      eventType === 'session.progress' ||
+      eventType === 'session.final' ||
+      eventType === 'session.idle' ||
+      eventType === 'session.error' ||
+      eventType === 'session.cancelled';
+    if (eventType === 'session.start') {
+      this.markTurnStarted({
+        projectName,
+        agentType: resolvedAgentType,
+        instanceId: resolvedInstanceId,
+        turnId,
+      });
+    } else if (turnId && requiresStartEvent) {
+      const started = this.hasTurnStarted({
+        projectName,
+        agentType: resolvedAgentType,
+        instanceId: resolvedInstanceId,
+        turnId,
+      });
+      if (!started) {
+        const warning =
+          `⚠️ [${projectName}/${resolvedAgentType}${resolvedInstanceId ? `#${resolvedInstanceId}` : ''}] ` +
+          `received ${eventType} without prior session.start (turnId=${turnId})`;
+        if (lifecycleStrictMode === 'reject') {
+          if (resolvedInstanceId) {
+            this.markLifecycleRejectedEvent(projectName, resolvedInstanceId, eventType);
+          }
+          console.log(`${warning}; strict=reject -> ignored`);
+          return true;
+        }
+        if (lifecycleStrictMode === 'warn') {
+          console.log(`${warning}; strict=warn -> accepted`);
+        }
+      }
+    }
 
     if (resolvedInstanceId && eventType === 'session.start') {
       this.updateEventLifecycle({
@@ -752,6 +1497,25 @@ export class BridgeHookServer {
     );
 
     if (eventType === 'session.error') {
+      this.clearProgressBlocksForRoute({
+        projectName,
+        agentType: resolvedAgentType,
+        instanceId: resolvedInstanceId,
+        channelId,
+        turnId,
+      });
+      this.clearProgressTranscriptsForRoute({
+        projectName,
+        agentType: resolvedAgentType,
+        instanceId: resolvedInstanceId,
+        turnId,
+      });
+      this.clearProgressModesForRoute({
+        projectName,
+        agentType: resolvedAgentType,
+        instanceId: resolvedInstanceId,
+        turnId,
+      });
       // Fire reaction update in background – don't block message delivery
       if (turnId && typeof this.deps.pendingTracker.markErrorByMessageId === 'function') {
         this.deps.pendingTracker
@@ -765,18 +1529,111 @@ export class BridgeHookServer {
         channelId,
         `⚠️ ${this.formatAgentLabel(resolvedAgentType)} session error: ${msg}`,
       );
+      this.clearStartedTurn({
+        projectName,
+        agentType: resolvedAgentType,
+        instanceId: resolvedInstanceId,
+        turnId,
+      });
       return true;
     }
 
     if (eventType === 'session.start') {
+      this.clearProgressBlocksForRoute({
+        projectName,
+        agentType: resolvedAgentType,
+        instanceId: resolvedInstanceId,
+        channelId,
+        turnId,
+      });
+      this.clearProgressTranscriptsForRoute({
+        projectName,
+        agentType: resolvedAgentType,
+        instanceId: resolvedInstanceId,
+        turnId,
+      });
+      this.clearProgressModesForRoute({
+        projectName,
+        agentType: resolvedAgentType,
+        instanceId: resolvedInstanceId,
+        turnId,
+      });
       return true;
     }
 
     if (eventType === 'session.progress') {
+      const rawProgressConfig = this.resolveProgressEventConfig(event);
+      const modeGate = this.applyEventOnlyProgressModeGate({
+        agentType: resolvedAgentType,
+        mode: rawProgressConfig.mode,
+      });
+      const progressConfig: ResolvedProgressEventConfig = {
+        ...rawProgressConfig,
+        mode: modeGate.mode,
+      };
+      if (modeGate.adjusted) {
+        console.log(
+          `🛡️ [${projectName}/${resolvedAgentType}${resolvedInstanceId ? `#${resolvedInstanceId}` : ''}] ` +
+            `event-only progress mode adjusted ${rawProgressConfig.mode} -> ${progressConfig.mode}` +
+            (modeGate.reason ? ` (${modeGate.reason})` : ''),
+        );
+      }
+      this.rememberProgressModeForTurn({
+        projectName,
+        agentType: resolvedAgentType,
+        instanceId: resolvedInstanceId,
+        turnId,
+        mode: progressConfig.mode,
+      });
+      if (text && text.trim().length > 0) {
+        this.appendProgressTranscript({
+          projectName,
+          agentType: resolvedAgentType,
+          instanceId: resolvedInstanceId,
+          turnId,
+          text: text.trim(),
+        });
+        if (progressConfig.mode !== 'off') {
+          if (progressConfig.blockStreamingEnabled) {
+            await this.enqueueProgressBlock({
+              projectName,
+              agentType: resolvedAgentType,
+              instanceId: resolvedInstanceId,
+              turnId,
+              channelId,
+              mode: progressConfig.mode,
+              text: text.trim(),
+              blockWindowMs: progressConfig.blockWindowMs,
+              blockMaxChars: progressConfig.blockMaxChars,
+            });
+          } else {
+            await this.sendProgressEventOutput(channelId, text.trim(), progressConfig.mode);
+          }
+        }
+      }
       return true;
     }
 
     if (eventType === 'session.cancelled') {
+      this.clearProgressBlocksForRoute({
+        projectName,
+        agentType: resolvedAgentType,
+        instanceId: resolvedInstanceId,
+        channelId,
+        turnId,
+      });
+      this.clearProgressTranscriptsForRoute({
+        projectName,
+        agentType: resolvedAgentType,
+        instanceId: resolvedInstanceId,
+        turnId,
+      });
+      this.clearProgressModesForRoute({
+        projectName,
+        agentType: resolvedAgentType,
+        instanceId: resolvedInstanceId,
+        turnId,
+      });
       if (turnId && typeof this.deps.pendingTracker.markCompletedByMessageId === 'function') {
         this.deps.pendingTracker
           .markCompletedByMessageId(projectName, resolvedAgentType, turnId, resolvedInstanceId)
@@ -789,22 +1646,52 @@ export class BridgeHookServer {
         channelId,
         `ℹ️ ${this.formatAgentLabel(resolvedAgentType)} session cancelled${msg}`,
       );
+      this.clearStartedTurn({
+        projectName,
+        agentType: resolvedAgentType,
+        instanceId: resolvedInstanceId,
+        turnId,
+      });
       return true;
     }
 
     if (eventType === 'session.idle' || eventType === 'session.final') {
+      this.clearProgressBlocksForRoute({
+        projectName,
+        agentType: resolvedAgentType,
+        instanceId: resolvedInstanceId,
+        channelId,
+        turnId,
+      });
       try {
-        if (text && text.trim().length > 0) {
-          const trimmed = text.trim();
+        const trimmed = text && text.trim().length > 0 ? text.trim() : '';
+        const effectiveProgressMode = this.resolveProgressModeForTurn({
+          projectName,
+          agentType: resolvedAgentType,
+          instanceId: resolvedInstanceId,
+          turnId,
+        });
+        const transcript =
+          this.resolveEventFinalFallbackFromProgressEnabled() &&
+          effectiveProgressMode !== 'channel'
+            ? this.getProgressTranscript({
+                projectName,
+                agentType: resolvedAgentType,
+                instanceId: resolvedInstanceId,
+                turnId,
+              })
+            : undefined;
+        const deliveredText = trimmed.length > 0 ? trimmed : (transcript || '').trim();
+        if (deliveredText.length > 0) {
           // Use turnText (all assistant text from the turn) for file path extraction
           // to handle the race condition where displayText doesn't contain file paths
           const turnText = typeof event.turnText === 'string' ? event.turnText.trim() : '';
-          const fileSearchText = turnText || trimmed;
+          const fileSearchText = turnText || deliveredText;
           const projectPath = project.projectPath ? resolve(project.projectPath) : '';
           const filePaths = this.validateFilePaths(extractFilePaths(fileSearchText), projectPath);
 
           // Strip file paths from the display text to avoid leaking absolute paths
-          const displayText = filePaths.length > 0 ? stripFilePaths(trimmed, filePaths) : trimmed;
+          const displayText = filePaths.length > 0 ? stripFilePaths(deliveredText, filePaths) : deliveredText;
 
           await this.sendEventOutput(channelId, displayText);
 
@@ -833,6 +1720,25 @@ export class BridgeHookServer {
           await this.deps.pendingTracker.markError(projectName, resolvedAgentType, resolvedInstanceId).catch(() => {});
         }
         throw error;
+      } finally {
+        this.clearProgressTranscriptsForRoute({
+          projectName,
+          agentType: resolvedAgentType,
+          instanceId: resolvedInstanceId,
+          turnId,
+        });
+        this.clearProgressModesForRoute({
+          projectName,
+          agentType: resolvedAgentType,
+          instanceId: resolvedInstanceId,
+          turnId,
+        });
+        this.clearStartedTurn({
+          projectName,
+          agentType: resolvedAgentType,
+          instanceId: resolvedInstanceId,
+          turnId,
+        });
       }
     }
 

@@ -1,5 +1,40 @@
 #!/usr/bin/env node
 
+function parseProgressMode(raw) {
+  if (typeof raw !== 'string') return undefined;
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === 'off' || normalized === 'thread' || normalized === 'channel') return normalized;
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return 'thread';
+  if (['0', 'false', 'no'].includes(normalized)) return 'off';
+  return undefined;
+}
+
+function parseExpectedProgressMode(raw) {
+  if (typeof raw !== 'string') return undefined;
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === 'skip' || normalized === 'none') return 'skip';
+  if (normalized === 'auto') return 'auto';
+  return parseProgressMode(normalized);
+}
+
+function parseBooleanEnv(raw) {
+  if (typeof raw !== 'string') return undefined;
+  const normalized = raw.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return undefined;
+}
+
+function resolveExpectedProgressMode(options) {
+  if (options.expectedProgressModeRaw === 'skip') return undefined;
+  if (options.expectedProgressModeRaw && options.expectedProgressModeRaw !== 'auto') {
+    return options.expectedProgressModeRaw;
+  }
+  if (options.progressModeOverride) return options.progressModeOverride;
+  const envMode = parseProgressMode(process.env.AGENT_DISCORD_EVENT_PROGRESS_FORWARD);
+  return envMode || 'off';
+}
+
 function parseArgs(argv) {
   const options = {
     port: Number(process.env.HOOK_SERVER_PORT || process.env.AGENT_DISCORD_PORT || 18470),
@@ -8,6 +43,10 @@ function parseArgs(argv) {
     instanceId: undefined,
     timeoutMs: 3000,
     checkSeqGuard: true,
+    progressModeOverride: undefined,
+    expectedProgressModeRaw: 'auto',
+    checkProgressMode: true,
+    maxProgressModeAgeMs: Number(process.env.AGENT_DISCORD_EVENT_PROGRESS_MODE_STALE_WARN_MS || 90_000),
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -38,6 +77,33 @@ function parseArgs(argv) {
       i += 1;
       continue;
     }
+    if (token === '--progress-mode' && next) {
+      const parsed = parseProgressMode(next);
+      if (!parsed) {
+        throw new Error(`invalid --progress-mode: ${next} (expected off|thread|channel)`);
+      }
+      options.progressModeOverride = parsed;
+      i += 1;
+      continue;
+    }
+    if (token === '--expect-progress-mode' && next) {
+      const parsed = parseExpectedProgressMode(next);
+      if (!parsed) {
+        throw new Error(`invalid --expect-progress-mode: ${next} (expected auto|skip|off|thread|channel)`);
+      }
+      options.expectedProgressModeRaw = parsed;
+      i += 1;
+      continue;
+    }
+    if (token === '--max-progress-mode-age-ms' && next) {
+      options.maxProgressModeAgeMs = Number(next);
+      i += 1;
+      continue;
+    }
+    if (token === '--no-progress-mode-check') {
+      options.checkProgressMode = false;
+      continue;
+    }
     if (token === '--no-seq-guard-check') {
       options.checkSeqGuard = false;
       continue;
@@ -57,6 +123,14 @@ function parseArgs(argv) {
   if (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 500 || options.timeoutMs > 60_000) {
     throw new Error(`invalid --timeout-ms: ${options.timeoutMs}`);
   }
+  if (
+    !Number.isFinite(options.maxProgressModeAgeMs) ||
+    options.maxProgressModeAgeMs < 1_000 ||
+    options.maxProgressModeAgeMs > 3_600_000
+  ) {
+    throw new Error(`invalid --max-progress-mode-age-ms: ${options.maxProgressModeAgeMs}`);
+  }
+  options.expectedProgressMode = resolveExpectedProgressMode(options);
   return options;
 }
 
@@ -71,6 +145,13 @@ function printHelp() {
       '  --instance <id>         Target instance id (optional)',
       '  --agent-type <type>     Agent type filter (default: codex)',
       '  --timeout-ms <n>        HTTP timeout in ms (default: 3000)',
+      '  --progress-mode <mode>  Include progressMode in session.progress (off|thread|channel)',
+      '  --expect-progress-mode <mode>',
+      '                          Expected runtime eventProgressMode (auto|skip|off|thread|channel)',
+      '  --max-progress-mode-age-ms <n>',
+      '                          Max allowed eventProgressModeAgeMs (default: env stale warn or 90000)',
+      '  --no-progress-mode-check',
+      '                          Skip runtime progressMode/age validation',
       '  --no-seq-guard-check    Skip out-of-order sequence guard validation',
       '  -h, --help              Show this help',
     ].join('\n'),
@@ -141,7 +222,12 @@ async function main() {
 
   const events = [
     { type: 'session.start', seq: 1, eventId: `${turnId}:start` },
-    { type: 'session.progress', seq: 2, eventId: `${turnId}:progress` },
+    {
+      type: 'session.progress',
+      seq: 2,
+      eventId: `${turnId}:progress`,
+      ...(opts.progressModeOverride ? { progressMode: opts.progressModeOverride } : {}),
+    },
     { type: 'session.final', seq: 3, eventId: `${turnId}:final` },
   ];
 
@@ -187,6 +273,33 @@ async function main() {
   if (Number(afterTarget.eventLifecycleSeq) !== 3) {
     throw new Error(`expected eventLifecycleSeq=3, got ${String(afterTarget.eventLifecycleSeq)}`);
   }
+  if (opts.checkProgressMode && opts.expectedProgressMode) {
+    const observedProgressMode = parseProgressMode(afterTarget.eventProgressMode);
+    if (observedProgressMode !== opts.expectedProgressMode) {
+      const maybeEventOnlyHint =
+        opts.agentType === 'codex' &&
+        opts.expectedProgressMode === 'thread' &&
+        observedProgressMode === 'channel' &&
+        parseBooleanEnv(process.env.AGENT_DISCORD_CODEX_EVENT_ONLY) === true
+          ? ' (hint: restart daemon with AGENT_DISCORD_CODEX_EVENT_ONLY=1; current shell env alone does not change daemon runtime)'
+          : '';
+      throw new Error(
+        `expected eventProgressMode=${opts.expectedProgressMode}, got ${String(afterTarget.eventProgressMode)}${maybeEventOnlyHint}`,
+      );
+    }
+    const progressModeAgeMs =
+      typeof afterTarget.eventProgressModeAgeMs === 'number' && Number.isFinite(afterTarget.eventProgressModeAgeMs)
+        ? Math.max(0, Math.trunc(afterTarget.eventProgressModeAgeMs))
+        : undefined;
+    if (typeof progressModeAgeMs !== 'number') {
+      throw new Error('missing eventProgressModeAgeMs in runtime-status');
+    }
+    if (progressModeAgeMs > opts.maxProgressModeAgeMs) {
+      throw new Error(
+        `eventProgressModeAgeMs too old: ${progressModeAgeMs} > ${opts.maxProgressModeAgeMs}`,
+      );
+    }
+  }
 
   if (opts.checkSeqGuard) {
     const staleResponse = await requestJson(
@@ -224,7 +337,8 @@ async function main() {
   }
 
   console.log(
-    `[event-contract-check] OK project=${projectName} instance=${instanceId} turnId=${turnId} stage=final seq=3`,
+    `[event-contract-check] OK project=${projectName} instance=${instanceId} turnId=${turnId} ` +
+      `stage=final seq=3 progressMode=${opts.expectedProgressMode || 'skip'}`,
   );
 }
 

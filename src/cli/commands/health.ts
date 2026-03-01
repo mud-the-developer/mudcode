@@ -2,7 +2,8 @@ import chalk from 'chalk';
 import { config, getConfigPath, validateConfig } from '../../config/index.js';
 import { stateManager } from '../../state/index.js';
 import { listProjectInstances } from '../../state/instances.js';
-import { TmuxManager } from '../../tmux/manager.js';
+import { createTmuxManager } from '../../tmux/factory.js';
+import type { TmuxManager } from '../../tmux/manager.js';
 import { getDaemonStatus } from '../../app/daemon-service.js';
 import { resolveProjectWindowName } from '../../policy/window-naming.js';
 import { applyTmuxCliOverrides } from '../common/tmux.js';
@@ -45,6 +46,13 @@ type RuntimeSnapshot = {
   ignoredEventCount?: number;
   ignoredEventTypes?: Record<string, number>;
   ignoredLastAt?: string;
+  lifecycleRejectedEventCount?: number;
+  lifecycleRejectedEventTypes?: Record<string, number>;
+  lifecycleRejectedLastAt?: string;
+  eventProgressMode?: 'off' | 'thread' | 'channel';
+  eventProgressModeTurnId?: string;
+  eventProgressModeUpdatedAt?: string;
+  eventProgressModeAgeMs?: number;
 };
 
 type RuntimeStatusEntry = RuntimeSnapshot & {
@@ -80,6 +88,52 @@ function pushCheck(checks: HealthCheck[], name: string, level: HealthLevel, deta
 
 function runtimeKey(projectName: string, instanceId: string): string {
   return `${projectName}:${instanceId}`;
+}
+
+function parseRuntimeProgressMode(raw: unknown): 'off' | 'thread' | 'channel' | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === 'off' || normalized === 'thread' || normalized === 'channel') {
+    return normalized;
+  }
+  return undefined;
+}
+
+function parseBoolEnv(raw: string | undefined): boolean | undefined {
+  if (!raw) return undefined;
+  const normalized = raw.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return undefined;
+}
+
+function parseProgressModeFromEnv(raw: string | undefined): 'off' | 'thread' | 'channel' | undefined {
+  if (!raw) return undefined;
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === 'off' || normalized === 'thread' || normalized === 'channel') {
+    return normalized;
+  }
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return 'thread';
+  if (['0', 'false', 'no'].includes(normalized)) return 'off';
+  return undefined;
+}
+
+function resolveCodexEventOnlyEnabled(): boolean {
+  return parseBoolEnv(process.env.AGENT_DISCORD_CODEX_EVENT_ONLY) === true;
+}
+
+function resolveExpectedCodexProgressMode(): 'off' | 'thread' | 'channel' | undefined {
+  const direct = parseProgressModeFromEnv(process.env.AGENT_DISCORD_CODEX_EVENT_PROGRESS_MODE);
+  if (direct) return direct;
+  return parseProgressModeFromEnv(process.env.AGENT_DISCORD_EVENT_PROGRESS_FORWARD);
+}
+
+function resolveProgressModeStaleWarnMs(): number {
+  const fromEnv = Number(process.env.AGENT_DISCORD_EVENT_PROGRESS_MODE_STALE_WARN_MS || '');
+  if (Number.isFinite(fromEnv) && fromEnv >= 5000 && fromEnv <= 3_600_000) {
+    return Math.trunc(fromEnv);
+  }
+  return 90_000;
 }
 
 function formatRuntimeAge(ageMs?: number): string {
@@ -254,24 +308,34 @@ function describeRuntime(runtime?: RuntimeSnapshot, paneWorkingHint: boolean = f
     typeof runtime?.ignoredEventCount === 'number' && Number.isFinite(runtime.ignoredEventCount)
       ? Math.max(0, Math.trunc(runtime.ignoredEventCount))
       : 0;
+  const rejectedCount =
+    typeof runtime?.lifecycleRejectedEventCount === 'number' && Number.isFinite(runtime.lifecycleRejectedEventCount)
+      ? Math.max(0, Math.trunc(runtime.lifecycleRejectedEventCount))
+      : 0;
   const ignoredSuffix = ignoredCount > 0 ? `, ignored hook events=${ignoredCount}` : '';
+  const rejectedSuffix = rejectedCount > 0 ? `, lifecycle rejects=${rejectedCount}` : '';
+  const progressModeSuffix = runtime?.eventProgressMode
+    ? `, progressMode=${runtime.eventProgressMode}` +
+      (runtime.eventProgressModeTurnId ? `(${runtime.eventProgressModeTurnId})` : '')
+    : '';
+  const contractSuffix = `${ignoredSuffix}${rejectedSuffix}${progressModeSuffix}`;
 
-  if (paneWorkingHint) return `working (pane shows "Esc to interrupt"${ignoredSuffix})`;
+  if (paneWorkingHint) return `working (pane shows "Esc to interrupt"${contractSuffix})`;
   if (!runtime) return 'unavailable';
   if (runtime.pendingDepth > 0) {
     const stage = runtime.oldestStage || runtime.latestStage || 'received';
-    return `working (${runtime.pendingDepth} queued, stage=${stage}, age=${formatRuntimeAge(runtime.oldestAgeMs)}${ignoredSuffix})`;
+    return `working (${runtime.pendingDepth} queued, stage=${stage}, age=${formatRuntimeAge(runtime.oldestAgeMs)}${contractSuffix})`;
   }
   if (runtime.lastTerminalStage === 'completed') {
-    return `completed recently (${formatRuntimeAge(runtime.lastTerminalAgeMs)} ago${ignoredSuffix})`;
+    return `completed recently (${formatRuntimeAge(runtime.lastTerminalAgeMs)} ago${contractSuffix})`;
   }
   if (runtime.lastTerminalStage === 'error') {
-    return `last request failed (${formatRuntimeAge(runtime.lastTerminalAgeMs)} ago${ignoredSuffix})`;
+    return `last request failed (${formatRuntimeAge(runtime.lastTerminalAgeMs)} ago${contractSuffix})`;
   }
   if (runtime.lastTerminalStage === 'retry') {
-    return `last request needs retry (${formatRuntimeAge(runtime.lastTerminalAgeMs)} ago${ignoredSuffix})`;
+    return `last request needs retry (${formatRuntimeAge(runtime.lastTerminalAgeMs)} ago${contractSuffix})`;
   }
-  return `idle${ignoredSuffix}`;
+  return `idle${contractSuffix}`;
 }
 
 async function fetchRuntimeStatus(port: number): Promise<Map<string, RuntimeSnapshot>> {
@@ -308,6 +372,25 @@ async function fetchRuntimeStatus(port: number): Promise<Map<string, RuntimeSnap
           ? (entry.ignoredEventTypes as Record<string, number>)
           : undefined,
       ignoredLastAt: typeof entry.ignoredLastAt === 'string' ? entry.ignoredLastAt : undefined,
+      lifecycleRejectedEventCount:
+        typeof entry.lifecycleRejectedEventCount === 'number' && Number.isFinite(entry.lifecycleRejectedEventCount)
+          ? Math.max(0, Math.trunc(entry.lifecycleRejectedEventCount))
+          : undefined,
+      lifecycleRejectedEventTypes:
+        entry.lifecycleRejectedEventTypes && typeof entry.lifecycleRejectedEventTypes === 'object'
+          ? (entry.lifecycleRejectedEventTypes as Record<string, number>)
+          : undefined,
+      lifecycleRejectedLastAt:
+        typeof entry.lifecycleRejectedLastAt === 'string' ? entry.lifecycleRejectedLastAt : undefined,
+      eventProgressMode: parseRuntimeProgressMode(entry.eventProgressMode),
+      eventProgressModeTurnId:
+        typeof entry.eventProgressModeTurnId === 'string' ? entry.eventProgressModeTurnId : undefined,
+      eventProgressModeUpdatedAt:
+        typeof entry.eventProgressModeUpdatedAt === 'string' ? entry.eventProgressModeUpdatedAt : undefined,
+      eventProgressModeAgeMs:
+        typeof entry.eventProgressModeAgeMs === 'number' && Number.isFinite(entry.eventProgressModeAgeMs)
+          ? Math.max(0, Math.trunc(entry.eventProgressModeAgeMs))
+          : undefined,
     });
   }
   return map;
@@ -322,12 +405,15 @@ export async function healthCommand(
   } = {},
 ): Promise<void> {
   const effectiveConfig = applyTmuxCliOverrides(config, options);
-  const tmux = new TmuxManager(effectiveConfig.tmux.sessionPrefix);
+  const tmux = createTmuxManager(effectiveConfig);
 
   const checks: HealthCheck[] = [];
   const instances: InstanceHealth[] = [];
   let daemonRunning = false;
   const runtimeByInstance = new Map<string, RuntimeSnapshot>();
+  const codexEventOnlyEnabled = resolveCodexEventOnlyEnabled();
+  const expectedCodexProgressMode = resolveExpectedCodexProgressMode();
+  const progressModeStaleWarnMs = resolveProgressModeStaleWarnMs();
 
   try {
     validateConfig();
@@ -438,6 +524,50 @@ export async function healthCommand(
           `hook:${project.projectName}/${instance.instanceId}`,
           'warn',
           `ignored ${ignoredEventCount} event-hook payload(s) for capture-driven instance`,
+        );
+      }
+      const rejectedEventCount = runtime?.lifecycleRejectedEventCount || 0;
+      if (rejectedEventCount > 0) {
+        pushCheck(
+          checks,
+          `contract:${project.projectName}/${instance.instanceId}`,
+          'warn',
+          `strict lifecycle rejected ${rejectedEventCount} event(s) for this instance`,
+        );
+      }
+      if (instance.agentType === 'codex' && codexEventOnlyEnabled) {
+        if (runtime?.eventProgressMode === 'channel') {
+          pushCheck(
+            checks,
+            `contract:${project.projectName}/${instance.instanceId}`,
+            'warn',
+            'event-only mode detected progressMode=channel; consider thread/off to avoid intermediary channel output',
+          );
+        }
+        if (
+          expectedCodexProgressMode &&
+          runtime?.eventProgressMode &&
+          runtime.eventProgressMode !== expectedCodexProgressMode
+        ) {
+          pushCheck(
+            checks,
+            `contract:${project.projectName}/${instance.instanceId}`,
+            'warn',
+            `runtime progressMode=${runtime.eventProgressMode} differs from expected=${expectedCodexProgressMode}`,
+          );
+        }
+      }
+      if (
+        instance.agentType === 'codex' &&
+        (runtime?.pendingDepth || 0) > 0 &&
+        typeof runtime?.eventProgressModeAgeMs === 'number' &&
+        runtime.eventProgressModeAgeMs > progressModeStaleWarnMs
+      ) {
+        pushCheck(
+          checks,
+          `contract:${project.projectName}/${instance.instanceId}`,
+          'warn',
+          `progress mode signal stale for ${formatRuntimeAge(runtime.eventProgressModeAgeMs)} (pending=${runtime.pendingDepth})`,
         );
       }
     }

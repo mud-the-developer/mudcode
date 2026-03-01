@@ -6,7 +6,7 @@ import chalk from 'chalk';
 import { config, getConfigValue, saveConfig, validateConfig } from '../../config/index.js';
 import { stateManager } from '../../state/index.js';
 import { agentRegistry } from '../../agents/index.js';
-import { TmuxManager } from '../../tmux/manager.js';
+import { createTmuxManager } from '../../tmux/factory.js';
 import { listProjectInstances } from '../../state/instances.js';
 import type { TmuxCliOptions } from '../common/types.js';
 import {
@@ -401,7 +401,7 @@ export async function tuiCommand(options: TmuxCliOptions): Promise<void> {
   };
   process.once('exit', clearTmuxHealthTimer);
 
-  const tmux = new TmuxManager(config.tmux.sessionPrefix);
+  const tmux = createTmuxManager(config);
   const currentSession = tmux.getCurrentSession(process.env.TMUX_PANE);
   const currentWindow = tmux.getCurrentWindow(process.env.TMUX_PANE);
 

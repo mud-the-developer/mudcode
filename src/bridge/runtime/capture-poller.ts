@@ -9,6 +9,7 @@ import type { CodexIoV2Tracker } from '../events/codex-io-v2.js';
 import type { AgentEventHookClient } from '../events/agent-event-hook.js';
 
 type ProgressOutputVisibility = 'off' | 'thread' | 'channel';
+type EventProgressMode = 'off' | 'thread' | 'channel';
 type OutputEventType = 'progress' | 'final';
 type DeltaDeliveryResult = { observedOutput: boolean; emittedOutput: boolean };
 
@@ -42,6 +43,7 @@ export class BridgeCapturePoller {
   private readonly quietPendingPollThreshold: number;
   private readonly codexInitialQuietPendingPollThreshold: number;
   private readonly codexFinalOnlyModeEnabled: boolean;
+  private readonly codexEventOnlyModeEnabled: boolean;
   private readonly longOutputThreadThreshold: number;
   private readonly stalePendingAlertMs: number;
   private readonly promptEchoFilterEnabled: boolean;
@@ -49,6 +51,10 @@ export class BridgeCapturePoller {
   private readonly redrawFallbackTailLines: number;
   private readonly progressOutputVisibility: ProgressOutputVisibility;
   private readonly codexProgressHookMinIntervalMs: number;
+  private readonly codexEventProgressMode?: EventProgressMode;
+  private readonly codexEventProgressBlockStreaming?: boolean;
+  private readonly codexEventProgressBlockWindowMs?: number;
+  private readonly codexEventProgressBlockMaxChars?: number;
   private timer?: ReturnType<typeof setInterval>;
   private running = false;
   private snapshotsByInstance = new Map<string, string>();
@@ -78,6 +84,7 @@ export class BridgeCapturePoller {
       deps.codexInitialQuietPendingPollThreshold,
     );
     this.codexFinalOnlyModeEnabled = this.resolveCodexFinalOnlyModeEnabled(deps.codexFinalOnlyModeEnabled);
+    this.codexEventOnlyModeEnabled = this.resolveCodexEventOnlyModeEnabled();
     this.longOutputThreadThreshold = this.resolveLongOutputThreadThreshold(deps.longOutputThreadThreshold);
     this.stalePendingAlertMs = this.resolveStalePendingAlertMs(deps.stalePendingAlertMs);
     this.promptEchoFilterEnabled = this.resolvePromptEchoFilterEnabled(deps.promptEchoFilterEnabled);
@@ -87,6 +94,10 @@ export class BridgeCapturePoller {
     this.codexProgressHookMinIntervalMs = this.resolveCodexProgressHookMinIntervalMs(
       deps.codexProgressHookMinIntervalMs,
     );
+    this.codexEventProgressMode = this.resolveCodexEventProgressMode();
+    this.codexEventProgressBlockStreaming = this.resolveCodexEventProgressBlockStreaming();
+    this.codexEventProgressBlockWindowMs = this.resolveCodexEventProgressBlockWindowMs();
+    this.codexEventProgressBlockMaxChars = this.resolveCodexEventProgressBlockMaxChars();
   }
 
   start(): void {
@@ -164,6 +175,19 @@ export class BridgeCapturePoller {
     if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
     if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
     return true;
+  }
+
+  private resolveCodexEventOnlyModeEnabled(): boolean {
+    const raw = process.env.AGENT_DISCORD_CODEX_EVENT_ONLY;
+    if (!raw) return false;
+    const normalized = raw.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+    return false;
+  }
+
+  private isCodexEventOnlyActive(agentType: string): boolean {
+    return agentType === 'codex' && this.codexEventOnlyModeEnabled && this.deps.eventHookClient?.enabled === true;
   }
 
   private resolveLongOutputThreadThreshold(configured?: number): number {
@@ -248,6 +272,67 @@ export class BridgeCapturePoller {
       return Math.trunc(fromEnv);
     }
     return 5000;
+  }
+
+  private parseBoolean(raw: string | undefined): boolean | undefined {
+    if (!raw) return undefined;
+    const normalized = raw.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+    return undefined;
+  }
+
+  private parseIntInRange(raw: string | undefined, min: number, max: number): number | undefined {
+    if (!raw) return undefined;
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) return undefined;
+    if (parsed < min || parsed > max) return undefined;
+    return Math.trunc(parsed);
+  }
+
+  private resolveCodexEventProgressMode(): EventProgressMode | undefined {
+    const direct = process.env.AGENT_DISCORD_CODEX_EVENT_PROGRESS_MODE;
+    if (direct) {
+      const normalized = direct.trim().toLowerCase();
+      if (normalized === 'off' || normalized === 'thread' || normalized === 'channel') {
+        return normalized;
+      }
+    }
+    const fallback = process.env.AGENT_DISCORD_EVENT_PROGRESS_FORWARD;
+    if (!fallback) return undefined;
+    const normalized = fallback.trim().toLowerCase();
+    if (normalized === 'off' || normalized === 'thread' || normalized === 'channel') {
+      return normalized;
+    }
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) return 'thread';
+    if (['0', 'false', 'no'].includes(normalized)) return 'off';
+    return undefined;
+  }
+
+  private resolveCodexEventProgressBlockStreaming(): boolean | undefined {
+    const direct = this.parseBoolean(process.env.AGENT_DISCORD_CODEX_EVENT_PROGRESS_BLOCK_STREAMING);
+    if (direct !== undefined) return direct;
+    return this.parseBoolean(process.env.AGENT_DISCORD_EVENT_PROGRESS_BLOCK_STREAMING);
+  }
+
+  private resolveCodexEventProgressBlockWindowMs(): number | undefined {
+    const direct = this.parseIntInRange(
+      process.env.AGENT_DISCORD_CODEX_EVENT_PROGRESS_BLOCK_WINDOW_MS,
+      50,
+      5000,
+    );
+    if (direct !== undefined) return direct;
+    return this.parseIntInRange(process.env.AGENT_DISCORD_EVENT_PROGRESS_BLOCK_WINDOW_MS, 50, 5000);
+  }
+
+  private resolveCodexEventProgressBlockMaxChars(): number | undefined {
+    const direct = this.parseIntInRange(
+      process.env.AGENT_DISCORD_CODEX_EVENT_PROGRESS_BLOCK_MAX_CHARS,
+      200,
+      8000,
+    );
+    if (direct !== undefined) return direct;
+    return this.parseIntInRange(process.env.AGENT_DISCORD_EVENT_PROGRESS_BLOCK_MAX_CHARS, 200, 8000);
   }
 
   private formatDuration(ms: number): string {
@@ -579,6 +664,10 @@ export class BridgeCapturePoller {
         turnId,
         channelId: params.channelId,
         text: params.text,
+        progressMode: this.codexEventProgressMode,
+        progressBlockStreaming: this.codexEventProgressBlockStreaming,
+        progressBlockWindowMs: this.codexEventProgressBlockWindowMs,
+        progressBlockMaxChars: this.codexEventProgressBlockMaxChars,
       })
       .then((ok) => {
         if (ok) {
@@ -603,6 +692,7 @@ export class BridgeCapturePoller {
     instanceId: string;
   }): Promise<boolean> {
     const { key, channelId, agentType, projectName, instanceId } = params;
+    const codexEventOnlyActive = this.isCodexEventOnlyActive(agentType);
     const buffered = this.bufferedOutputByInstance.get(key);
     if (!buffered || buffered.trim().length === 0) {
       this.bufferedOutputByInstance.delete(key);
@@ -641,6 +731,9 @@ export class BridgeCapturePoller {
         this.progressHookHeartbeatByInstance.delete(key);
         this.progressHookInFlightByInstance.delete(key);
         return true;
+      }
+      if (codexEventOnlyActive) {
+        return false;
       }
     }
     const sent = await this.sendOutput(targetChannelId, output, 'final');
@@ -705,6 +798,7 @@ export class BridgeCapturePoller {
   }): Promise<DeltaDeliveryResult> {
     const trimmed = params.deltaText.trim();
     if (trimmed.length === 0) return { observedOutput: false, emittedOutput: false };
+    const codexEventOnlyActive = this.isCodexEventOnlyActive(params.agentType);
     if (params.agentType === 'codex') {
       this.deps.ioTracker?.recordOutputDelta({
         projectName: params.projectName,
@@ -719,6 +813,7 @@ export class BridgeCapturePoller {
         pendingDepth: params.pendingDepth,
         codexWorkingHint: params.codexWorkingHint === true,
         channelId: params.channelId,
+        text: trimmed,
       });
     }
 
@@ -740,6 +835,11 @@ export class BridgeCapturePoller {
     );
     if (shouldBuffer) {
       this.appendBufferedOutput(params.key, trimmed, params.channelId, params.agentType);
+      return { observedOutput: true, emittedOutput: false };
+    }
+
+    if (codexEventOnlyActive) {
+      // Event-only mode keeps tmux session input path but routes output exclusively via hook events.
       return { observedOutput: true, emittedOutput: false };
     }
 
@@ -1138,8 +1238,24 @@ export class BridgeCapturePoller {
         this.finalOnlyQuietFlushPollsByInstance.delete(key);
         return;
       }
+      if (this.isCodexEventOnlyActive(agentType)) {
+        const turnId = this.lastPendingTurnIdByInstance.get(key);
+        if (turnId) {
+          const emitted = await this.safeEmitCodexFinalEvent({
+            projectName,
+            instanceId,
+            turnId,
+            channelId,
+            text: '',
+          });
+          if (!emitted) {
+            return;
+          }
+        }
+      }
       this.progressHookHeartbeatByInstance.delete(key);
       this.progressHookInFlightByInstance.delete(key);
+      this.lastPendingTurnIdByInstance.delete(key);
       return;
     }
 

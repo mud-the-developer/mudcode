@@ -600,10 +600,15 @@ export class TmuxManager {
    * Capture pane output from a specific window
    * @param sessionName Full session name (already includes prefix)
    */
-  capturePaneFromWindow(sessionName: string, windowName: string, paneHint?: string): string {
+  capturePaneFromWindow(
+    sessionName: string,
+    windowName: string,
+    paneHint?: string,
+    historyLinesOverride?: number,
+  ): string {
     const target = this.resolveWindowTarget(sessionName, windowName, paneHint);
     const escapedTarget = escapeShellArg(target);
-    const captureStartLine = this.resolveCaptureStartLine();
+    const captureStartLine = this.resolveCaptureStartLine(historyLinesOverride);
 
     try {
       return this.executor.exec(`tmux capture-pane -t ${escapedTarget} -p -S ${captureStartLine}`);
@@ -612,7 +617,14 @@ export class TmuxManager {
     }
   }
 
-  private resolveCaptureStartLine(): number {
+  private resolveCaptureStartLine(historyLinesOverride?: number): number {
+    if (
+      typeof historyLinesOverride === 'number' &&
+      Number.isFinite(historyLinesOverride) &&
+      historyLinesOverride >= 0
+    ) {
+      return -Math.trunc(historyLinesOverride);
+    }
     if (typeof this.configuredCaptureHistoryLines === 'number') {
       return -this.configuredCaptureHistoryLines;
     }

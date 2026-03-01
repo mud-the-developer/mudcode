@@ -44,7 +44,7 @@ const mocks = vi.hoisted(() => {
     listSessions: vi.fn().mockReturnValue([]),
   };
 
-  const TmuxManager = vi.fn().mockImplementation(function MockTmuxManager() {
+  const createTmuxManager = vi.fn().mockImplementation(function MockTmuxManager() {
     return tmux;
   });
 
@@ -84,7 +84,7 @@ const mocks = vi.hoisted(() => {
     agentAdapter,
     agentRegistry,
     tmux,
-    TmuxManager,
+    createTmuxManager,
     AgentBridge,
     bridgeInstances,
     defaultDaemonManager,
@@ -110,7 +110,11 @@ vi.mock('../src/config/index.js', () => ({
 }));
 
 vi.mock('../src/tmux/manager.js', () => ({
-  TmuxManager: mocks.TmuxManager,
+  TmuxManager: vi.fn(),
+}));
+
+vi.mock('../src/tmux/factory.js', () => ({
+  createTmuxManager: mocks.createTmuxManager,
 }));
 
 vi.mock('../src/agents/index.js', () => ({

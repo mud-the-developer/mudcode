@@ -15,9 +15,9 @@ import {
 
 export async function startCommand(options: TmuxCliOptions & { project?: string; attach?: boolean }) {
   try {
-    ensureTmuxInstalled();
-    validateConfig();
     const effectiveConfig = applyTmuxCliOverrides(config, options);
+    ensureTmuxInstalled(effectiveConfig.tmux);
+    validateConfig();
 
     const projects = stateManager.listProjects();
 
@@ -84,7 +84,7 @@ export async function startCommand(options: TmuxCliOptions & { project?: string;
           : undefined;
         const attachTarget = windowName ? `${sessionName}:${windowName}` : sessionName;
         console.log(chalk.cyan(`\n📺 Attaching to ${attachTarget}...\n`));
-        attachToTmux(sessionName, windowName);
+        attachToTmux(effectiveConfig.tmux, sessionName, windowName);
       }
 
       return;
@@ -103,7 +103,7 @@ export async function startCommand(options: TmuxCliOptions & { project?: string;
 
       await bridge.start();
       console.log(chalk.cyan(`\n📺 Attaching to ${attachTarget}...\n`));
-      attachToTmux(sessionName, windowName);
+      attachToTmux(effectiveConfig.tmux, sessionName, windowName);
       return;
     }
 

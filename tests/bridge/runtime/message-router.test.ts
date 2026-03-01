@@ -65,6 +65,7 @@ function createMessagingMock() {
         callback = cb;
       }),
       sendToChannel: vi.fn().mockResolvedValue(undefined),
+      sendLongOutput: vi.fn().mockResolvedValue(undefined),
       deleteChannel: vi.fn().mockResolvedValue(true),
       archiveChannel: vi.fn().mockResolvedValue('saved_20260223_221500_demo-codex'),
     } as any,
@@ -86,7 +87,11 @@ describe('BridgeMessageRouter (codex)', () => {
     delete process.env.AGENT_DISCORD_CODEX_AUTO_SUBAGENT_MIN_CHARS;
     delete process.env.AGENT_DISCORD_CODEX_AUTO_SUBAGENT_MIN_LINES;
     delete process.env.AGENT_DISCORD_CODEX_AUTO_SUBAGENT_MIN_BULLETS;
+    delete process.env.AGENT_DISCORD_CODEX_AUTO_LONGTASK_REPORT_MODE;
     delete process.env.MUDCODE_CODEX_AUTO_SKILL_LINK;
+    delete process.env.AGENT_DISCORD_SNAPSHOT_LONG_OUTPUT_THREAD_THRESHOLD;
+    delete process.env.AGENT_DISCORD_SNAPSHOT_CAPTURE_HISTORY_LINES;
+    delete process.env.AGENT_DISCORD_SNAPSHOT_TAIL_LINES;
     for (const dir of tempDirs.splice(0)) {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -458,6 +463,99 @@ describe('BridgeMessageRouter (codex)', () => {
     const sentPrompt = String(tmux.typeKeysToWindow.mock.calls[0]?.[2] ?? '');
     expect(sentPrompt).toContain('Use sub-agent codex');
     expect(sentPrompt).not.toContain('[mudcode auto-subagent]');
+  });
+
+  it('auto-injects long-task report hint for continuation prompts', async () => {
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_AUTO_LONGTASK_REPORT_MODE = 'continue';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', 'continue', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    const sentPrompt = String(tmux.typeKeysToWindow.mock.calls[0]?.[2] ?? '');
+    expect(sentPrompt).toContain('continue');
+    expect(sentPrompt).toContain('[mudcode longtask-report]');
+    expect(sentPrompt).toContain('Need your check');
+    expect(sentPrompt).toContain('Changes');
+    expect(sentPrompt).toContain('Verification');
+  });
+
+  it('does not inject long-task report hint when disabled', async () => {
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_AUTO_LONGTASK_REPORT_MODE = 'off';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', 'continue', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    const sentPrompt = String(tmux.typeKeysToWindow.mock.calls[0]?.[2] ?? '');
+    expect(sentPrompt).toBe('continue');
+    expect(sentPrompt).not.toContain('[mudcode longtask-report]');
   });
 
   it('re-sends Enter when codex submit verification still sees prompt tail', async () => {
@@ -881,13 +979,24 @@ describe('BridgeMessageRouter (codex)', () => {
     const doctorRunner = vi.fn().mockResolvedValue({
       ok: true,
       fixed: false,
-      issues: [],
+      issues: [
+        {
+          level: 'warn',
+          code: 'event-contract-progress-channel',
+          message: 'codex runtime progressMode=channel detected',
+        },
+      ],
       fixes: [],
       summary: {
         configPath: '/tmp/config.json',
         storedThreshold: 20000,
         envThresholdRaw: undefined,
         effectiveThreshold: 20000,
+        runtimeProgressModeOff: 0,
+        runtimeProgressModeThread: 1,
+        runtimeProgressModeChannel: 1,
+        runtimeProgressModeUnknown: 0,
+        runtimeCodexProgressModeChannel: 1,
       },
     });
 
@@ -909,6 +1018,10 @@ describe('BridgeMessageRouter (codex)', () => {
       'ch-1',
       expect.stringContaining('Mudcode Doctor'),
     );
+    const sentSummary = String(messaging.sendToChannel.mock.calls[0]?.[1] || '');
+    expect(sentSummary).toContain('progress modes: off=0, thread=1, channel=1, unknown=0');
+    expect(sentSummary).toContain('contract highlights:');
+    expect(sentSummary).toContain('event-contract-progress-channel');
     expect(tmux.typeKeysToWindow).not.toHaveBeenCalled();
   });
 
@@ -945,6 +1058,11 @@ describe('BridgeMessageRouter (codex)', () => {
         storedThreshold: 20000,
         envThresholdRaw: undefined,
         effectiveThreshold: 20000,
+        runtimeProgressModeOff: 1,
+        runtimeProgressModeThread: 0,
+        runtimeProgressModeChannel: 0,
+        runtimeProgressModeUnknown: 0,
+        runtimeCodexProgressModeChannel: 0,
       },
     });
 
@@ -1140,7 +1258,7 @@ describe('BridgeMessageRouter (codex)', () => {
     const callback = getCallback();
     await callback('codex', '/snapshot', 'demo', 'ch-1', 'msg-1', 'codex');
 
-    expect(tmux.capturePaneFromWindow).toHaveBeenCalledWith('agent-demo', 'demo-codex', 'codex');
+    expect(tmux.capturePaneFromWindow).toHaveBeenCalledWith('agent-demo', 'demo-codex', 'codex', 120);
     expect(messaging.sendToChannel).toHaveBeenCalledWith(
       'ch-1',
       expect.stringContaining('📸 Snapshot `demo/codex`'),
@@ -1197,6 +1315,53 @@ describe('BridgeMessageRouter (codex)', () => {
     expect(sent).toContain('line-11');
     expect(sent).toContain('line-40');
     expect(sent).not.toContain('line-01');
+  });
+
+  it('routes long /snapshot payload to long-output thread delivery when available', async () => {
+    process.env.AGENT_DISCORD_SNAPSHOT_TAIL_LINES = '120';
+    process.env.AGENT_DISCORD_SNAPSHOT_LONG_OUTPUT_THREAD_THRESHOLD = '1200';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const longSnapshot = Array.from({ length: 140 }, (_, i) => `${String(i + 1).padStart(3, '0')} ${'x'.repeat(32)}`).join('\n');
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+      capturePaneFromWindow: vi.fn().mockReturnValue(longSnapshot),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', '/snapshot', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    expect(messaging.sendLongOutput).toHaveBeenCalledWith(
+      'ch-1',
+      expect.stringContaining('📸 Snapshot `demo/codex`'),
+    );
   });
 
   it('treats codex as working when pane shows "Esc to interrupt" even if queue is empty', async () => {

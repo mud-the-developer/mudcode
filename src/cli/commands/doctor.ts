@@ -43,12 +43,43 @@ export type DoctorResult = {
     storedThreshold?: number;
     envThresholdRaw?: string;
     effectiveThreshold?: number;
+    runtimeLifecycleRejectedCount?: number;
+    runtimeLifecycleRejectedInstances?: number;
+    runtimeProgressModeOff?: number;
+    runtimeProgressModeThread?: number;
+    runtimeProgressModeChannel?: number;
+    runtimeProgressModeUnknown?: number;
+    runtimeCodexProgressModeChannel?: number;
   };
+};
+
+type RuntimeStatusEntry = {
+  projectName?: string;
+  instanceId?: string;
+  agentType?: string;
+  lifecycleRejectedEventCount?: number;
+  eventProgressMode?: string;
+};
+
+type RuntimeStatusPayload = {
+  instances?: RuntimeStatusEntry[];
 };
 
 type RewriteResult = {
   content: string;
   changes: number;
+};
+
+type RuntimeContractSnapshot = {
+  rejectedCount: number;
+  rejectedInstances: number;
+  codexChannelProgressInstances: number;
+  progressModeCounts: {
+    off: number;
+    thread: number;
+    channel: number;
+    unknown: number;
+  };
 };
 
 export function classifyLongOutputThreadThreshold(raw: unknown): ThresholdState {
@@ -182,6 +213,81 @@ function buildIssues(storedRaw: unknown, envRaw: string | undefined): DoctorIssu
   return issues;
 }
 
+function parseBoolEnv(raw: string | undefined, fallback: boolean): boolean {
+  if (!raw) return fallback;
+  const normalized = raw.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return fallback;
+}
+
+function resolveStrictLifecycleMode(): 'off' | 'warn' | 'reject' {
+  const raw = (process.env.AGENT_DISCORD_EVENT_LIFECYCLE_STRICT_MODE || '').trim().toLowerCase();
+  if (raw === 'off' || raw === 'warn' || raw === 'reject') return raw;
+  return 'off';
+}
+
+function parseRuntimeProgressMode(raw: unknown): 'off' | 'thread' | 'channel' | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === 'off' || normalized === 'thread' || normalized === 'channel') {
+    return normalized;
+  }
+  return undefined;
+}
+
+async function fetchRuntimeContractSnapshot(
+  port: number,
+): Promise<RuntimeContractSnapshot | undefined> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 900);
+  timer.unref?.();
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/runtime-status`, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    if (!response.ok) return undefined;
+    const payload = (await response.json()) as RuntimeStatusPayload;
+    const entries = Array.isArray(payload.instances) ? payload.instances : [];
+    let rejectedCount = 0;
+    let rejectedInstances = 0;
+    let codexChannelProgressInstances = 0;
+    const progressModeCounts = {
+      off: 0,
+      thread: 0,
+      channel: 0,
+      unknown: 0,
+    };
+    for (const entry of entries) {
+      const progressMode = parseRuntimeProgressMode(entry.eventProgressMode);
+      if (progressMode === 'off') progressModeCounts.off += 1;
+      else if (progressMode === 'thread') progressModeCounts.thread += 1;
+      else if (progressMode === 'channel') progressModeCounts.channel += 1;
+      else progressModeCounts.unknown += 1;
+      const agentType = typeof entry.agentType === 'string' ? entry.agentType.trim().toLowerCase() : '';
+      if (agentType === 'codex' && progressMode === 'channel') {
+        codexChannelProgressInstances += 1;
+      }
+
+      const count =
+        typeof entry.lifecycleRejectedEventCount === 'number' &&
+        Number.isFinite(entry.lifecycleRejectedEventCount)
+          ? Math.max(0, Math.trunc(entry.lifecycleRejectedEventCount))
+          : 0;
+      if (count <= 0) continue;
+      rejectedCount += count;
+      rejectedInstances += 1;
+    }
+    return { rejectedCount, rejectedInstances, codexChannelProgressInstances, progressModeCounts };
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function printHumanResult(result: DoctorResult): void {
   const warnCount = result.issues.filter((issue) => issue.level === 'warn').length;
   const failCount = result.issues.filter((issue) => issue.level === 'fail').length;
@@ -191,6 +297,36 @@ function printHumanResult(result: DoctorResult): void {
   console.log(chalk.gray(`   Stored threshold: ${result.summary.storedThreshold ?? '(unset)'}`));
   console.log(chalk.gray(`   Env threshold: ${result.summary.envThresholdRaw ?? '(unset)'}`));
   console.log(chalk.gray(`   Effective threshold: ${result.summary.effectiveThreshold ?? '(unset)'}`));
+  if (typeof result.summary.runtimeLifecycleRejectedCount === 'number') {
+    console.log(
+      chalk.gray(
+        `   Runtime lifecycle rejects: ${result.summary.runtimeLifecycleRejectedCount}` +
+        ` (${result.summary.runtimeLifecycleRejectedInstances ?? 0} instance(s))`,
+      ),
+    );
+  }
+  if (
+    typeof result.summary.runtimeProgressModeOff === 'number' ||
+    typeof result.summary.runtimeProgressModeThread === 'number' ||
+    typeof result.summary.runtimeProgressModeChannel === 'number'
+  ) {
+    console.log(
+      chalk.gray(
+        `   Runtime progress modes: ` +
+        `off=${result.summary.runtimeProgressModeOff ?? 0}, ` +
+        `thread=${result.summary.runtimeProgressModeThread ?? 0}, ` +
+        `channel=${result.summary.runtimeProgressModeChannel ?? 0}, ` +
+        `unknown=${result.summary.runtimeProgressModeUnknown ?? 0}`,
+      ),
+    );
+  }
+  if (typeof result.summary.runtimeCodexProgressModeChannel === 'number') {
+    console.log(
+      chalk.gray(
+        `   Runtime codex channel-mode instances: ${result.summary.runtimeCodexProgressModeChannel}`,
+      ),
+    );
+  }
 
   if (result.issues.length === 0) {
     console.log(chalk.green('\n✅ No config/env conflicts found.'));
@@ -245,6 +381,16 @@ export async function runDoctor(options: { fix?: boolean } = {}): Promise<Doctor
   const envRaw = process.env.AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD;
   const issues = buildIssues(storedRaw, envRaw);
   const fixes: DoctorFix[] = [];
+  const strictLifecycleMode = resolveStrictLifecycleMode();
+  const codexEventOnly = parseBoolEnv(process.env.AGENT_DISCORD_CODEX_EVENT_ONLY, false);
+  if (codexEventOnly && strictLifecycleMode === 'off') {
+    issues.push({
+      level: 'warn',
+      code: 'event-contract-strict-off',
+      message:
+        'AGENT_DISCORD_CODEX_EVENT_ONLY is enabled, but AGENT_DISCORD_EVENT_LIFECYCLE_STRICT_MODE=off. Consider warn/reject to catch missing start/final contracts.',
+    });
+  }
 
   if (options.fix) {
     const desired = pickDesiredThreshold(storedRaw, envRaw);
@@ -285,6 +431,25 @@ export async function runDoctor(options: { fix?: boolean } = {}): Promise<Doctor
   }
 
   const resultIssues = [...issues];
+  const runtimeContract = await fetchRuntimeContractSnapshot(config.hookServerPort || 18470);
+  if (runtimeContract && runtimeContract.rejectedCount > 0) {
+    resultIssues.push({
+      level: strictLifecycleMode === 'reject' ? 'fail' : 'warn',
+      code: 'event-contract-rejected',
+      message:
+        `Detected ${runtimeContract.rejectedCount} lifecycle-rejected event(s)` +
+        ` across ${runtimeContract.rejectedInstances} instance(s) from /runtime-status.`,
+    });
+  }
+  if (codexEventOnly && runtimeContract && runtimeContract.codexChannelProgressInstances > 0) {
+    resultIssues.push({
+      level: 'warn',
+      code: 'event-contract-progress-channel',
+      message:
+        `AGENT_DISCORD_CODEX_EVENT_ONLY is enabled, but ${runtimeContract.codexChannelProgressInstances}` +
+        ` codex instance(s) currently report runtime progressMode=channel.`,
+    });
+  }
   if (validationError) {
     resultIssues.push({
       level: 'fail',
@@ -303,6 +468,13 @@ export async function runDoctor(options: { fix?: boolean } = {}): Promise<Doctor
       storedThreshold: normalizeThresholdForStorage(getConfigValue('longOutputThreadThreshold')),
       envThresholdRaw: process.env.AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD,
       effectiveThreshold: config.capture?.longOutputThreadThreshold,
+      runtimeLifecycleRejectedCount: runtimeContract?.rejectedCount,
+      runtimeLifecycleRejectedInstances: runtimeContract?.rejectedInstances,
+      runtimeProgressModeOff: runtimeContract?.progressModeCounts.off,
+      runtimeProgressModeThread: runtimeContract?.progressModeCounts.thread,
+      runtimeProgressModeChannel: runtimeContract?.progressModeCounts.channel,
+      runtimeProgressModeUnknown: runtimeContract?.progressModeCounts.unknown,
+      runtimeCodexProgressModeChannel: runtimeContract?.codexChannelProgressInstances,
     },
   };
   return result;

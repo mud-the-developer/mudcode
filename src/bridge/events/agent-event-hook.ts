@@ -15,6 +15,10 @@ export interface AgentEventHookPayload {
   seq?: number;
   type: AgentEventType;
   text?: string;
+  progressMode?: 'off' | 'thread' | 'channel';
+  progressBlockStreaming?: boolean;
+  progressBlockWindowMs?: number;
+  progressBlockMaxChars?: number;
   channelId?: string;
   source?: string;
 }
@@ -41,6 +45,10 @@ export interface AgentEventHookClient {
     turnId?: string;
     channelId?: string;
     text?: string;
+    progressMode?: 'off' | 'thread' | 'channel';
+    progressBlockStreaming?: boolean;
+    progressBlockWindowMs?: number;
+    progressBlockMaxChars?: number;
   }): Promise<boolean>;
   emitCodexError(params: {
     projectName: string;
@@ -148,6 +156,10 @@ export class LocalAgentEventHookClient implements AgentEventHookClient {
     turnId?: string;
     channelId?: string;
     text?: string;
+    progressMode?: 'off' | 'thread' | 'channel';
+    progressBlockStreaming?: boolean;
+    progressBlockWindowMs?: number;
+    progressBlockMaxChars?: number;
   }): Promise<boolean> {
     return this.post({
       projectName: params.projectName,
@@ -156,6 +168,10 @@ export class LocalAgentEventHookClient implements AgentEventHookClient {
       turnId: params.turnId,
       type: 'session.progress',
       text: params.text,
+      progressMode: params.progressMode,
+      progressBlockStreaming: params.progressBlockStreaming,
+      progressBlockWindowMs: params.progressBlockWindowMs,
+      progressBlockMaxChars: params.progressBlockMaxChars,
       channelId: params.channelId,
       source: 'codex-poc',
     });

@@ -14,7 +14,7 @@ const mocks = vi.hoisted(() => ({
     sessionExistsFull: vi.fn(),
     killSession: vi.fn(),
   },
-  TmuxManager: vi.fn(),
+  createTmuxManager: vi.fn(),
   autoTuneCaptureSettings: vi.fn(),
   config: {
     tmux: {
@@ -38,8 +38,8 @@ vi.mock('../src/state/index.js', () => ({
   stateManager: mocks.stateManager,
 }));
 
-vi.mock('../src/tmux/manager.js', () => ({
-  TmuxManager: mocks.TmuxManager,
+vi.mock('../src/tmux/factory.js', () => ({
+  createTmuxManager: mocks.createTmuxManager,
 }));
 
 vi.mock('../src/cli/common/capture-autotune.js', () => ({
@@ -75,7 +75,7 @@ describe('daemonCommand restart action', () => {
     mocks.tmuxManagerInstance.listSessions.mockReturnValue([]);
     mocks.tmuxManagerInstance.sessionExistsFull.mockReturnValue(true);
     mocks.tmuxManagerInstance.killSession.mockReturnValue(undefined);
-    mocks.TmuxManager.mockImplementation(function MockTmuxManager() {
+    mocks.createTmuxManager.mockImplementation(function MockTmuxManager() {
       return mocks.tmuxManagerInstance;
     });
     mocks.autoTuneCaptureSettings.mockReturnValue({
@@ -150,7 +150,7 @@ describe('daemonCommand restart action', () => {
 
     await daemonCommand('restart', { clearSession: true });
 
-    expect(mocks.TmuxManager).toHaveBeenCalledOnce();
+    expect(mocks.createTmuxManager).toHaveBeenCalledOnce();
     expect(mocks.tmuxManagerInstance.killSession).toHaveBeenCalledTimes(2);
     expect(mocks.tmuxManagerInstance.killSession).toHaveBeenCalledWith('agent-bridge');
     expect(mocks.tmuxManagerInstance.killSession).toHaveBeenCalledWith('agent-demo');
