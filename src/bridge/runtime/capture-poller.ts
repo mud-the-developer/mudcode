@@ -12,6 +12,10 @@ type ProgressOutputVisibility = 'off' | 'thread' | 'channel';
 type OutputEventType = 'progress' | 'final';
 type DeltaDeliveryResult = { observedOutput: boolean; emittedOutput: boolean };
 
+const LONG_OUTPUT_THREAD_THRESHOLD_MIN = 1200;
+const LONG_OUTPUT_THREAD_THRESHOLD_MAX = 20000;
+const LEGACY_LONG_OUTPUT_THREAD_THRESHOLD_MAX = 100000;
+
 export interface BridgeCapturePollerDeps {
   messaging: MessagingClient;
   tmux: TmuxManager;
@@ -163,12 +167,18 @@ export class BridgeCapturePoller {
   }
 
   private resolveLongOutputThreadThreshold(configured?: number): number {
-    if (typeof configured === 'number' && Number.isFinite(configured) && configured >= 1200) {
-      return Math.trunc(configured);
+    if (typeof configured === 'number' && Number.isFinite(configured) && configured >= LONG_OUTPUT_THREAD_THRESHOLD_MIN) {
+      const normalized = Math.trunc(configured);
+      if (normalized <= LONG_OUTPUT_THREAD_THRESHOLD_MAX) return normalized;
+      if (normalized <= LEGACY_LONG_OUTPUT_THREAD_THRESHOLD_MAX) return LONG_OUTPUT_THREAD_THRESHOLD_MAX;
+      return LONG_OUTPUT_THREAD_THRESHOLD_MAX;
     }
     const fromEnv = Number(process.env.AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD || '');
-    if (Number.isFinite(fromEnv) && fromEnv >= 1200) {
-      return Math.trunc(fromEnv);
+    if (Number.isFinite(fromEnv) && fromEnv >= LONG_OUTPUT_THREAD_THRESHOLD_MIN) {
+      const normalized = Math.trunc(fromEnv);
+      if (normalized <= LONG_OUTPUT_THREAD_THRESHOLD_MAX) return normalized;
+      if (normalized <= LEGACY_LONG_OUTPUT_THREAD_THRESHOLD_MAX) return LONG_OUTPUT_THREAD_THRESHOLD_MAX;
+      return LONG_OUTPUT_THREAD_THRESHOLD_MAX;
     }
     return 2000;
   }

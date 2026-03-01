@@ -14,6 +14,10 @@ import {
 import { PendingMessageTracker, type PendingRuntimeSnapshot } from './pending-message-tracker.js';
 import { formatDiscordOutput, wrapDiscordCodeblock } from '../formatting/discord-output-formatter.js';
 
+const LONG_OUTPUT_THREAD_THRESHOLD_MIN = 1200;
+const LONG_OUTPUT_THREAD_THRESHOLD_MAX = 20000;
+const LEGACY_LONG_OUTPUT_THREAD_THRESHOLD_MAX = 100000;
+
 export interface BridgeHookServerDeps {
   port: number;
   messaging: MessagingClient;
@@ -302,8 +306,11 @@ export class BridgeHookServer {
 
   private resolveLongOutputThreadThreshold(): number {
     const fromEnv = Number(process.env.AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD || '');
-    if (Number.isFinite(fromEnv) && fromEnv >= 1200) {
-      return Math.trunc(fromEnv);
+    if (Number.isFinite(fromEnv) && fromEnv >= LONG_OUTPUT_THREAD_THRESHOLD_MIN) {
+      const normalized = Math.trunc(fromEnv);
+      if (normalized <= LONG_OUTPUT_THREAD_THRESHOLD_MAX) return normalized;
+      if (normalized <= LEGACY_LONG_OUTPUT_THREAD_THRESHOLD_MAX) return LONG_OUTPUT_THREAD_THRESHOLD_MAX;
+      return LONG_OUTPUT_THREAD_THRESHOLD_MAX;
     }
     return 2000;
   }

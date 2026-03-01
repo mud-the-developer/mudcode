@@ -364,6 +364,45 @@ describe('ConfigManager', () => {
       expect(() => manager.validateConfig()).toThrow(/AGENT_DISCORD_CAPTURE_PROGRESS_OUTPUT/);
     });
 
+    it('validateConfig auto-clamps legacy AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD from env', () => {
+      const storage = new MockStorage();
+      const env = new MockEnvironment();
+      env.set('DISCORD_BOT_TOKEN', 'valid-token');
+      env.set('AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD', '100000');
+
+      const manager = new ConfigManager(storage, env, configDir);
+
+      expect(() => manager.validateConfig()).not.toThrow();
+      expect(manager.config.capture?.longOutputThreadThreshold).toBe(20000);
+    });
+
+    it('validateConfig migrates legacy stored longOutputThreadThreshold on load', () => {
+      const storage = new MockStorage();
+      const env = new MockEnvironment();
+      env.set('DISCORD_BOT_TOKEN', 'valid-token');
+      storage.setFile(configFile, JSON.stringify({ longOutputThreadThreshold: 100000 }));
+
+      const manager = new ConfigManager(storage, env, configDir);
+
+      expect(() => manager.validateConfig()).not.toThrow();
+      expect(manager.config.capture?.longOutputThreadThreshold).toBe(20000);
+
+      const savedData = storage.readFile(configFile, 'utf-8');
+      const savedConfig = JSON.parse(savedData);
+      expect(savedConfig.longOutputThreadThreshold).toBe(20000);
+    });
+
+    it('validateConfig still throws for AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD above legacy max', () => {
+      const storage = new MockStorage();
+      const env = new MockEnvironment();
+      env.set('DISCORD_BOT_TOKEN', 'valid-token');
+      env.set('AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD', '100001');
+
+      const manager = new ConfigManager(storage, env, configDir);
+
+      expect(() => manager.validateConfig()).toThrow(/AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD/);
+    });
+
     it('validateConfig throws for invalid stored capture polling values', () => {
       const storage = new MockStorage();
       const env = new MockEnvironment();

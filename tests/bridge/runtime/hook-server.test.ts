@@ -95,6 +95,7 @@ describe('BridgeHookServer', () => {
   afterEach(() => {
     server?.stop();
     rmSync(tempDir, { recursive: true, force: true });
+    delete process.env.AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD;
   });
 
   function startServer(deps: Partial<BridgeHookServerDeps> = {}): BridgeHookServer {
@@ -1055,6 +1056,43 @@ describe('BridgeHookServer', () => {
         type: 'session.idle',
         text: longText,
       });
+      expect(res.status).toBe(200);
+      expect(mockMessaging.sendLongOutput).toHaveBeenCalledWith('ch-123', longText);
+      expect(mockMessaging.sendToChannel).not.toHaveBeenCalled();
+    });
+
+    it('auto-clamps legacy long-output threshold env value for threaded delivery', async () => {
+      process.env.AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD = '100000';
+      const mockMessaging = createMockMessaging('discord');
+      const stateManager = createMockStateManager({
+        test: {
+          projectName: 'test',
+          projectPath: tempDir,
+          tmuxSession: 'bridge',
+          agents: { claude: true },
+          discordChannels: { claude: 'ch-123' },
+          instances: {
+            claude: { instanceId: 'claude', agentType: 'claude', channelId: 'ch-123' },
+          },
+          createdAt: new Date(),
+          lastActive: new Date(),
+        },
+      });
+      startServer({
+        messaging: mockMessaging as any,
+        stateManager: stateManager as any,
+        pendingTracker: createMockPendingTracker() as any,
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const longText = 'x'.repeat(25000);
+      const res = await postJSON(port, '/opencode-event', {
+        projectName: 'test',
+        agentType: 'claude',
+        type: 'session.idle',
+        text: longText,
+      });
+
       expect(res.status).toBe(200);
       expect(mockMessaging.sendLongOutput).toHaveBeenCalledWith('ch-123', longText);
       expect(mockMessaging.sendToChannel).not.toHaveBeenCalled();

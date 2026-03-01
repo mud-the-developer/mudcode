@@ -37,6 +37,10 @@ export interface StoredConfig {
   messagingPlatform?: 'discord' | 'slack';
 }
 
+const LONG_OUTPUT_THREAD_THRESHOLD_MIN = 1200;
+const LONG_OUTPUT_THREAD_THRESHOLD_MAX = 20000;
+const LEGACY_LONG_OUTPUT_THREAD_THRESHOLD_MAX = 100000;
+
 export class ConfigManager {
   private storage: IStorage;
   private env: IEnvironment;
@@ -60,7 +64,7 @@ export class ConfigManager {
         this.envLoaded = true;
       }
 
-      const storedConfig = this.loadStoredConfig();
+      const storedConfig = this.migrateLegacyStoredLongOutputThreadThreshold(this.loadStoredConfig());
       const storedToken = normalizeDiscordToken(storedConfig.token);
       const envToken = normalizeDiscordToken(this.env.get('DISCORD_BOT_TOKEN'));
       const envPermissionModeRaw = this.env.get('OPENCODE_PERMISSION_MODE');
@@ -141,11 +145,9 @@ export class ConfigManager {
         40,
         300,
       );
-      const longOutputThreadThreshold = this.resolveCaptureLineCount(
+      const longOutputThreadThreshold = this.resolveLongOutputThreadThreshold(
         storedConfig.longOutputThreadThreshold,
         this.env.get('AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD'),
-        1200,
-        20000,
       );
       const captureProgressOutput = this.resolveCaptureProgressOutput(
         storedConfig.captureProgressOutput,
@@ -323,6 +325,15 @@ export class ConfigManager {
     return this.parseCaptureLineCountCandidate(envValue, min, max);
   }
 
+  private resolveLongOutputThreadThreshold(
+    storedValue: unknown,
+    envValue: string | undefined,
+  ): number | undefined {
+    const storedCandidate = this.parseLongOutputThreadThresholdCandidate(storedValue, true);
+    if (storedCandidate !== undefined) return storedCandidate;
+    return this.parseLongOutputThreadThresholdCandidate(envValue, true);
+  }
+
   private resolveBooleanSetting(
     storedValue: unknown,
     envValue: string | undefined,
@@ -366,6 +377,42 @@ export class ConfigManager {
     return value;
   }
 
+  private parseLongOutputThreadThresholdCandidate(raw: unknown, allowLegacyClamp: boolean): number | undefined {
+    if (raw === undefined || raw === null || raw === '') return undefined;
+    const value = Number(raw);
+    if (!Number.isInteger(value)) return undefined;
+    if (value < LONG_OUTPUT_THREAD_THRESHOLD_MIN) return undefined;
+    if (value <= LONG_OUTPUT_THREAD_THRESHOLD_MAX) return value;
+    if (allowLegacyClamp && value <= LEGACY_LONG_OUTPUT_THREAD_THRESHOLD_MAX) {
+      return LONG_OUTPUT_THREAD_THRESHOLD_MAX;
+    }
+    return undefined;
+  }
+
+  private isLegacyLongOutputThreadThreshold(raw: unknown): boolean {
+    if (raw === undefined || raw === null || raw === '') return false;
+    const value = Number(raw);
+    if (!Number.isInteger(value)) return false;
+    return value > LONG_OUTPUT_THREAD_THRESHOLD_MAX && value <= LEGACY_LONG_OUTPUT_THREAD_THRESHOLD_MAX;
+  }
+
+  private migrateLegacyStoredLongOutputThreadThreshold(storedConfig: StoredConfig): StoredConfig {
+    if (!this.isLegacyLongOutputThreadThreshold(storedConfig.longOutputThreadThreshold)) {
+      return storedConfig;
+    }
+
+    try {
+      this.saveConfig({ longOutputThreadThreshold: LONG_OUTPUT_THREAD_THRESHOLD_MAX });
+    } catch {
+      // Best-effort migration. Runtime will still use clamped value in-memory.
+    }
+
+    return {
+      ...storedConfig,
+      longOutputThreadThreshold: LONG_OUTPUT_THREAD_THRESHOLD_MAX,
+    };
+  }
+
   private parseBooleanCandidate(raw: unknown): boolean | undefined {
     if (raw === undefined || raw === null || raw === '') return undefined;
     if (typeof raw === 'boolean') return raw;
@@ -393,7 +440,7 @@ export class ConfigManager {
 
   private validateRawInputs(): void {
     const errors: string[] = [];
-    const storedConfig = this.loadStoredConfig();
+    const storedConfig = this.migrateLegacyStoredLongOutputThreadThreshold(this.loadStoredConfig());
 
     const rawPlatform = storedConfig.messagingPlatform || this.env.get('MESSAGING_PLATFORM');
     if (rawPlatform && rawPlatform !== 'discord' && rawPlatform !== 'slack') {
@@ -533,10 +580,10 @@ export class ConfigManager {
     const rawStoredLongOutputThreadThreshold = storedConfig.longOutputThreadThreshold;
     if (
       rawStoredLongOutputThreadThreshold !== undefined &&
-      this.parseCaptureLineCountCandidate(rawStoredLongOutputThreadThreshold, 1200, 20000) === undefined
+      this.parseLongOutputThreadThresholdCandidate(rawStoredLongOutputThreadThreshold, true) === undefined
     ) {
       errors.push(
-        `Stored longOutputThreadThreshold must be an integer between 1200 and 20000 (received: ${String(rawStoredLongOutputThreadThreshold)})`,
+        `Stored longOutputThreadThreshold must be an integer between ${LONG_OUTPUT_THREAD_THRESHOLD_MIN} and ${LONG_OUTPUT_THREAD_THRESHOLD_MAX} (received: ${String(rawStoredLongOutputThreadThreshold)})`,
       );
     }
 
@@ -630,10 +677,10 @@ export class ConfigManager {
     const rawEnvLongOutputThreadThreshold = this.env.get('AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD');
     if (
       rawEnvLongOutputThreadThreshold !== undefined &&
-      this.parseCaptureLineCountCandidate(rawEnvLongOutputThreadThreshold, 1200, 20000) === undefined
+      this.parseLongOutputThreadThresholdCandidate(rawEnvLongOutputThreadThreshold, true) === undefined
     ) {
       errors.push(
-        `AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD must be an integer between 1200 and 20000 (received: ${rawEnvLongOutputThreadThreshold})`,
+        `AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD must be an integer between ${LONG_OUTPUT_THREAD_THRESHOLD_MIN} and ${LONG_OUTPUT_THREAD_THRESHOLD_MAX} (received: ${rawEnvLongOutputThreadThreshold})`,
       );
     }
 
