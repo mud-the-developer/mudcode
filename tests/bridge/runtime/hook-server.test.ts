@@ -11,6 +11,7 @@ function createMockMessaging(platform: 'discord' | 'slack' = 'slack') {
     platform,
     sendToChannel: vi.fn().mockResolvedValue(undefined),
     sendToProgressThread: vi.fn().mockResolvedValue(undefined),
+    sendToProgressThreadWithFiles: vi.fn().mockResolvedValue(undefined),
     sendToChannelWithFiles: vi.fn().mockResolvedValue(undefined),
     sendLongOutput: vi.fn().mockResolvedValue(undefined),
     addReactionToMessage: vi.fn().mockResolvedValue(undefined),
@@ -271,6 +272,7 @@ describe('BridgeHookServer', () => {
     });
 
     it('includes latest progress mode snapshot for instance', async () => {
+      process.env.AGENT_DISCORD_CODEX_EVENT_ONLY = '0';
       const stateManager = createMockStateManager({
         test: {
           projectName: 'test',
@@ -319,6 +321,61 @@ describe('BridgeHookServer', () => {
       });
       expect(typeof payload.instances[0]?.eventProgressModeAgeMs).toBe('number');
       expect(typeof payload.instances[0]?.eventProgressModeUpdatedAt).toBe('string');
+    });
+
+    it('includes orchestrator role and policy hints in runtime snapshot', async () => {
+      const stateManager = createMockStateManager({
+        test: {
+          projectName: 'test',
+          projectPath: tempDir,
+          tmuxSession: 'bridge',
+          agents: { codex: true },
+          discordChannels: { codex: 'ch-super' },
+          instances: {
+            codex: { instanceId: 'codex', agentType: 'codex', channelId: 'ch-super', eventHook: true },
+            'codex-2': { instanceId: 'codex-2', agentType: 'codex', channelId: 'ch-worker', eventHook: true },
+          },
+          orchestrator: {
+            enabled: true,
+            supervisorInstanceId: 'codex',
+            workerInstanceIds: ['codex-2'],
+            workerFinalVisibility: 'thread',
+            qos: { maxConcurrentWorkers: 3 },
+            progressPolicy: {
+              byChannelId: { 'ch-worker': { mode: 'thread' } },
+            },
+            supervisorFinalFormat: { enforce: true, maxRetries: 2 },
+          },
+          createdAt: new Date(),
+          lastActive: new Date(),
+        },
+      });
+      const pendingTracker = createMockPendingTracker() as any;
+      pendingTracker.getRuntimeSnapshot = vi.fn().mockReturnValue({ pendingDepth: 0 });
+      startServer({ stateManager: stateManager as any, pendingTracker });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const res = await getPath(port, '/runtime-status');
+      expect(res.status).toBe(200);
+      const payload = JSON.parse(res.body) as {
+        instances: Array<Record<string, unknown>>;
+      };
+      const supervisor = payload.instances.find((entry) => entry.instanceId === 'codex');
+      const worker = payload.instances.find((entry) => entry.instanceId === 'codex-2');
+
+      expect(supervisor).toMatchObject({
+        orchestratorEnabled: true,
+        orchestratorRole: 'supervisor',
+        orchestratorQosMaxConcurrentWorkers: 3,
+        orchestratorSupervisorFinalFormatEnforce: true,
+        orchestratorSupervisorFinalFormatMaxRetries: 2,
+      });
+      expect(worker).toMatchObject({
+        orchestratorEnabled: true,
+        orchestratorRole: 'worker',
+        orchestratorWorkerVisibility: 'thread',
+        orchestratorProgressPolicyMode: 'thread',
+      });
     });
   });
 
@@ -1074,6 +1131,70 @@ describe('BridgeHookServer', () => {
       expect(mockMessaging.sendToChannel).not.toHaveBeenCalled();
     });
 
+    it('applies orchestrator progress policy directives when event override is absent', async () => {
+      process.env.AGENT_DISCORD_EVENT_PROGRESS_FORWARD = 'off';
+      const mockMessaging = createMockMessaging('discord');
+      const mockPendingTracker = createMockPendingTracker();
+      const stateManager = createMockStateManager({
+        test: {
+          projectName: 'test',
+          projectPath: tempDir,
+          tmuxSession: 'bridge',
+          agents: { codex: true },
+          discordChannels: { codex: 'ch-123' },
+          instances: {
+            codex: { instanceId: 'codex', agentType: 'codex', channelId: 'ch-123', eventHook: true },
+          },
+          orchestrator: {
+            enabled: true,
+            supervisorInstanceId: 'codex',
+            workerFinalVisibility: 'hidden',
+            progressPolicy: {
+              default: { mode: 'off' },
+              byInstanceId: { codex: { mode: 'off' } },
+              byChannelId: { 'ch-123': { mode: 'thread', blockStreamingEnabled: false } },
+            },
+          },
+          createdAt: new Date(),
+          lastActive: new Date(),
+        },
+      });
+      startServer({
+        messaging: mockMessaging as any,
+        stateManager: stateManager as any,
+        pendingTracker: mockPendingTracker as any,
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const res = await postJSON(port, '/agent-event', {
+        projectName: 'test',
+        agentType: 'codex',
+        instanceId: 'codex',
+        turnId: 'msg-progress-policy-1',
+        eventId: 'evt-progress-policy-1',
+        seq: 1,
+        type: 'session.progress',
+        text: 'policy thread delta',
+        source: 'codex-poc',
+      });
+
+      expect(res.status).toBe(200);
+      expect(mockMessaging.sendToProgressThread).toHaveBeenCalledWith('ch-123', 'policy thread delta');
+      expect(mockMessaging.sendToChannel).not.toHaveBeenCalled();
+
+      const runtimeRes = await getPath(port, '/runtime-status');
+      expect(runtimeRes.status).toBe(200);
+      const runtimePayload = JSON.parse(runtimeRes.body) as {
+        instances: Array<Record<string, unknown>>;
+      };
+      expect(runtimePayload.instances[0]).toMatchObject({
+        projectName: 'test',
+        instanceId: 'codex',
+        orchestratorRole: 'supervisor',
+        orchestratorProgressPolicyMode: 'thread',
+      });
+    });
+
     it('forces channel progress override to thread in codex event-only mode', async () => {
       process.env.AGENT_DISCORD_CODEX_EVENT_ONLY = '1';
       process.env.AGENT_DISCORD_EVENT_PROGRESS_FORWARD = 'channel';
@@ -1374,6 +1495,7 @@ describe('BridgeHookServer', () => {
     });
 
     it('does not duplicate transcript fallback when per-turn progress mode is channel', async () => {
+      process.env.AGENT_DISCORD_CODEX_EVENT_ONLY = '0';
       process.env.AGENT_DISCORD_EVENT_PROGRESS_FORWARD = 'off';
       const mockMessaging = createMockMessaging('discord');
       const mockPendingTracker = createMockPendingTracker();
@@ -1485,6 +1607,303 @@ describe('BridgeHookServer', () => {
       expect(mockMessaging.sendToProgressThread).toHaveBeenCalledWith('ch-123', 'thread only delta');
       expect(mockMessaging.sendToChannel).toHaveBeenCalledTimes(1);
       expect(String(mockMessaging.sendToChannel.mock.calls[0]?.[1] || '')).toContain('thread only delta');
+    });
+
+    it('suppresses worker terminal output when orchestrator hidden visibility is enabled', async () => {
+      const mockMessaging = createMockMessaging('discord');
+      const mockPendingTracker = createMockPendingTracker();
+      const stateManager = createMockStateManager({
+        test: {
+          projectName: 'test',
+          projectPath: tempDir,
+          tmuxSession: 'bridge',
+          agents: { codex: true },
+          discordChannels: { codex: 'ch-super' },
+          instances: {
+            codex: { instanceId: 'codex', agentType: 'codex', channelId: 'ch-super', eventHook: true },
+            'codex-2': { instanceId: 'codex-2', agentType: 'codex', channelId: 'ch-worker', eventHook: true },
+          },
+          orchestrator: {
+            enabled: true,
+            supervisorInstanceId: 'codex',
+            workerInstanceIds: ['codex-2'],
+            workerFinalVisibility: 'hidden',
+          },
+          createdAt: new Date(),
+          lastActive: new Date(),
+        },
+      });
+      startServer({
+        messaging: mockMessaging as any,
+        stateManager: stateManager as any,
+        pendingTracker: mockPendingTracker as any,
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const res = await postJSON(port, '/agent-event', {
+        projectName: 'test',
+        agentType: 'codex',
+        instanceId: 'codex-2',
+        turnId: 'msg-worker-final-hidden-1',
+        eventId: 'evt-worker-final-hidden-1',
+        seq: 1,
+        type: 'session.final',
+        text: 'worker final should be hidden',
+        source: 'codex-poc',
+      });
+
+      expect(res.status).toBe(200);
+      expect(mockMessaging.sendToChannel).not.toHaveBeenCalled();
+      expect(mockMessaging.sendToProgressThread).not.toHaveBeenCalled();
+      expect(mockPendingTracker.markCompletedByMessageId).toHaveBeenCalledWith(
+        'test',
+        'codex',
+        'msg-worker-final-hidden-1',
+        'codex-2',
+      );
+    });
+
+    it('suppresses worker progress output when orchestrator hidden visibility is enabled', async () => {
+      const mockMessaging = createMockMessaging('discord');
+      const mockPendingTracker = createMockPendingTracker();
+      const stateManager = createMockStateManager({
+        test: {
+          projectName: 'test',
+          projectPath: tempDir,
+          tmuxSession: 'bridge',
+          agents: { codex: true },
+          discordChannels: { codex: 'ch-super' },
+          instances: {
+            codex: { instanceId: 'codex', agentType: 'codex', channelId: 'ch-super', eventHook: true },
+            'codex-2': { instanceId: 'codex-2', agentType: 'codex', channelId: 'ch-worker', eventHook: true },
+          },
+          orchestrator: {
+            enabled: true,
+            supervisorInstanceId: 'codex',
+            workerInstanceIds: ['codex-2'],
+            workerFinalVisibility: 'hidden',
+          },
+          createdAt: new Date(),
+          lastActive: new Date(),
+        },
+      });
+      startServer({
+        messaging: mockMessaging as any,
+        stateManager: stateManager as any,
+        pendingTracker: mockPendingTracker as any,
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const res = await postJSON(port, '/agent-event', {
+        projectName: 'test',
+        agentType: 'codex',
+        instanceId: 'codex-2',
+        turnId: 'msg-worker-progress-hidden-1',
+        eventId: 'evt-worker-progress-hidden-1',
+        seq: 1,
+        type: 'session.progress',
+        text: 'worker progress should be hidden',
+        progressMode: 'thread',
+        progressBlockStreaming: false,
+        source: 'codex-poc',
+      });
+
+      expect(res.status).toBe(200);
+      expect(mockMessaging.sendToChannel).not.toHaveBeenCalled();
+      expect(mockMessaging.sendToProgressThread).not.toHaveBeenCalled();
+
+      const runtimeRes = await getPath(port, '/runtime-status');
+      expect(runtimeRes.status).toBe(200);
+      const runtimePayload = JSON.parse(runtimeRes.body) as {
+        instances: Array<Record<string, unknown>>;
+      };
+      const workerRuntime = runtimePayload.instances.find((entry) => entry.instanceId === 'codex-2');
+      expect(workerRuntime).toMatchObject({
+        projectName: 'test',
+        instanceId: 'codex-2',
+        orchestratorEnabled: true,
+        orchestratorRole: 'worker',
+        orchestratorWorkerVisibility: 'hidden',
+        eventProgressMode: 'off',
+      });
+    });
+
+    it('routes worker progress output to progress thread when orchestrator visibility is thread', async () => {
+      const mockMessaging = createMockMessaging('discord');
+      const mockPendingTracker = createMockPendingTracker();
+      const stateManager = createMockStateManager({
+        test: {
+          projectName: 'test',
+          projectPath: tempDir,
+          tmuxSession: 'bridge',
+          agents: { codex: true },
+          discordChannels: { codex: 'ch-super' },
+          instances: {
+            codex: { instanceId: 'codex', agentType: 'codex', channelId: 'ch-super', eventHook: true },
+            'codex-2': { instanceId: 'codex-2', agentType: 'codex', channelId: 'ch-worker', eventHook: true },
+          },
+          orchestrator: {
+            enabled: true,
+            supervisorInstanceId: 'codex',
+            workerInstanceIds: ['codex-2'],
+            workerFinalVisibility: 'thread',
+          },
+          createdAt: new Date(),
+          lastActive: new Date(),
+        },
+      });
+      startServer({
+        messaging: mockMessaging as any,
+        stateManager: stateManager as any,
+        pendingTracker: mockPendingTracker as any,
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const res = await postJSON(port, '/agent-event', {
+        projectName: 'test',
+        agentType: 'codex',
+        instanceId: 'codex-2',
+        turnId: 'msg-worker-progress-thread-1',
+        eventId: 'evt-worker-progress-thread-1',
+        seq: 1,
+        type: 'session.progress',
+        text: 'worker progress should go thread',
+        progressMode: 'off',
+        progressBlockStreaming: false,
+        source: 'codex-poc',
+      });
+
+      expect(res.status).toBe(200);
+      expect(mockMessaging.sendToProgressThread).toHaveBeenCalledWith('ch-worker', 'worker progress should go thread');
+      expect(mockMessaging.sendToChannel).not.toHaveBeenCalled();
+
+      const runtimeRes = await getPath(port, '/runtime-status');
+      expect(runtimeRes.status).toBe(200);
+      const runtimePayload = JSON.parse(runtimeRes.body) as {
+        instances: Array<Record<string, unknown>>;
+      };
+      const workerRuntime = runtimePayload.instances.find((entry) => entry.instanceId === 'codex-2');
+      expect(workerRuntime).toMatchObject({
+        projectName: 'test',
+        instanceId: 'codex-2',
+        orchestratorEnabled: true,
+        orchestratorRole: 'worker',
+        orchestratorWorkerVisibility: 'thread',
+        eventProgressMode: 'thread',
+      });
+    });
+
+    it('routes worker terminal output to progress thread when orchestrator visibility is thread', async () => {
+      const mockMessaging = createMockMessaging('discord');
+      const mockPendingTracker = createMockPendingTracker();
+      const stateManager = createMockStateManager({
+        test: {
+          projectName: 'test',
+          projectPath: tempDir,
+          tmuxSession: 'bridge',
+          agents: { codex: true },
+          discordChannels: { codex: 'ch-super' },
+          instances: {
+            codex: { instanceId: 'codex', agentType: 'codex', channelId: 'ch-super', eventHook: true },
+            'codex-2': { instanceId: 'codex-2', agentType: 'codex', channelId: 'ch-worker', eventHook: true },
+          },
+          orchestrator: {
+            enabled: true,
+            supervisorInstanceId: 'codex',
+            workerInstanceIds: ['codex-2'],
+            workerFinalVisibility: 'thread',
+          },
+          createdAt: new Date(),
+          lastActive: new Date(),
+        },
+      });
+      startServer({
+        messaging: mockMessaging as any,
+        stateManager: stateManager as any,
+        pendingTracker: mockPendingTracker as any,
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const res = await postJSON(port, '/agent-event', {
+        projectName: 'test',
+        agentType: 'codex',
+        instanceId: 'codex-2',
+        turnId: 'msg-worker-final-thread-1',
+        eventId: 'evt-worker-final-thread-1',
+        seq: 1,
+        type: 'session.final',
+        text: 'worker final should go thread',
+        source: 'codex-poc',
+      });
+
+      expect(res.status).toBe(200);
+      expect(mockMessaging.sendToProgressThread).toHaveBeenCalledWith('ch-worker', 'worker final should go thread');
+      expect(mockMessaging.sendToChannel).not.toHaveBeenCalled();
+      expect(mockPendingTracker.markCompletedByMessageId).toHaveBeenCalledWith(
+        'test',
+        'codex',
+        'msg-worker-final-thread-1',
+        'codex-2',
+      );
+    });
+
+    it('relays worker file attachments to progress thread when orchestrator visibility is thread', async () => {
+      const mockMessaging = createMockMessaging('discord');
+      const mockPendingTracker = createMockPendingTracker();
+      const filesDir = join(tempDir, '.mudcode', 'files');
+      mkdirSync(filesDir, { recursive: true });
+      const outputFile = join(filesDir, 'worker-out.txt');
+      writeFileSync(outputFile, 'artifact');
+
+      const stateManager = createMockStateManager({
+        test: {
+          projectName: 'test',
+          projectPath: tempDir,
+          tmuxSession: 'bridge',
+          agents: { codex: true },
+          discordChannels: { codex: 'ch-super' },
+          instances: {
+            codex: { instanceId: 'codex', agentType: 'codex', channelId: 'ch-super', eventHook: true },
+            'codex-2': { instanceId: 'codex-2', agentType: 'codex', channelId: 'ch-worker', eventHook: true },
+          },
+          orchestrator: {
+            enabled: true,
+            supervisorInstanceId: 'codex',
+            workerInstanceIds: ['codex-2'],
+            workerFinalVisibility: 'thread',
+          },
+          createdAt: new Date(),
+          lastActive: new Date(),
+        },
+      });
+      startServer({
+        messaging: mockMessaging as any,
+        stateManager: stateManager as any,
+        pendingTracker: mockPendingTracker as any,
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const res = await postJSON(port, '/agent-event', {
+        projectName: 'test',
+        agentType: 'codex',
+        instanceId: 'codex-2',
+        turnId: 'msg-worker-final-files-thread-1',
+        eventId: 'evt-worker-final-files-thread-1',
+        seq: 1,
+        type: 'session.final',
+        text: 'worker final artifact ready',
+        turnText: `artifact path: ${outputFile}`,
+        source: 'codex-poc',
+      });
+
+      expect(res.status).toBe(200);
+      expect(mockMessaging.sendToProgressThread).toHaveBeenCalledWith('ch-worker', 'worker final artifact ready');
+      expect(mockMessaging.sendToProgressThreadWithFiles).toHaveBeenCalledWith(
+        'ch-worker',
+        expect.stringContaining('Generated file'),
+        [outputFile],
+      );
+      expect(mockMessaging.sendToChannelWithFiles).not.toHaveBeenCalled();
     });
 
     it('handles session.idle with text', async () => {

@@ -69,6 +69,9 @@ describe('healthCommand', () => {
     vi.clearAllMocks();
     process.exitCode = 0;
     delete process.env.AGENT_DISCORD_CODEX_EVENT_ONLY;
+    delete process.env.AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK;
+    delete process.env.AGENT_DISCORD_CAPTURE_PROMPT_ECHO_FALLBACK_EVENT_HOOK;
+    delete process.env.AGENT_DISCORD_EVENT_HOOK_CAPTURE_FALLBACK_STALE_GRACE_MS;
     delete process.env.AGENT_DISCORD_CODEX_EVENT_PROGRESS_MODE;
     delete process.env.AGENT_DISCORD_EVENT_PROGRESS_FORWARD;
     delete process.env.AGENT_DISCORD_EVENT_PROGRESS_MODE_STALE_WARN_MS;
@@ -91,6 +94,9 @@ describe('healthCommand', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     delete process.env.AGENT_DISCORD_CODEX_EVENT_ONLY;
+    delete process.env.AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK;
+    delete process.env.AGENT_DISCORD_CAPTURE_PROMPT_ECHO_FALLBACK_EVENT_HOOK;
+    delete process.env.AGENT_DISCORD_EVENT_HOOK_CAPTURE_FALLBACK_STALE_GRACE_MS;
     delete process.env.AGENT_DISCORD_CODEX_EVENT_PROGRESS_MODE;
     delete process.env.AGENT_DISCORD_EVENT_PROGRESS_FORWARD;
     delete process.env.AGENT_DISCORD_EVENT_PROGRESS_MODE_STALE_WARN_MS;
@@ -409,6 +415,42 @@ describe('healthCommand', () => {
       (String(c.detail || '').includes('progressMode=channel') || String(c.detail || '').includes('differs from expected')),
     );
     expect(contractWarns.length).toBeGreaterThanOrEqual(1);
+
+    logSpy.mockRestore();
+  });
+
+  it('warns for event-only fallback knobs that can leak intermediary output', async () => {
+    process.env.AGENT_DISCORD_CODEX_EVENT_ONLY = '1';
+    process.env.AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK = '1';
+    process.env.AGENT_DISCORD_CAPTURE_PROMPT_ECHO_FALLBACK_EVENT_HOOK = '1';
+    process.env.AGENT_DISCORD_EVENT_HOOK_CAPTURE_FALLBACK_STALE_GRACE_MS = '45000';
+
+    const { healthCommand } = await import('../../../src/cli/commands/health.js');
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await healthCommand({ json: true });
+
+    const payload = JSON.parse(String(logSpy.mock.calls[0]?.[0] || '{}'));
+    const contractWarnings = payload.checks.filter(
+      (c: { name?: string; level?: string; detail?: string }) =>
+        c.name === 'contract:event-only' && c.level === 'warn',
+    );
+    expect(contractWarnings.length).toBeGreaterThanOrEqual(3);
+    expect(
+      contractWarnings.some((c: { detail?: string }) =>
+        String(c.detail || '').includes('AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK=1'),
+      ),
+    ).toBe(true);
+    expect(
+      contractWarnings.some((c: { detail?: string }) =>
+        String(c.detail || '').includes('AGENT_DISCORD_CAPTURE_PROMPT_ECHO_FALLBACK_EVENT_HOOK=0'),
+      ),
+    ).toBe(true);
+    expect(
+      contractWarnings.some((c: { detail?: string }) =>
+        String(c.detail || '').includes('stale grace is high'),
+      ),
+    ).toBe(true);
 
     logSpy.mockRestore();
   });

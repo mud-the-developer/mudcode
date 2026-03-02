@@ -1,4 +1,6 @@
 import chalk from 'chalk';
+import { homedir } from 'os';
+import { join } from 'path';
 import { agentRegistry } from '../../agents/index.js';
 import { stateManager } from '../../state/index.js';
 import { config, getConfigPath, getConfigValue, saveConfig } from '../../config/index.js';
@@ -13,8 +15,10 @@ export async function configCommand(options: {
   port?: string | number;
   defaultAgent?: string;
   opencodePermission?: 'allow' | 'default';
+  promptRefinerPreset?: 'safe' | 'enforce-policy';
   promptRefinerMode?: 'off' | 'shadow' | 'enforce';
   promptRefinerLogPath?: string;
+  promptRefinerPolicyPath?: string;
   slackBotToken?: string;
   slackAppToken?: string;
   platform?: string;
@@ -32,6 +36,8 @@ export async function configCommand(options: {
   captureProgressOutput?: 'off' | 'thread' | 'channel';
   freeze?: boolean;
 }) {
+  const defaultPromptRefinerPolicyPath = join(homedir(), '.mudcode', 'prompt-refiner-active-policy.txt');
+
   const parseBoundedInt = (raw: string | number, label: string, min: number, max: number): number => {
     const valueRaw = String(raw).trim();
     if (!/^\d+$/.test(valueRaw)) {
@@ -61,6 +67,7 @@ export async function configCommand(options: {
       promptRefinerMode: config.promptRefiner?.mode,
       promptRefinerLogPath: config.promptRefiner?.logPath,
       promptRefinerMaxLogChars: config.promptRefiner?.maxLogChars,
+      promptRefinerPolicyPath: config.promptRefiner?.policyPath,
       capturePollMs: config.capture?.pollMs,
       capturePendingQuietPolls: config.capture?.pendingQuietPolls,
       capturePendingInitialQuietPollsCodex: config.capture?.pendingInitialQuietPollsCodex,
@@ -99,6 +106,7 @@ export async function configCommand(options: {
     console.log(chalk.gray(`   OpenCode Permission Mode: ${config.opencode?.permissionMode || '(not set)'}`));
     console.log(chalk.gray(`   Prompt Refiner Mode: ${config.promptRefiner?.mode || '(off)'}`));
     console.log(chalk.gray(`   Prompt Refiner Log Path: ${config.promptRefiner?.logPath || '(default)'}`));
+    console.log(chalk.gray(`   Prompt Refiner Policy Path: ${config.promptRefiner?.policyPath || '(not set)'}`));
     console.log(chalk.gray(`   Capture Poll Interval ms: ${config.capture?.pollMs || '(default)'}`));
     console.log(chalk.gray(`   Capture Quiet Polls: ${config.capture?.pendingQuietPolls || '(default)'}`));
     console.log(chalk.gray(`   Capture Initial Quiet Polls (Codex): ${config.capture?.pendingInitialQuietPollsCodex ?? '(default)'}`));
@@ -208,6 +216,26 @@ export async function configCommand(options: {
     updated = true;
   }
 
+  if (options.promptRefinerPreset) {
+    if (options.promptRefinerPreset === 'safe') {
+      saveConfig({
+        promptRefinerMode: 'shadow',
+        promptRefinerPolicyPath: undefined,
+      });
+      console.log(chalk.green('✅ Prompt refiner preset applied: safe (mode=shadow, policy-path=off)'));
+    } else {
+      const policyPath = config.promptRefiner?.policyPath || defaultPromptRefinerPolicyPath;
+      saveConfig({
+        promptRefinerMode: 'enforce',
+        promptRefinerPolicyPath: policyPath,
+      });
+      console.log(
+        chalk.green(`✅ Prompt refiner preset applied: enforce-policy (mode=enforce, policy-path=${policyPath})`),
+      );
+    }
+    updated = true;
+  }
+
   if (options.promptRefinerMode) {
     saveConfig({ promptRefinerMode: options.promptRefinerMode });
     console.log(chalk.green(`✅ Prompt refiner mode saved: ${options.promptRefinerMode}`));
@@ -222,6 +250,18 @@ export async function configCommand(options: {
     } else {
       saveConfig({ promptRefinerLogPath: path });
       console.log(chalk.green(`✅ Prompt refiner log path saved: ${path}`));
+    }
+    updated = true;
+  }
+
+  if (options.promptRefinerPolicyPath !== undefined) {
+    const path = options.promptRefinerPolicyPath.trim();
+    if (!path || path.toLowerCase() === 'default' || path.toLowerCase() === 'off') {
+      saveConfig({ promptRefinerPolicyPath: undefined });
+      console.log(chalk.green('✅ Prompt refiner policy path cleared'));
+    } else {
+      saveConfig({ promptRefinerPolicyPath: path });
+      console.log(chalk.green(`✅ Prompt refiner policy path saved: ${path}`));
     }
     updated = true;
   }
@@ -347,8 +387,11 @@ export async function configCommand(options: {
     console.log(chalk.gray('  mudcode config --slack-bot-token xoxb-...'));
     console.log(chalk.gray('  mudcode config --slack-app-token xapp-...'));
     console.log(chalk.gray('  mudcode config --opencode-permission allow'));
+    console.log(chalk.gray('  mudcode config --prompt-refiner-preset safe'));
+    console.log(chalk.gray('  mudcode config --prompt-refiner-preset enforce-policy'));
     console.log(chalk.gray('  mudcode config --prompt-refiner-mode shadow'));
     console.log(chalk.gray('  mudcode config --prompt-refiner-log-path ~/.mudcode/prompt-refiner-shadow.jsonl'));
+    console.log(chalk.gray('  mudcode config --prompt-refiner-policy-path ~/.mudcode/prompt-refiner-active-policy.txt'));
     console.log(chalk.gray('  mudcode config --capture-preset codex-final'));
     console.log(chalk.gray('  mudcode config --capture-codex-final-only on'));
     console.log(chalk.gray('  mudcode config --capture-progress-output thread'));

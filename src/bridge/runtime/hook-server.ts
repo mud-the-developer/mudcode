@@ -13,24 +13,19 @@ import {
 } from '../../state/instances.js';
 import { PendingMessageTracker, type PendingRuntimeSnapshot } from './pending-message-tracker.js';
 import { formatDiscordOutput, wrapDiscordCodeblock } from '../formatting/discord-output-formatter.js';
+import { EventProgressBlockPipeline } from './event-progress-block-pipeline.js';
+import {
+  resolveOrchestratorRole,
+  resolveOrchestratorWorkerVisibility,
+  resolveProgressPolicyDirective,
+  type EventProgressForwardMode,
+} from './orchestrator-progress-policy.js';
 
 const LONG_OUTPUT_THREAD_THRESHOLD_MIN = 1200;
 const LONG_OUTPUT_THREAD_THRESHOLD_MAX = 20000;
 const LEGACY_LONG_OUTPUT_THREAD_THRESHOLD_MAX = 100000;
-type EventProgressForwardMode = 'off' | 'thread' | 'channel';
 type EventProgressActiveMode = Exclude<EventProgressForwardMode, 'off'>;
 type EventLifecycleStrictMode = 'off' | 'warn' | 'reject';
-
-interface ProgressBlockState {
-  key: string;
-  projectName: string;
-  agentType: string;
-  instanceId?: string;
-  turnId?: string;
-  channelId: string;
-  mode: EventProgressActiveMode;
-  text: string;
-}
 
 interface ResolvedProgressEventConfig {
   mode: EventProgressForwardMode;
@@ -44,6 +39,36 @@ interface EventOnlyProgressGateResult {
   adjusted: boolean;
   reason?: 'event-only-channel-blocked' | 'event-only-thread-unavailable';
 }
+
+type RuntimeStatusInstanceSnapshot = {
+  projectName: string;
+  instanceId: string;
+  agentType: string;
+  orchestratorEnabled?: boolean;
+  orchestratorRole?: 'supervisor' | 'worker' | 'none';
+  orchestratorWorkerVisibility?: 'hidden' | 'thread' | 'channel';
+  orchestratorQosMaxConcurrentWorkers?: number;
+  orchestratorProgressPolicyMode?: EventProgressForwardMode;
+  orchestratorSupervisorFinalFormatEnforce?: boolean;
+  orchestratorSupervisorFinalFormatMaxRetries?: number;
+  ignoredEventCount?: number;
+  ignoredEventTypes?: Record<string, number>;
+  ignoredLastAt?: string;
+  lifecycleRejectedEventCount?: number;
+  lifecycleRejectedEventTypes?: Record<string, number>;
+  lifecycleRejectedLastAt?: string;
+  eventProgressMode?: EventProgressForwardMode;
+  eventProgressModeTurnId?: string;
+  eventProgressModeUpdatedAt?: string;
+  eventProgressModeAgeMs?: number;
+  eventLifecycleStage?: 'idle' | 'started' | 'progress' | 'final' | 'error' | 'cancelled';
+  eventLifecycleTurnId?: string;
+  eventLifecycleEventId?: string;
+  eventLifecycleSeq?: number;
+  eventLifecycleUpdatedAt?: string;
+  eventLifecycleAgeMs?: number;
+  eventLifecycleStale?: boolean;
+} & PendingRuntimeSnapshot;
 
 export interface BridgeHookServerDeps {
   port: number;
@@ -76,12 +101,15 @@ export class BridgeHookServer {
   >();
   private latestSeqByTurn = new Map<string, { seq: number; updatedAtMs: number }>();
   private startedTurnsByKey = new Map<string, number>();
-  private progressBlocksByKey = new Map<string, ProgressBlockState>();
-  private progressBlockTimersByKey = new Map<string, ReturnType<typeof setTimeout>>();
+  private progressBlockPipeline: EventProgressBlockPipeline;
   private progressTranscriptByTurn = new Map<string, { text: string; updatedAtMs: number }>();
   private progressModeByTurn = new Map<string, { mode: EventProgressForwardMode; updatedAtMs: number }>();
 
-  constructor(private deps: BridgeHookServerDeps) {}
+  constructor(private deps: BridgeHookServerDeps) {
+    this.progressBlockPipeline = new EventProgressBlockPipeline(async ({ channelId, text, mode }) => {
+      await this.sendProgressEventOutput(channelId, text, mode);
+    });
+  }
 
   private runtimeKey(projectName: string, instanceId: string): string {
     return `${projectName}:${instanceId}`;
@@ -230,7 +258,7 @@ export class BridgeHookServer {
     if (raw === 'off' || raw === 'warn' || raw === 'reject') {
       return raw;
     }
-    return 'off';
+    return 'warn';
   }
 
   private resolveStartedTurnRetentionMs(): number {
@@ -494,11 +522,11 @@ export class BridgeHookServer {
 
   private resolveCodexEventOnlyModeEnabled(): boolean {
     const raw = process.env.AGENT_DISCORD_CODEX_EVENT_ONLY;
-    if (!raw) return false;
+    if (!raw) return true;
     const normalized = raw.trim().toLowerCase();
     if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
     if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
-    return false;
+    return true;
   }
 
   private applyEventOnlyProgressModeGate(params: {
@@ -594,18 +622,34 @@ export class BridgeHookServer {
     return value;
   }
 
-  private resolveProgressEventConfig(event: Record<string, unknown>): ResolvedProgressEventConfig {
+  private resolveProgressEventConfig(params: {
+    event: Record<string, unknown>;
+    project: ReturnType<typeof normalizeProjectState>;
+    agentType: string;
+    instanceId?: string;
+    channelId?: string;
+  }): ResolvedProgressEventConfig {
+    const directive = resolveProgressPolicyDirective({
+      project: params.project,
+      agentType: params.agentType,
+      instanceId: params.instanceId,
+      channelId: params.channelId,
+    });
     const mode =
-      this.parseEventProgressForwardMode(event.progressMode) ||
+      this.parseEventProgressForwardMode(params.event.progressMode) ||
+      directive.mode ||
       this.resolveEventProgressForwardMode();
     const blockStreamingEnabled =
-      this.parseEventBoolean(event.progressBlockStreaming) ??
+      this.parseEventBoolean(params.event.progressBlockStreaming) ??
+      directive.blockStreamingEnabled ??
       this.resolveEventProgressBlockStreamingEnabled();
     const blockWindowMs =
-      this.parseEventInt(event.progressBlockWindowMs, 50, 5000) ??
+      this.parseEventInt(params.event.progressBlockWindowMs, 50, 5000) ??
+      directive.blockWindowMs ??
       this.resolveEventProgressBlockWindowMs();
     const blockMaxChars =
-      this.parseEventInt(event.progressBlockMaxChars, 200, 8000) ??
+      this.parseEventInt(params.event.progressBlockMaxChars, 200, 8000) ??
+      directive.blockMaxChars ??
       this.resolveEventProgressBlockMaxChars();
     return {
       mode,
@@ -613,6 +657,16 @@ export class BridgeHookServer {
       blockWindowMs,
       blockMaxChars,
     };
+  }
+
+  private resolveOrchestratorQosMaxConcurrency(
+    project: ReturnType<typeof normalizeProjectState>,
+  ): number | undefined {
+    const configured = project.orchestrator?.qos?.maxConcurrentWorkers;
+    if (typeof configured === 'number' && Number.isFinite(configured) && configured >= 1) {
+      return Math.min(16, Math.max(1, Math.trunc(configured)));
+    }
+    return undefined;
   }
 
   private resolveEventProgressTranscriptMaxChars(): number {
@@ -658,31 +712,8 @@ export class BridgeHookServer {
     return merged.trim();
   }
 
-  private scheduleProgressBlockFlush(key: string, delayMs: number): void {
-    if (this.progressBlockTimersByKey.has(key)) return;
-    const timer = setTimeout(() => {
-      this.progressBlockTimersByKey.delete(key);
-      void this.flushProgressBlock(key).catch((error) => {
-        console.warn(`Progress block flush failed (${key}): ${error instanceof Error ? error.message : String(error)}`);
-      });
-    }, Math.max(0, Math.trunc(delayMs)));
-    timer.unref?.();
-    this.progressBlockTimersByKey.set(key, timer);
-  }
-
-  private clearProgressBlock(key: string): void {
-    const timer = this.progressBlockTimersByKey.get(key);
-    if (timer) {
-      clearTimeout(timer);
-      this.progressBlockTimersByKey.delete(key);
-    }
-    this.progressBlocksByKey.delete(key);
-  }
-
   private clearAllProgressBlocks(): void {
-    for (const key of this.progressBlocksByKey.keys()) {
-      this.clearProgressBlock(key);
-    }
+    this.progressBlockPipeline.clearAll();
   }
 
   private buildProgressTurnKey(params: {
@@ -913,14 +944,6 @@ export class BridgeHookServer {
     };
   }
 
-  private async flushProgressBlock(key: string): Promise<void> {
-    const state = this.progressBlocksByKey.get(key);
-    this.clearProgressBlock(key);
-    if (!state) return;
-    if (!state.text || state.text.trim().length === 0) return;
-    await this.sendProgressEventOutput(state.channelId, state.text, state.mode);
-  }
-
   private async enqueueProgressBlock(params: {
     projectName: string;
     agentType: string;
@@ -933,22 +956,14 @@ export class BridgeHookServer {
     blockMaxChars: number;
   }): Promise<void> {
     const key = this.buildProgressBlockKey(params);
-    const existing = this.progressBlocksByKey.get(key);
-    const merged = existing ? this.mergeProgressBlockText(existing.text, params.text) : params.text.trim();
-    if (merged.length === 0) return;
-
-    this.progressBlocksByKey.set(key, {
-      ...params,
+    await this.progressBlockPipeline.enqueue({
       key,
-      text: merged,
+      text: params.text,
+      channelId: params.channelId,
+      mode: params.mode,
+      blockWindowMs: params.blockWindowMs,
+      blockMaxChars: params.blockMaxChars,
     });
-
-    if (merged.length >= params.blockMaxChars) {
-      await this.flushProgressBlock(key);
-      return;
-    }
-
-    this.scheduleProgressBlockFlush(key, params.blockWindowMs);
   }
 
   private clearProgressBlocksForRoute(params: {
@@ -958,21 +973,13 @@ export class BridgeHookServer {
     channelId: string;
     turnId?: string;
   }): void {
-    const keys = new Set<string>();
     if (params.turnId) {
-      keys.add(this.buildProgressBlockKey(params));
-      keys.add(this.buildProgressBlockKey({ ...params, turnId: undefined }));
-    } else {
-      const prefix = `${params.projectName}:${params.agentType}:${params.instanceId || 'na'}:${params.channelId}:`;
-      for (const key of this.progressBlocksByKey.keys()) {
-        if (key.startsWith(prefix)) {
-          keys.add(key);
-        }
-      }
+      this.progressBlockPipeline.clear(this.buildProgressBlockKey(params));
+      this.progressBlockPipeline.clear(this.buildProgressBlockKey({ ...params, turnId: undefined }));
+      return;
     }
-    for (const key of keys) {
-      this.clearProgressBlock(key);
-    }
+    const prefix = `${params.projectName}:${params.agentType}:${params.instanceId || 'na'}:${params.channelId}:`;
+    this.progressBlockPipeline.clearWhere((key) => key.startsWith(prefix));
   }
 
   private async sendEventOutput(channelId: string, text: string): Promise<void> {
@@ -1063,36 +1070,11 @@ export class BridgeHookServer {
 
   private buildRuntimeStatusPayload(): {
     generatedAt: string;
-    instances: Array<{
-      projectName: string;
-      instanceId: string;
-      agentType: string;
-      ignoredEventCount?: number;
-      ignoredEventTypes?: Record<string, number>;
-      ignoredLastAt?: string;
-      lifecycleRejectedEventCount?: number;
-      lifecycleRejectedEventTypes?: Record<string, number>;
-      lifecycleRejectedLastAt?: string;
-      eventProgressMode?: EventProgressForwardMode;
-      eventProgressModeTurnId?: string;
-      eventProgressModeUpdatedAt?: string;
-      eventProgressModeAgeMs?: number;
-      eventLifecycleStage?: 'idle' | 'started' | 'progress' | 'final' | 'error' | 'cancelled';
-      eventLifecycleTurnId?: string;
-      eventLifecycleEventId?: string;
-      eventLifecycleSeq?: number;
-      eventLifecycleUpdatedAt?: string;
-      eventLifecycleAgeMs?: number;
-      eventLifecycleStale?: boolean;
-    } & PendingRuntimeSnapshot>;
+    instances: RuntimeStatusInstanceSnapshot[];
   } {
     const projects = this.deps.stateManager.listProjects().map((project) => normalizeProjectState(project));
     const activeInstanceKeys = new Set<string>();
-    const instances: Array<{
-      projectName: string;
-      instanceId: string;
-      agentType: string;
-    } & PendingRuntimeSnapshot> = [];
+    const instances: RuntimeStatusInstanceSnapshot[] = [];
 
     for (const project of projects) {
       for (const instance of listProjectInstances(project)) {
@@ -1105,10 +1087,53 @@ export class BridgeHookServer {
           agentType: instance.agentType,
           instanceId: instance.instanceId,
         });
+        const orchestratorRole = project.orchestrator
+          ? resolveOrchestratorRole({
+              project,
+              instanceId: instance.instanceId,
+              agentType: instance.agentType,
+            })
+          : undefined;
+        const workerVisibility = resolveOrchestratorWorkerVisibility({
+          project,
+          agentType: instance.agentType,
+          instanceId: instance.instanceId,
+        });
+        const qosMaxConcurrency = this.resolveOrchestratorQosMaxConcurrency(project);
+        const progressDirective = resolveProgressPolicyDirective({
+          project,
+          agentType: instance.agentType,
+          instanceId: instance.instanceId,
+          channelId: instance.channelId,
+        });
+        const supervisorFinalFormat = project.orchestrator?.supervisorFinalFormat;
         instances.push({
           projectName: project.projectName,
           instanceId: instance.instanceId,
           agentType: instance.agentType,
+          ...(project.orchestrator?.enabled ? { orchestratorEnabled: true } : {}),
+          ...(orchestratorRole ? { orchestratorRole } : {}),
+          ...(workerVisibility ? { orchestratorWorkerVisibility: workerVisibility } : {}),
+          ...(qosMaxConcurrency !== undefined
+            ? {
+                orchestratorQosMaxConcurrentWorkers: qosMaxConcurrency,
+              }
+            : {}),
+          ...(progressDirective.mode
+            ? {
+                orchestratorProgressPolicyMode: progressDirective.mode,
+              }
+            : {}),
+          ...(supervisorFinalFormat && typeof supervisorFinalFormat.enforce === 'boolean'
+            ? {
+                orchestratorSupervisorFinalFormatEnforce: supervisorFinalFormat.enforce,
+              }
+            : {}),
+          ...(supervisorFinalFormat && typeof supervisorFinalFormat.maxRetries === 'number'
+            ? {
+                orchestratorSupervisorFinalFormatMaxRetries: supervisorFinalFormat.maxRetries,
+              }
+            : {}),
           ...this.getRuntimeSnapshotForInstance(project.projectName, instance.agentType, instance.instanceId),
           ...(ignored || {}),
           ...(lifecycleRejected || {}),
@@ -1562,20 +1587,48 @@ export class BridgeHookServer {
     }
 
     if (eventType === 'session.progress') {
-      const rawProgressConfig = this.resolveProgressEventConfig(event);
+      const rawProgressConfig = this.resolveProgressEventConfig({
+        event,
+        project: normalizedProject,
+        agentType: resolvedAgentType,
+        instanceId: resolvedInstanceId,
+        channelId,
+      });
       const modeGate = this.applyEventOnlyProgressModeGate({
         agentType: resolvedAgentType,
         mode: rawProgressConfig.mode,
       });
+      const workerVisibility = resolveOrchestratorWorkerVisibility({
+        project: normalizedProject,
+        agentType: resolvedAgentType,
+        instanceId: resolvedInstanceId,
+      });
       const progressConfig: ResolvedProgressEventConfig = {
         ...rawProgressConfig,
-        mode: modeGate.mode,
+        mode:
+          workerVisibility === 'hidden'
+            ? 'off'
+            : workerVisibility === 'thread'
+              ? 'thread'
+              : modeGate.mode,
       };
       if (modeGate.adjusted) {
         console.log(
           `🛡️ [${projectName}/${resolvedAgentType}${resolvedInstanceId ? `#${resolvedInstanceId}` : ''}] ` +
             `event-only progress mode adjusted ${rawProgressConfig.mode} -> ${progressConfig.mode}` +
             (modeGate.reason ? ` (${modeGate.reason})` : ''),
+        );
+      }
+      if (workerVisibility === 'hidden' && rawProgressConfig.mode !== 'off') {
+        console.log(
+          `🧭 [${projectName}/${resolvedAgentType}${resolvedInstanceId ? `#${resolvedInstanceId}` : ''}] ` +
+            'orchestrator suppress worker progress output',
+        );
+      }
+      if (workerVisibility === 'thread' && progressConfig.mode !== rawProgressConfig.mode) {
+        console.log(
+          `🧭 [${projectName}/${resolvedAgentType}${resolvedInstanceId ? `#${resolvedInstanceId}` : ''}] ` +
+            'orchestrator route worker progress output to thread',
         );
       }
       this.rememberProgressModeForTurn({
@@ -1682,21 +1735,58 @@ export class BridgeHookServer {
               })
             : undefined;
         const deliveredText = trimmed.length > 0 ? trimmed : (transcript || '').trim();
+        const workerVisibility = resolveOrchestratorWorkerVisibility({
+          project: normalizedProject,
+          agentType: resolvedAgentType,
+          instanceId: resolvedInstanceId,
+        });
         if (deliveredText.length > 0) {
-          // Use turnText (all assistant text from the turn) for file path extraction
-          // to handle the race condition where displayText doesn't contain file paths
-          const turnText = typeof event.turnText === 'string' ? event.turnText.trim() : '';
-          const fileSearchText = turnText || deliveredText;
-          const projectPath = project.projectPath ? resolve(project.projectPath) : '';
-          const filePaths = this.validateFilePaths(extractFilePaths(fileSearchText), projectPath);
+          if (workerVisibility === 'hidden') {
+            console.log(
+              `🧭 [${projectName}/${resolvedAgentType}${resolvedInstanceId ? `#${resolvedInstanceId}` : ''}] ` +
+                `orchestrator suppress worker terminal output for ${eventType}`,
+            );
+          } else {
+            // Use turnText (all assistant text from the turn) for file path extraction
+            // to handle the race condition where displayText doesn't contain file paths
+            const turnText = typeof event.turnText === 'string' ? event.turnText.trim() : '';
+            const fileSearchText = turnText || deliveredText;
+            const projectPath = project.projectPath ? resolve(project.projectPath) : '';
+            const filePaths = this.validateFilePaths(extractFilePaths(fileSearchText), projectPath);
 
-          // Strip file paths from the display text to avoid leaking absolute paths
-          const displayText = filePaths.length > 0 ? stripFilePaths(deliveredText, filePaths) : deliveredText;
+            // Strip file paths from the display text to avoid leaking absolute paths
+            const displayText = filePaths.length > 0 ? stripFilePaths(deliveredText, filePaths) : deliveredText;
 
-          await this.sendEventOutput(channelId, displayText);
+            if (workerVisibility === 'thread') {
+              await this.sendProgressEventOutput(channelId, displayText, 'thread');
+              if (filePaths.length > 0) {
+                if (
+                  typeof this.deps.messaging.sendToProgressThreadWithFiles === 'function'
+                ) {
+                  await this.deps.messaging.sendToProgressThreadWithFiles(
+                    channelId,
+                    this.buildFileNotice(filePaths),
+                    filePaths,
+                  );
+                } else {
+                  await this.deps.messaging.sendToChannelWithFiles(
+                    channelId,
+                    this.buildFileNotice(filePaths),
+                    filePaths,
+                  );
+                  console.log(
+                    `🧭 [${projectName}/${resolvedAgentType}${resolvedInstanceId ? `#${resolvedInstanceId}` : ''}] ` +
+                      'orchestrator thread mode relayed worker file attachments via channel fallback',
+                  );
+                }
+              }
+            } else {
+              await this.sendEventOutput(channelId, displayText);
 
-          if (filePaths.length > 0) {
-            await this.deps.messaging.sendToChannelWithFiles(channelId, this.buildFileNotice(filePaths), filePaths);
+              if (filePaths.length > 0) {
+                await this.deps.messaging.sendToChannelWithFiles(channelId, this.buildFileNotice(filePaths), filePaths);
+              }
+            }
           }
         }
 

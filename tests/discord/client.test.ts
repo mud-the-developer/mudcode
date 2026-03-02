@@ -363,6 +363,49 @@ describe('DiscordClient', () => {
       await expect(client.sendToChannel('ch-123', 'test message')).resolves.toBeUndefined();
     });
 
+    it('skips reaction API calls for non-snowflake message IDs', async () => {
+      const client = new DiscordClient('test-token');
+      const mockClient = getMockClient();
+
+      await client.addReactionToMessage('ch-123', 'orch-demo-codex-2-abc', '📥');
+      await client.replaceOwnReactionOnMessage('ch-123', 'orch-demo-codex-2-abc', '📥', '✅');
+
+      expect(mockClient.channels.fetch).not.toHaveBeenCalled();
+    });
+
+    it('applies reactions for valid snowflake message IDs', async () => {
+      const client = new DiscordClient('test-token');
+      const react = vi.fn().mockResolvedValue(undefined);
+      const remove = vi.fn().mockResolvedValue(undefined);
+      const mockMessage = {
+        react,
+        reactions: {
+          cache: {
+            find: vi.fn().mockReturnValue({ users: { remove } }),
+          },
+        },
+      };
+      const mockChannel = {
+        isTextBased: () => true,
+        messages: {
+          fetch: vi.fn().mockResolvedValue(mockMessage),
+        },
+      };
+      const mockClient = getMockClient();
+      mockClient.user = { id: 'bot-1', tag: 'TestBot#1234' };
+      mockClient.channels.fetch.mockResolvedValue(mockChannel);
+
+      const messageId = '123456789012345678';
+      await client.addReactionToMessage('ch-123', messageId, '📥');
+      await client.replaceOwnReactionOnMessage('ch-123', messageId, '📥', '✅');
+
+      expect(mockClient.channels.fetch).toHaveBeenCalledWith('ch-123');
+      expect(mockChannel.messages.fetch).toHaveBeenCalledWith(messageId);
+      expect(react).toHaveBeenNthCalledWith(1, '📥');
+      expect(react).toHaveBeenNthCalledWith(2, '✅');
+      expect(remove).toHaveBeenCalledWith('bot-1');
+    });
+
     it('sendLongOutput posts summary and full text in a thread', async () => {
       const client = new DiscordClient('test-token');
       const threadSend = vi.fn().mockResolvedValue(undefined);

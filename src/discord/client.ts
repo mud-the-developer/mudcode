@@ -1199,6 +1199,42 @@ export class DiscordClient implements MessagingClient {
     }
   }
 
+  async sendToProgressThreadWithFiles(channelId: string, content: string, filePaths: string[]): Promise<void> {
+    const files = filePaths.filter((path) => typeof path === 'string' && path.trim().length > 0);
+    if (files.length === 0) {
+      if (content.trim().length > 0) {
+        await this.sendToProgressThread(channelId, content);
+      }
+      return;
+    }
+
+    try {
+      const target = await this.resolveProgressThreadTarget(channelId);
+      if (!target) {
+        await this.sendToChannelWithFiles(channelId, content, files);
+        return;
+      }
+
+      const chunkSize = 10;
+      for (let start = 0; start < files.length; start += chunkSize) {
+        const slice = files.slice(start, start + chunkSize);
+        const attachments = slice.map((fp) => new AttachmentBuilder(fp));
+        const prefix =
+          start === 0
+            ? content || undefined
+            : `${content}\n(continued ${Math.floor(start / chunkSize) + 1})`;
+        await this.enqueueSend(target.queueKey, async () => {
+          await this.sendWithRetry(`progress-files:${target.queueKey}`, async () =>
+            target.target.send(this.buildFileSendPayload(prefix, attachments)),
+          );
+        });
+      }
+    } catch (error) {
+      console.warn(`Failed to send progress files to thread for ${channelId}:`, error);
+      await this.sendToChannelWithFiles(channelId, content, files);
+    }
+  }
+
   async sendLongOutput(channelId: string, content: string): Promise<void> {
     const full = content.trim();
     if (full.length === 0) return;
@@ -1280,7 +1316,12 @@ export class DiscordClient implements MessagingClient {
     }
   }
 
+  private isDiscordSnowflake(value: string): boolean {
+    return /^\d{17,20}$/.test(value.trim());
+  }
+
   async addReactionToMessage(channelId: string, messageId: string, emoji: string): Promise<void> {
+    if (!this.isDiscordSnowflake(messageId)) return;
     try {
       const channel = await this.client.channels.fetch(channelId);
       if (!channel?.isTextBased() || !('messages' in channel)) return;
@@ -1292,6 +1333,7 @@ export class DiscordClient implements MessagingClient {
   }
 
   async replaceOwnReactionOnMessage(channelId: string, messageId: string, fromEmoji: string, toEmoji: string): Promise<void> {
+    if (!this.isDiscordSnowflake(messageId)) return;
     try {
       const channel = await this.client.channels.fetch(channelId);
       if (!channel?.isTextBased() || !('messages' in channel)) return;

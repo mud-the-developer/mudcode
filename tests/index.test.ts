@@ -24,7 +24,7 @@ import { AgentBridge } from '../src/index.js';
 import type { IStateManager } from '../src/types/interfaces.js';
 import type { BridgeConfig, ProjectState } from '../src/types/index.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
@@ -87,6 +87,9 @@ function createMockTmux() {
     capturePaneFromWindow: vi.fn(),
     startAgentInWindow: vi.fn(),
     setSessionEnv: vi.fn(),
+    sessionExistsFull: vi.fn().mockReturnValue(true),
+    windowExists: vi.fn().mockReturnValue(false),
+    killWindow: vi.fn(),
     listSessions: vi.fn().mockReturnValue([]),
     createSession: vi.fn(),
     sendKeys: vi.fn(),
@@ -112,6 +115,20 @@ function createMockRegistry() {
     _mockAdapter: mockAdapter,
   } as any;
 }
+
+afterEach(() => {
+  delete process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS;
+  delete process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS;
+  delete process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_ENABLE;
+  delete process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_VISIBILITY;
+  delete process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_DISPATCH_MODE;
+  delete process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_DISPATCH_MAX_WORKERS;
+  delete process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_SPAWN;
+  delete process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_SPAWN_WORKERS;
+  delete process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_PLANNER;
+  delete process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_PLANNER_PROMPT_MAX_CHARS;
+  delete process.env.AGENT_DISCORD_CODEX_AUTO_LONGTASK_REPORT_MODE;
+});
 
 describe('AgentBridge', () => {
   beforeEach(() => {
@@ -230,6 +247,54 @@ describe('AgentBridge', () => {
 
       const input = 'line one  \r\n\r\n\r\nline two\t';
       expect(bridge.sanitizeInput(input)).toBe('line one\n\nline two');
+    });
+
+    it('enforce mode applies policy file operations when policy path is configured', () => {
+      const tempDir = mkdtempSync(join(tmpdir(), 'mudcode-policy-'));
+      const logPath = join(tempDir, 'prompt-refiner-shadow.jsonl');
+      const policyPath = join(tempDir, 'best-system-prompt.txt');
+      writeFileSync(
+        policyPath,
+        [
+          'You are a prompt refiner.',
+          'Rules:',
+          '- Collapse consecutive spaces.',
+          '- Remove duplicate punctuation.',
+          '- Trim leading/trailing whitespace.',
+        ].join('\n'),
+        'utf-8',
+      );
+
+      const bridge = new AgentBridge({
+        messaging: createMockMessaging(),
+        tmux: createMockTmux(),
+        stateManager: createMockStateManager(),
+        registry: createMockRegistry(),
+        config: {
+          ...createMockConfig(),
+          promptRefiner: {
+            mode: 'enforce',
+            logPath,
+            policyPath,
+          },
+        },
+      });
+
+      const input = '  hello   world!!  ';
+      expect(bridge.sanitizeInput(input)).toBe('hello world!');
+
+      const line = readFileSync(logPath, 'utf-8').trim();
+      const entry = JSON.parse(line);
+      expect(entry.policyPath).toBe(policyPath);
+      expect(entry.policyOperations).toEqual(
+        expect.arrayContaining([
+          'collapse_consecutive_spaces',
+          'remove_duplicate_punctuation',
+          'trim_outer_whitespace',
+        ]),
+      );
+
+      rmSync(tempDir, { recursive: true, force: true });
     });
   });
 
@@ -466,6 +531,121 @@ describe('AgentBridge', () => {
       expect(lastNotice).toContain('mudcode new --name mudcode');
       expect(lastNotice).toContain('mudcode attach mudcode');
       expect(lastNotice).not.toContain("can't find window");
+    });
+
+    it('auto-spawns workers and planner-dispatches without manual orchestrator setup', async () => {
+      process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+      process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+      process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_ENABLE = '1';
+      process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_DISPATCH_MODE = 'continue';
+      process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_DISPATCH_MAX_WORKERS = '2';
+      process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_SPAWN = '1';
+      process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_SPAWN_WORKERS = '2';
+      process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_PLANNER = '1';
+      process.env.AGENT_DISCORD_CODEX_AUTO_LONGTASK_REPORT_MODE = 'off';
+
+      const mockTmux = createMockTmux();
+      mockTmux.getPaneCurrentCommand.mockReturnValue('codex');
+      mockTmux.capturePaneFromWindow.mockReturnValue('Esc to interrupt');
+      mockTmux.sessionExistsFull.mockReturnValue(true);
+
+      const now = new Date();
+      let projectState: ProjectState = {
+        projectName: 'demo',
+        projectPath: '/demo',
+        tmuxSession: 'agent-demo',
+        discordChannels: { codex: 'ch-1' },
+        agents: { codex: true },
+        createdAt: now,
+        lastActive: now,
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'ch-1',
+            eventHook: false,
+          },
+        },
+      };
+
+      const customStateManager = createMockStateManager();
+      customStateManager.getProject = vi.fn().mockImplementation((name: string) => (
+        name === 'demo' ? projectState : undefined
+      ));
+      customStateManager.listProjects = vi.fn().mockImplementation(() => [projectState]);
+      customStateManager.setProject = vi.fn().mockImplementation((next: ProjectState) => {
+        projectState = next;
+      });
+
+      const codexAdapter = {
+        config: { name: 'codex', displayName: 'Codex', command: 'codex', channelSuffix: 'codex' },
+        getStartCommand: vi.fn().mockReturnValue('cd "/demo" && codex'),
+        matchesChannel: vi.fn(),
+        isInstalled: vi.fn().mockReturnValue(true),
+      };
+      const customRegistry = {
+        get: vi.fn((name: string) => (name === 'codex' ? codexAdapter : undefined)),
+        getAll: vi.fn().mockReturnValue([codexAdapter]),
+        register: vi.fn(),
+        getByChannelSuffix: vi.fn(),
+        parseChannelName: vi.fn(),
+      } as any;
+
+      bridge = new AgentBridge({
+        messaging: mockMessaging,
+        tmux: mockTmux,
+        stateManager: customStateManager,
+        registry: customRegistry,
+        config: createMockConfig(),
+      });
+
+      await bridge.start();
+      const cb = mockMessaging.onMessage.mock.calls[0][0];
+      await cb(
+        'codex',
+        [
+          'continue',
+          '- inspect event-contract regressions',
+          '- implement fixes',
+          '- update tests',
+        ].join('\n'),
+        'demo',
+        'ch-1',
+        'msg-1',
+        'codex',
+      );
+
+      expect(projectState.orchestrator?.enabled).toBe(true);
+      expect(projectState.orchestrator?.workerInstanceIds).toEqual(
+        expect.arrayContaining(['codex-2', 'codex-3']),
+      );
+      expect(mockTmux.startAgentInWindow).toHaveBeenCalledWith(
+        'agent-demo',
+        'demo-codex-2',
+        expect.stringContaining("AGENT_DISCORD_INSTANCE='codex-2'"),
+      );
+      expect(mockTmux.startAgentInWindow).toHaveBeenCalledWith(
+        'agent-demo',
+        'demo-codex-3',
+        expect.stringContaining("AGENT_DISCORD_INSTANCE='codex-3'"),
+      );
+
+      const workerDispatchCalls = mockTmux.typeKeysToWindow.mock.calls.filter((call: any[]) =>
+        call[1] === 'demo-codex-2' || call[1] === 'demo-codex-3',
+      );
+      expect(workerDispatchCalls).toHaveLength(2);
+      expect(String(workerDispatchCalls[0]?.[2] || '')).toContain('[mudcode orchestrator-plan]');
+      expect(String(workerDispatchCalls[1]?.[2] || '')).toContain('[mudcode orchestrator-plan]');
+
+      expect(mockMessaging.sendToChannel).toHaveBeenCalledWith(
+        'ch-1',
+        expect.stringContaining('Auto worker provisioned'),
+      );
+      expect(mockMessaging.sendToChannel).toHaveBeenCalledWith(
+        'ch-1',
+        expect.stringContaining('Auto orchestration fanout (planner)'),
+      );
     });
   });
 

@@ -438,3 +438,191 @@
 - ✅ 테스트 보강
   - continuation 프롬프트에서 힌트 주입 검증
   - `off` 모드에서 힌트 비주입 검증
+
+### CP27 - Supervisor/Worker 오케스트레이션 제어면 POC(진행 중)
+
+- ✅ 상태 모델 확장
+  - `ProjectState.orchestrator` 추가:
+    - `enabled`
+    - `supervisorInstanceId`
+    - `workerInstanceIds`
+    - `workerFinalVisibility(hidden|thread|channel)`
+  - `normalizeProjectState`에서 orchestrator 인스턴스 유효성 정규화
+- ✅ 런타임 명령 추가 (`message-router`)
+  - `/orchestrator status`
+  - `/orchestrator enable [supervisor] [hidden|thread|channel]`
+  - `/orchestrator disable`
+- ✅ 출력 게이트 POC (`hook-server`)
+  - orchestrator 활성 + worker visibility=`hidden`일 때
+    worker의 `session.progress/session.final/session.idle` 채널 출력 억제
+  - pending/lifecycle 업데이트는 유지
+- ✅ 장기 작업 계획 문서 추가
+  - `docs/bridge/CODEX_SUPERVISOR_ORCHESTRATION_PLAN.ko.md`
+
+### CP28 - Supervisor/Worker 실행면 POC 1차(진행 중)
+
+- ✅ Supervisor -> Worker direct dispatch 명령 추가 (`message-router`)
+  - `/orchestrator run <workerInstanceId> <task>`
+  - 제약:
+    - orchestrator 활성 상태에서만 실행
+    - supervisor 인스턴스만 실행 가능
+    - worker 인스턴스 목록 검증 후 dispatch
+  - dispatch 성공 시 worker별 `turnId(orch-...)` 생성 및 pending/runtime 추적 반영
+- ✅ worker 가시성 gate 확장 (`hook-server`)
+  - orchestrator `workerFinalVisibility=thread`일 때
+    - worker `session.progress` 출력 모드를 thread로 강제
+    - worker `session.final/session.idle` 텍스트를 thread 경로로 전달
+  - `hidden` 모드는 기존처럼 worker 중간/최종 텍스트를 무출력 처리 유지
+- ✅ 테스트 보강/통과
+  - `message-router`:
+    - supervisor의 `/orchestrator run` dispatch 성공 검증
+    - non-supervisor에서 `/orchestrator run` 거부 검증
+  - `hook-server`:
+    - worker visibility=`thread`에서 progress/thread 전달 검증
+    - worker visibility=`thread`에서 final/thread 전달 검증
+
+### CP29 - Supervisor/Worker 실행면 POC 2차(진행 중)
+
+- ✅ worker 내부 큐/드레이너 추가 (`message-router`)
+  - `/orchestrator run` 시 worker pending 상태면 즉시 발주 대신 queue 적재
+  - worker별 queue를 백그라운드 drain하여 idle 감지 시 자동 발주
+  - `/orchestrator status`에 worker별 queue depth / oldest age 노출
+- ✅ 실패/재시도/타임아웃 정책 추가 (`message-router`)
+  - 즉시 발주 실패 시 retry queue 적재
+  - queue dispatch 실패 시 backoff 후 재시도
+  - `max retries` 초과 시 supervisor 채널에 실패 escalte(가이드 포함)
+  - queue wait timeout 초과 task 자동 drop + supervisor 채널 알림
+- ✅ 관련 설정(환경변수) 추가
+  - `AGENT_DISCORD_ORCHESTRATOR_QUEUE_MAX_DEPTH`
+  - `AGENT_DISCORD_ORCHESTRATOR_QUEUE_DRAIN_INTERVAL_MS`
+  - `AGENT_DISCORD_ORCHESTRATOR_QUEUE_WAIT_TIMEOUT_MS`
+  - `AGENT_DISCORD_ORCHESTRATOR_QUEUE_MAX_RETRIES`
+  - `AGENT_DISCORD_ORCHESTRATOR_QUEUE_RETRY_BACKOFF_MS`
+- ✅ 테스트 보강/통과
+  - worker busy 시 queue 적재 후 자동 발주 검증
+  - queue wait timeout 시 drop + 알림 검증
+
+### CP30 - Supervisor/Worker 자동 오케스트레이션 기본모드(진행 중)
+
+- ✅ 자동 활성화(auto-enable) 추가 (`message-router`)
+  - 일반 codex 프롬프트에서 multi-codex 구성이 감지되면 orchestrator 자동 활성화
+  - supervisor=current codex instance, workers=나머지 codex 인스턴스
+  - 기본 visibility=`hidden` (env로 변경 가능)
+- ✅ 자동 발주(auto-dispatch) 추가 (`message-router`)
+  - supervisor 일반 프롬프트에서 조건(`continue/auto/always`) 충족 시
+    worker를 load-aware 선택(pending+queue 최소)해 supporting task 자동 발주
+  - worker busy면 내부 queue로 자동 전환
+- ✅ 설정(환경변수) 추가
+  - `AGENT_DISCORD_ORCHESTRATOR_AUTO_ENABLE`
+  - `AGENT_DISCORD_ORCHESTRATOR_AUTO_VISIBILITY`
+  - `AGENT_DISCORD_ORCHESTRATOR_AUTO_DISPATCH_MODE`
+- ✅ 테스트 보강/통과
+  - normal prompt에서 auto-enable 동작 검증
+  - continuation prompt에서 auto-dispatch 동작 검증
+
+### CP31 - Orchestrator 정책 계층 정리 + 운영 진단/보정 보강(진행 중)
+
+- ✅ `hook-server` progress block 파이프라인 분리 통합
+  - 기존 inline block/timer 맵 로직을 `EventProgressBlockPipeline`으로 대체
+  - route/turn 단위 clear 동작 유지, block coalescing/flush 동작 회귀 없음
+- ✅ directive-level progress 정책 해석 추가 (`hook-server`)
+  - 우선순위: `event override` > `orchestrator.progressPolicy.byChannelId` > `byInstanceId` > `byAgentType` > `default` > env
+  - orchestrator worker visibility(hidden/thread) 게이트와 함께 적용
+- ✅ `/runtime-status` 확장
+  - 인스턴스별 `orchestratorRole(supervisor|worker|none)`, `orchestratorWorkerVisibility`,
+    `orchestratorQosMaxConcurrentWorkers`, `orchestratorProgressPolicyMode`,
+    `orchestratorSupervisorFinalFormatEnforce/maxRetries` 노출
+- ✅ QoS/우선순위 실행면 보강 (`message-router`)
+  - `/orchestrator run`에서 priority 파싱 지원
+    - `--priority high|normal|low`
+    - `p2|p1|p0`
+  - worker queue에 priority 삽입 정렬 적용
+  - `maxConcurrentWorkers`(state 또는 env) 제한을 즉시 dispatch 경로에도 적용
+- ✅ supervisor final-format 자동 보정 루프 1차 (`capture-poller`)
+  - orchestrator `supervisorFinalFormat.enforce=true` + supervisor codex final flush에서
+    포맷 미준수 시 자동 재요청 프롬프트 주입
+  - `maxRetries` 소진 시 경고 후 최신 출력 as-is 전달(fallback)
+- ✅ `/doctor` 오케스트레이션 런타임 진단 확장
+  - hidden worker의 progress leak 감지
+  - thread worker의 channel mode drift 감지
+  - summary에 orchestrator role/policy 카운터 포함
+- ✅ 테스트 보강/통과
+  - `hook-server` orchestrator runtime snapshot 필드 검증
+  - orchestrator progressPolicy 적용 검증
+  - `message-router` priority queue ordering + max concurrency queueing 검증
+  - `capture-poller` supervisor final-format retry/fallback 검증
+  - `doctor.runtime` orchestrator drift warning 검증
+
+### CP32 - OpenClaw 정합성 잔여 갭 보강(진행 중)
+
+- ✅ worker thread 모드 파일 첨부 relay 구현
+  - `MessagingClient.sendToProgressThreadWithFiles` optional 확장
+  - Discord 구현에서 progress thread target 재사용 + 파일 첨부 전송
+  - `hook-server` worker visibility=`thread`에서 파일 릴레이 활성화
+- ✅ strict event-only fallback 제어 추가
+  - `AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK=0`이면
+    codex event-only에서 lifecycle stale fallback capture 비활성화
+  - `/doctor`에 strict parity 경고(`event-only-capture-fallback-enabled`) 추가
+- ✅ auto orchestration fanout 옵션 추가
+  - `AGENT_DISCORD_ORCHESTRATOR_AUTO_DISPATCH_MAX_WORKERS` (기본값 `1`)
+  - 조건 충족 시 다중 worker까지 자동 dispatch/queue 처리
+  - fanout 결과를 단일 요약 메시지로 보고
+- ✅ supervisor final-format 검증 강화
+  - 기본 strict validator(`AGENT_DISCORD_SUPERVISOR_FINAL_FORMAT_STRICT=1`)
+  - 번호형(1/2/3) 또는 섹션 헤더형 포맷 기준으로 준수 여부 판정
+  - non-strict 모드에서는 기존 완화 휴리스틱 허용
+- ✅ 테스트 보강
+  - worker thread file relay 테스트 추가
+  - strict event-only fallback off 테스트 추가
+  - auto fanout dispatch 테스트 추가
+  - doctor strict parity warning 테스트 추가
+
+### CP33 - 동적 worker spawn/teardown 런타임 경로 추가(진행 중)
+
+- ✅ `message-router` 런타임 명령 확장
+  - `/orchestrator spawn [count]`
+  - `/orchestrator remove <workerInstanceId>`
+  - supervisor 전용 권한 체크 + 기존 `/orchestrator` 정책 가드 재사용
+- ✅ `AgentBridge` 동적 worker 프로비저너 추가
+  - codex worker를 tmux window + instance state로 동적 생성
+  - worker 제거 시 tmux window 정리 + instance state 제거
+- ✅ 오케스트레이터 상태/큐 정리 보강
+  - spawn 성공 시 `orchestrator.workerInstanceIds` 자동 병합
+  - remove 성공 시 worker queue/pending 정리 + `workerInstanceIds` 제거
+- ✅ 테스트 보강/통과
+  - `message-router`: spawn/remove 명령 동작 검증 추가
+  - `index`: AgentBridge 연동 회귀 없음 확인
+
+### CP34 - planner 단계 + 완전자동 오케스트레이션 UX(진행 중)
+
+- ✅ auto planner 단계 추가 (`message-router`)
+  - auto fanout dispatch 전에 worker별 planner assignment 생성
+  - 우선순위: bullet/번호 목록 기반 task 추출 -> 템플릿 task 보강
+  - worker payload에 `[mudcode orchestrator-plan]` 계약 블록 삽입
+- ✅ auto worker 프로비저닝 단계 추가 (`message-router`)
+  - auto-dispatch 조건 충족 + worker 부재 시 codex worker 자동 spawn
+  - spawn 후 orchestrator worker registry/state를 자동 동기화
+  - 사용자가 `/orchestrator enable/spawn`을 수동 실행하지 않아도 기본 동작
+- ✅ 자동화 설정(env) 확장
+  - `AGENT_DISCORD_ORCHESTRATOR_AUTO_SPAWN`
+  - `AGENT_DISCORD_ORCHESTRATOR_AUTO_SPAWN_WORKERS`
+  - `AGENT_DISCORD_ORCHESTRATOR_AUTO_PLANNER`
+  - `AGENT_DISCORD_ORCHESTRATOR_AUTO_PLANNER_PROMPT_MAX_CHARS`
+- ✅ 테스트 보강
+  - worker 부재 시 auto spawn + auto dispatch 검증
+  - planner fanout 시 worker별 plan payload/요약 노출 검증
+  - AgentBridge 레벨에서 “수동 설정 없이 auto-spawn + planner fanout” 경로 검증 추가
+  - `bun run orchestrator:auto:check` self-check 스크립트 추가
+
+### CP35 - event-only 기본 경로 승격(진행 중)
+
+- ✅ codex event-only 기본값 ON 전환
+  - `capture-poller`: `AGENT_DISCORD_CODEX_EVENT_ONLY` 미설정 시 `true`
+  - `hook-server`: event-only progress gate를 기본 활성으로 적용
+- ✅ strict parity 기본값 정렬
+  - `AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK` 기본값 `0`
+  - `AGENT_DISCORD_EVENT_LIFECYCLE_STRICT_MODE` 기본값 `warn`
+  - `/doctor`의 기본 진단 기준도 동일 기본값으로 동기화
+- ✅ 회귀 테스트 정렬
+  - legacy/direct-path 검증 테스트는 `AGENT_DISCORD_CODEX_EVENT_ONLY=0`를 명시해 의도 고정
+  - runtime progress snapshot/override 테스트를 새 기본값과 충돌 없이 유지

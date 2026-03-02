@@ -55,6 +55,11 @@ export interface MessagingClient {
    * Implementations may route progress text to a thread-like sub-channel.
    */
   sendToProgressThread?(channelId: string, content: string): Promise<void>;
+  /**
+   * Optional progress-thread helper for file attachments.
+   * Implementations may route files to the same thread-like sub-channel.
+   */
+  sendToProgressThreadWithFiles?(channelId: string, content: string, filePaths: string[]): Promise<void>;
   sendToChannelWithFiles(channelId: string, content: string, filePaths: string[]): Promise<void>;
   /**
    * Optional long-output delivery helper.

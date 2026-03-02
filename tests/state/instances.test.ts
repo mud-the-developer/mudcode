@@ -258,4 +258,88 @@ describe('normalizeProjectState', () => {
     const normalized = normalizeProjectState(project);
     expect(normalized.eventHooks).toEqual({ claude: true });
   });
+
+  it('normalizes orchestrator progress policy, qos, and supervisor final format fields', () => {
+    const project: ProjectState = {
+      projectName: 'orch',
+      projectPath: '/tmp/orch',
+      tmuxSession: 'bridge',
+      agents: {},
+      discordChannels: {},
+      createdAt: new Date(),
+      lastActive: new Date(),
+      instances: {
+        codex: {
+          instanceId: 'codex',
+          agentType: 'codex',
+          channelId: 'ch-super',
+        },
+        'codex-2': {
+          instanceId: 'codex-2',
+          agentType: 'codex',
+          channelId: 'ch-worker',
+        },
+      },
+      orchestrator: {
+        enabled: true,
+        supervisorInstanceId: 'codex',
+        workerInstanceIds: ['codex-2', 'missing'],
+        workerFinalVisibility: 'thread',
+        progressPolicy: {
+          default: { mode: 'off', blockWindowMs: 500 },
+          byChannelId: {
+            'ch-worker': { mode: 'thread', blockStreamingEnabled: true },
+          },
+          byInstanceId: {
+            'codex-2': { mode: 'thread', blockMaxChars: 1700 },
+            missing: { mode: 'channel' },
+          },
+          byAgentType: {
+            codex: { mode: 'thread' },
+          },
+        },
+        qos: {
+          maxConcurrentWorkers: 2,
+          workerPriorityByInstanceId: {
+            'codex-2': 3,
+            missing: 5,
+          },
+        },
+        supervisorFinalFormat: {
+          enforce: true,
+          maxRetries: 2,
+        },
+      } as any,
+    };
+
+    const normalized = normalizeProjectState(project);
+    expect(normalized.orchestrator).toMatchObject({
+      enabled: true,
+      supervisorInstanceId: 'codex',
+      workerInstanceIds: ['codex-2'],
+      workerFinalVisibility: 'thread',
+      progressPolicy: {
+        default: { mode: 'off', blockWindowMs: 500 },
+        byChannelId: {
+          'ch-worker': { mode: 'thread', blockStreamingEnabled: true },
+        },
+        byInstanceId: {
+          'codex-2': { mode: 'thread', blockMaxChars: 1700 },
+        },
+        byAgentType: {
+          codex: { mode: 'thread' },
+        },
+      },
+      qos: {
+        maxConcurrentWorkers: 2,
+        workerPriorityByInstanceId: {
+          'codex-2': 3,
+        },
+      },
+      supervisorFinalFormat: {
+        enforce: true,
+        maxRetries: 2,
+      },
+    });
+  });
 });

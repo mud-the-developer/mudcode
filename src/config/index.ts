@@ -24,6 +24,7 @@ export interface StoredConfig {
   promptRefinerMode?: 'off' | 'shadow' | 'enforce';
   promptRefinerLogPath?: string;
   promptRefinerMaxLogChars?: number;
+  promptRefinerPolicyPath?: string;
   capturePollMs?: number;
   capturePendingQuietPolls?: number;
   capturePendingInitialQuietPollsCodex?: number;
@@ -91,12 +92,20 @@ export class ConfigManager {
         storedConfig.promptRefinerMaxLogChars,
         this.env.get('MUDCODE_PROMPT_REFINER_MAX_LOG_CHARS'),
       );
+      const promptRefinerPolicyPath = this.resolvePromptRefinerPolicyPath(
+        storedConfig.promptRefinerPolicyPath,
+        this.env.get('MUDCODE_PROMPT_REFINER_POLICY_PATH'),
+      );
       const promptRefiner =
-        promptRefinerMode || promptRefinerLogPath || promptRefinerMaxLogChars !== undefined
+        promptRefinerMode ||
+        promptRefinerLogPath ||
+        promptRefinerMaxLogChars !== undefined ||
+        promptRefinerPolicyPath
           ? {
               ...(promptRefinerMode ? { mode: promptRefinerMode } : {}),
               ...(promptRefinerLogPath ? { logPath: promptRefinerLogPath } : {}),
               ...(promptRefinerMaxLogChars !== undefined ? { maxLogChars: promptRefinerMaxLogChars } : {}),
+              ...(promptRefinerPolicyPath ? { policyPath: promptRefinerPolicyPath } : {}),
             }
           : undefined;
       const capturePollMs = this.resolveCaptureLineCount(
@@ -403,6 +412,12 @@ export class ConfigManager {
     return this.parseTmuxSshPortCandidate(envValue);
   }
 
+  private resolvePromptRefinerPolicyPath(storedValue: unknown, envValue: string | undefined): string | undefined {
+    const storedCandidate = this.parsePromptRefinerPolicyPathCandidate(storedValue);
+    if (storedCandidate !== undefined) return storedCandidate;
+    return this.parsePromptRefinerPolicyPathCandidate(envValue);
+  }
+
   private parsePromptRefinerModeCandidate(raw: unknown): 'off' | 'shadow' | 'enforce' | undefined {
     if (typeof raw !== 'string') return undefined;
     const normalized = raw.trim().toLowerCase();
@@ -418,6 +433,15 @@ export class ConfigManager {
     if (!Number.isInteger(value)) return undefined;
     if (value < 500 || value > 200000) return undefined;
     return value;
+  }
+
+  private parsePromptRefinerPolicyPathCandidate(raw: unknown): string | undefined {
+    if (raw === undefined || raw === null || raw === '') return undefined;
+    if (typeof raw !== 'string') return undefined;
+    const normalized = raw.trim();
+    if (normalized.length === 0) return undefined;
+    if (/\0/.test(normalized)) return undefined;
+    return normalized;
   }
 
   private parseCaptureLineCountCandidate(raw: unknown, min: number, max: number): number | undefined {
@@ -642,6 +666,25 @@ export class ConfigManager {
     if (rawEnvRefinerMax !== undefined && this.parsePromptRefinerMaxLogCharsCandidate(rawEnvRefinerMax) === undefined) {
       errors.push(
         `MUDCODE_PROMPT_REFINER_MAX_LOG_CHARS must be an integer between 500 and 200000 (received: ${rawEnvRefinerMax})`,
+      );
+    }
+
+    if (
+      storedConfig.promptRefinerPolicyPath !== undefined &&
+      this.parsePromptRefinerPolicyPathCandidate(storedConfig.promptRefinerPolicyPath) === undefined
+    ) {
+      errors.push(
+        `Stored promptRefinerPolicyPath must be a valid non-empty path string (received: ${String(storedConfig.promptRefinerPolicyPath)})`,
+      );
+    }
+
+    const rawEnvRefinerPolicyPath = this.env.get('MUDCODE_PROMPT_REFINER_POLICY_PATH');
+    if (
+      rawEnvRefinerPolicyPath !== undefined &&
+      this.parsePromptRefinerPolicyPathCandidate(rawEnvRefinerPolicyPath) === undefined
+    ) {
+      errors.push(
+        `MUDCODE_PROMPT_REFINER_POLICY_PATH must be a valid non-empty path string (received: ${rawEnvRefinerPolicyPath})`,
       );
     }
 

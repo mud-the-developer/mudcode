@@ -181,6 +181,10 @@ describe('startCommand runtime routing', () => {
     await startCommand({ project: 'demo', attach: true });
 
     expect(mocks.ensureDaemonRunning).toHaveBeenCalledOnce();
-    expect(mocks.attachToTmux).toHaveBeenCalledWith('agent-demo', 'demo-claude');
+    expect(mocks.attachToTmux).toHaveBeenCalledWith(
+      mocks.config.tmux,
+      'agent-demo',
+      'demo-claude',
+    );
   });
 });

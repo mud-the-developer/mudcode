@@ -26,7 +26,10 @@ Scripts are grouped by intent.
 ## `scripts/prompt/`
 
 - `prompt-refiner-shadow-report.mjs`
-- `prompt-refiner-shadow-to-gepa.mjs`
+- `prompt-refiner-shadow-to-gepa.mjs` (JS fallback)
+- `prompt-refiner-codex-optimize.mjs` (Codex-only optimization runner; primary path)
+- Rust primary path: `mudcode-rs/src/bin/prompt_refiner_shadow_to_gepa.rs`
+- `prompt-refiner-gepa-optimize.py` (GEPA optimization runner; supports `--smoke`, `--activate`)
 
 ## `scripts/ci/`
 

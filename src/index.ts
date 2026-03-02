@@ -10,7 +10,7 @@ import { createTmuxManager } from './tmux/factory.js';
 import { stateManager as defaultStateManager } from './state/index.js';
 import { config as defaultConfig } from './config/index.js';
 import { agentRegistry as defaultAgentRegistry, AgentRegistry } from './agents/index.js';
-import type { ProjectAgents } from './types/index.js';
+import type { ProjectAgents, ProjectInstanceState } from './types/index.js';
 import type { IStateManager } from './types/interfaces.js';
 import type { BridgeConfig } from './types/index.js';
 import {
@@ -84,6 +84,10 @@ export class AgentBridge {
       ioTracker: this.codexIoTracker,
       skillAutoLinker: this.skillAutoLinker,
       eventHookClient: this.eventHookClient,
+      orchestratorWorkerProvisioner: {
+        spawnCodexWorkers: (params) => this.spawnOrchestratorCodexWorkers(params),
+        teardownWorker: (params) => this.teardownOrchestratorWorker(params),
+      },
     });
     this.hookServer = new BridgeHookServer({
       port: this.bridgeConfig.hookServerPort || 18470,
@@ -148,6 +152,181 @@ export class AgentBridge {
    */
   async connect(): Promise<void> {
     await this.messaging.connect();
+  }
+
+  private resolveBridgePort(): number {
+    return this.bridgeConfig.hookServerPort || 18470;
+  }
+
+  private ensureProjectSessionExists(
+    project: ReturnType<typeof normalizeProjectState>,
+    firstWindowName?: string,
+  ): string {
+    const fullSessionName = project.tmuxSession;
+    if (this.tmux.sessionExistsFull(fullSessionName)) {
+      return fullSessionName;
+    }
+
+    const prefix = this.bridgeConfig.tmux.sessionPrefix || '';
+    if (prefix && fullSessionName.startsWith(prefix)) {
+      const baseSession = fullSessionName.slice(prefix.length) || project.projectName;
+      return this.tmux.getOrCreateSession(baseSession, firstWindowName);
+    }
+
+    return this.tmux.getOrCreateSession(project.projectName, firstWindowName);
+  }
+
+  private async spawnOrchestratorCodexWorkers(params: {
+    projectName: string;
+    count: number;
+  }): Promise<{
+    created: ProjectInstanceState[];
+    warnings?: string[];
+  }> {
+    const project = this.stateManager.getProject(params.projectName);
+    if (!project) {
+      return {
+        created: [],
+        warnings: [`project \`${params.projectName}\` not found`],
+      };
+    }
+    const adapter = this.registry.get('codex');
+    if (!adapter) {
+      return {
+        created: [],
+        warnings: ['codex adapter not found'],
+      };
+    }
+
+    const warnings: string[] = [];
+    const created: ProjectInstanceState[] = [];
+    const port = this.resolveBridgePort();
+    const targetCount = Math.min(8, Math.max(1, Math.trunc(params.count || 1)));
+    let normalizedProject = normalizeProjectState(project);
+
+    try {
+      installFileInstruction(normalizedProject.projectPath, 'codex');
+    } catch (error) {
+      warnings.push(`file instructions: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    try {
+      installMudcodeSendScript(normalizedProject.projectPath, {
+        projectName: normalizedProject.projectName,
+        port,
+      });
+    } catch {
+      // Non-critical.
+    }
+
+    for (let i = 0; i < targetCount; i += 1) {
+      const instanceId = buildNextInstanceId(normalizedProject, 'codex');
+      const windowName = toProjectScopedName(normalizedProject.projectName, 'codex', instanceId);
+      try {
+        const tmuxSession = this.ensureProjectSessionExists(normalizedProject, windowName);
+        this.tmux.setSessionEnv(tmuxSession, 'AGENT_DISCORD_PORT', String(port));
+
+        const integration = installAgentIntegration('codex', normalizedProject.projectPath, 'install');
+        for (const warning of integration.warningMessages) {
+          warnings.push(`${instanceId}: ${warning}`);
+        }
+
+        const exportPrefix = buildExportPrefix(buildAgentLaunchEnv({
+          projectName: normalizedProject.projectName,
+          port,
+          agentType: 'codex',
+          instanceId,
+          permissionAllow: false,
+        }));
+        const startCommand = withClaudePluginDir(
+          adapter.getStartCommand(normalizedProject.projectPath, false),
+          integration.claudePluginDir,
+        );
+        this.tmux.startAgentInWindow(tmuxSession, windowName, `${exportPrefix}${startCommand}`);
+
+        const createdInstance: ProjectInstanceState = {
+          instanceId,
+          agentType: 'codex',
+          tmuxWindow: windowName,
+          eventHook: integration.eventHookInstalled,
+        };
+        normalizedProject = normalizeProjectState({
+          ...normalizedProject,
+          instances: {
+            ...(normalizedProject.instances || {}),
+            [instanceId]: createdInstance,
+          },
+          lastActive: new Date(),
+        });
+        this.stateManager.setProject(normalizedProject);
+        created.push(createdInstance);
+      } catch (error) {
+        warnings.push(`${instanceId}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    return {
+      created,
+      ...(warnings.length > 0 ? { warnings } : {}),
+    };
+  }
+
+  private async teardownOrchestratorWorker(params: {
+    projectName: string;
+    workerInstanceId: string;
+  }): Promise<{
+    removed: boolean;
+    removedInstance?: ProjectInstanceState;
+    warning?: string;
+  }> {
+    const project = this.stateManager.getProject(params.projectName);
+    if (!project) {
+      return {
+        removed: false,
+        warning: `project \`${params.projectName}\` not found`,
+      };
+    }
+    const normalizedProject = normalizeProjectState(project);
+    const worker = getProjectInstance(normalizedProject, params.workerInstanceId);
+    if (!worker) {
+      return {
+        removed: false,
+        warning: `worker \`${params.workerInstanceId}\` not found`,
+      };
+    }
+
+    const nextInstances = {
+      ...(normalizedProject.instances || {}),
+    };
+    delete nextInstances[params.workerInstanceId];
+    if (Object.keys(nextInstances).length === 0) {
+      return {
+        removed: false,
+        warning: 'cannot remove the last remaining instance',
+      };
+    }
+
+    let warning: string | undefined;
+    const windowName = worker.tmuxWindow || worker.instanceId;
+    try {
+      if (this.tmux.windowExists(normalizedProject.tmuxSession, windowName)) {
+        this.tmux.killWindow(normalizedProject.tmuxSession, windowName);
+      }
+    } catch (error) {
+      warning = `tmux cleanup warning: ${error instanceof Error ? error.message : String(error)}`;
+    }
+
+    const nextProject = normalizeProjectState({
+      ...normalizedProject,
+      instances: nextInstances,
+      lastActive: new Date(),
+    });
+    this.stateManager.setProject(nextProject);
+
+    return {
+      removed: true,
+      removedInstance: worker,
+      ...(warning ? { warning } : {}),
+    };
   }
 
   async start(): Promise<void> {

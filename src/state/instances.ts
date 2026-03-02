@@ -1,4 +1,4 @@
-import type { ProjectInstanceState, ProjectState } from '../types/index.js';
+import type { ProjectInstanceState, ProjectOrchestratorState, ProjectState } from '../types/index.js';
 
 function sortInstances(a: ProjectInstanceState, b: ProjectInstanceState): number {
   return a.instanceId.localeCompare(b.instanceId);
@@ -108,9 +108,200 @@ function deriveLegacyMaps(instances: Record<string, ProjectInstanceState>): Pick
   };
 }
 
+function normalizeOrchestratorState(
+  project: ProjectState,
+  instances: Record<string, ProjectInstanceState>,
+): ProjectOrchestratorState | undefined {
+  const raw = project.orchestrator;
+  if (!raw || typeof raw !== 'object') return undefined;
+  if (raw.enabled !== true) return undefined;
+
+  const knownInstanceIds = new Set(Object.keys(instances));
+  const supervisorInstanceId =
+    typeof raw.supervisorInstanceId === 'string' && knownInstanceIds.has(raw.supervisorInstanceId)
+      ? raw.supervisorInstanceId
+      : undefined;
+  const workerInstanceIds = Array.isArray(raw.workerInstanceIds)
+    ? [...new Set(raw.workerInstanceIds.filter((id): id is string => typeof id === 'string' && knownInstanceIds.has(id)))]
+    : undefined;
+  const workerFinalVisibility =
+    raw.workerFinalVisibility === 'hidden' ||
+    raw.workerFinalVisibility === 'thread' ||
+    raw.workerFinalVisibility === 'channel'
+      ? raw.workerFinalVisibility
+      : 'hidden';
+
+  const normalizeProgressDirective = (
+    directive: unknown,
+  ):
+    | {
+        mode?: 'off' | 'thread' | 'channel';
+        blockStreamingEnabled?: boolean;
+        blockWindowMs?: number;
+        blockMaxChars?: number;
+      }
+    | undefined => {
+    if (!directive || typeof directive !== 'object') return undefined;
+    const rawDirective = directive as Record<string, unknown>;
+    const next: {
+      mode?: 'off' | 'thread' | 'channel';
+      blockStreamingEnabled?: boolean;
+      blockWindowMs?: number;
+      blockMaxChars?: number;
+    } = {};
+    const modeRaw = rawDirective.mode;
+    if (modeRaw === 'off' || modeRaw === 'thread' || modeRaw === 'channel') {
+      next.mode = modeRaw;
+    }
+    if (typeof rawDirective.blockStreamingEnabled === 'boolean') {
+      next.blockStreamingEnabled = rawDirective.blockStreamingEnabled;
+    }
+    if (
+      typeof rawDirective.blockWindowMs === 'number' &&
+      Number.isFinite(rawDirective.blockWindowMs) &&
+      rawDirective.blockWindowMs >= 50 &&
+      rawDirective.blockWindowMs <= 5000
+    ) {
+      next.blockWindowMs = Math.trunc(rawDirective.blockWindowMs);
+    }
+    if (
+      typeof rawDirective.blockMaxChars === 'number' &&
+      Number.isFinite(rawDirective.blockMaxChars) &&
+      rawDirective.blockMaxChars >= 200 &&
+      rawDirective.blockMaxChars <= 8000
+    ) {
+      next.blockMaxChars = Math.trunc(rawDirective.blockMaxChars);
+    }
+    return Object.keys(next).length > 0 ? next : undefined;
+  };
+
+  const normalizeDirectiveMap = (
+    rawMap: unknown,
+  ): Record<
+    string,
+    | {
+        mode?: 'off' | 'thread' | 'channel';
+        blockStreamingEnabled?: boolean;
+        blockWindowMs?: number;
+        blockMaxChars?: number;
+      }
+    | undefined
+  > | undefined => {
+    if (!rawMap || typeof rawMap !== 'object') return undefined;
+    const entries = Object.entries(rawMap as Record<string, unknown>);
+    const next: Record<
+      string,
+      | {
+          mode?: 'off' | 'thread' | 'channel';
+          blockStreamingEnabled?: boolean;
+          blockWindowMs?: number;
+          blockMaxChars?: number;
+        }
+      | undefined
+    > = {};
+    for (const [key, value] of entries) {
+      if (!key || key.trim().length === 0) continue;
+      const normalized = normalizeProgressDirective(value);
+      if (normalized) {
+        next[key] = normalized;
+      }
+    }
+    return Object.keys(next).length > 0 ? next : undefined;
+  };
+
+  const progressPolicyRaw =
+    raw.progressPolicy && typeof raw.progressPolicy === 'object'
+      ? (raw.progressPolicy as Record<string, unknown>)
+      : undefined;
+  const progressDefault = normalizeProgressDirective(progressPolicyRaw?.default);
+  const progressByChannelId = normalizeDirectiveMap(progressPolicyRaw?.byChannelId);
+  const progressByInstanceId = normalizeDirectiveMap(progressPolicyRaw?.byInstanceId);
+  const progressByAgentType = normalizeDirectiveMap(progressPolicyRaw?.byAgentType);
+  const progressPolicy =
+    progressDefault || progressByChannelId || progressByInstanceId || progressByAgentType
+      ? {
+          ...(progressDefault ? { default: progressDefault } : {}),
+          ...(progressByChannelId ? { byChannelId: progressByChannelId } : {}),
+          ...(progressByInstanceId ? { byInstanceId: progressByInstanceId } : {}),
+          ...(progressByAgentType ? { byAgentType: progressByAgentType } : {}),
+        }
+      : undefined;
+
+  const rawQos = raw.qos && typeof raw.qos === 'object' ? (raw.qos as Record<string, unknown>) : undefined;
+  const maxConcurrentWorkers =
+    typeof rawQos?.maxConcurrentWorkers === 'number' &&
+    Number.isFinite(rawQos.maxConcurrentWorkers) &&
+    rawQos.maxConcurrentWorkers >= 1 &&
+    rawQos.maxConcurrentWorkers <= 16
+      ? Math.trunc(rawQos.maxConcurrentWorkers)
+      : undefined;
+  const rawPriorities =
+    rawQos?.workerPriorityByInstanceId && typeof rawQos.workerPriorityByInstanceId === 'object'
+      ? (rawQos.workerPriorityByInstanceId as Record<string, unknown>)
+      : undefined;
+  const workerPriorityByInstanceId = rawPriorities
+    ? Object.fromEntries(
+        Object.entries(rawPriorities)
+          .filter(([instanceId, priority]) =>
+            knownInstanceIds.has(instanceId) &&
+            typeof priority === 'number' &&
+            Number.isFinite(priority) &&
+            priority >= -10 &&
+            priority <= 10,
+          )
+          .map(([instanceId, priority]) => [instanceId, Math.trunc(priority as number)]),
+      )
+    : undefined;
+  const qos =
+    maxConcurrentWorkers !== undefined ||
+    (workerPriorityByInstanceId && Object.keys(workerPriorityByInstanceId).length > 0)
+      ? {
+          ...(maxConcurrentWorkers !== undefined ? { maxConcurrentWorkers } : {}),
+          ...(workerPriorityByInstanceId && Object.keys(workerPriorityByInstanceId).length > 0
+            ? { workerPriorityByInstanceId }
+            : {}),
+        }
+      : undefined;
+
+  const rawFinalFormat =
+    raw.supervisorFinalFormat && typeof raw.supervisorFinalFormat === 'object'
+      ? (raw.supervisorFinalFormat as Record<string, unknown>)
+      : undefined;
+  const supervisorFinalFormat =
+    rawFinalFormat &&
+    (typeof rawFinalFormat.enforce === 'boolean' ||
+      (typeof rawFinalFormat.maxRetries === 'number' &&
+        Number.isFinite(rawFinalFormat.maxRetries) &&
+        rawFinalFormat.maxRetries >= 0 &&
+        rawFinalFormat.maxRetries <= 10))
+      ? {
+          ...(typeof rawFinalFormat.enforce === 'boolean'
+            ? { enforce: rawFinalFormat.enforce }
+            : {}),
+          ...(typeof rawFinalFormat.maxRetries === 'number' &&
+          Number.isFinite(rawFinalFormat.maxRetries) &&
+          rawFinalFormat.maxRetries >= 0 &&
+          rawFinalFormat.maxRetries <= 10
+            ? { maxRetries: Math.trunc(rawFinalFormat.maxRetries) }
+            : {}),
+        }
+      : undefined;
+
+  return {
+    enabled: true,
+    ...(supervisorInstanceId ? { supervisorInstanceId } : {}),
+    ...(workerInstanceIds && workerInstanceIds.length > 0 ? { workerInstanceIds } : {}),
+    workerFinalVisibility,
+    ...(progressPolicy ? { progressPolicy } : {}),
+    ...(qos ? { qos } : {}),
+    ...(supervisorFinalFormat ? { supervisorFinalFormat } : {}),
+  };
+}
+
 export function normalizeProjectState(project: ProjectState): ProjectState {
   const instances = normalizeInstanceMap(project);
   const legacy = deriveLegacyMaps(instances);
+  const orchestrator = normalizeOrchestratorState(project, instances);
 
   return {
     ...project,
@@ -119,6 +310,7 @@ export function normalizeProjectState(project: ProjectState): ProjectState {
     discordChannels: legacy.discordChannels,
     tmuxWindows: legacy.tmuxWindows,
     eventHooks: legacy.eventHooks,
+    orchestrator,
   };
 }
 

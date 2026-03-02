@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
-import { appendFileSync, mkdirSync } from 'fs';
+import { appendFileSync, mkdirSync, readFileSync, statSync } from 'fs';
 import { homedir } from 'os';
-import { dirname, join } from 'path';
+import { dirname, join, resolve } from 'path';
 import type { BridgeConfig } from '../types/index.js';
 
 export type PromptRefinerMode = 'off' | 'shadow' | 'enforce';
@@ -19,6 +19,8 @@ type CandidateResult = {
   operations: string[];
 };
 
+type PolicyOperation = 'collapse_consecutive_spaces' | 'remove_duplicate_punctuation' | 'trim_outer_whitespace';
+
 const DEFAULT_SHADOW_LOG_PATH = join(homedir(), '.mudcode', 'prompt-refiner-shadow.jsonl');
 const DEFAULT_MAX_LOG_CHARS = 10000;
 
@@ -35,7 +37,56 @@ function resolveMaxLogChars(raw: unknown): number {
   return DEFAULT_MAX_LOG_CHARS;
 }
 
-function buildCandidate(input: string): CandidateResult {
+function normalizePolicyPath(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const normalized = raw.trim();
+  if (!normalized) return undefined;
+  return resolve(normalized);
+}
+
+function parseExplicitPolicyOp(raw: string): PolicyOperation | undefined {
+  const normalized = raw.trim().toLowerCase().replace(/_/g, '-');
+  if (normalized === 'collapse-consecutive-spaces') return 'collapse_consecutive_spaces';
+  if (normalized === 'remove-duplicate-punctuation') return 'remove_duplicate_punctuation';
+  if (normalized === 'trim-outer-whitespace') return 'trim_outer_whitespace';
+  return undefined;
+}
+
+function parsePolicyOperations(policyText: string): PolicyOperation[] {
+  const operations = new Set<PolicyOperation>();
+  const lower = policyText.toLowerCase();
+
+  const explicit = policyText.matchAll(/op\s*:\s*([a-z0-9_-]+)/gi);
+  for (const match of explicit) {
+    const parsed = parseExplicitPolicyOp(match[1] || '');
+    if (parsed) operations.add(parsed);
+  }
+
+  if (
+    lower.includes('collapse consecutive spaces') ||
+    lower.includes('collapse multiple spaces') ||
+    lower.includes('normalize spaces')
+  ) {
+    operations.add('collapse_consecutive_spaces');
+  }
+  if (
+    lower.includes('remove duplicate punctuation') ||
+    lower.includes('deduplicate punctuation')
+  ) {
+    operations.add('remove_duplicate_punctuation');
+  }
+  if (
+    lower.includes('trim leading/trailing whitespace') ||
+    lower.includes('trim surrounding whitespace') ||
+    lower.includes('trim outer whitespace')
+  ) {
+    operations.add('trim_outer_whitespace');
+  }
+
+  return Array.from(operations);
+}
+
+function buildCandidate(input: string, policyOperations: PolicyOperation[]): CandidateResult {
   let candidate = input;
   const operations: string[] = [];
 
@@ -60,6 +111,33 @@ function buildCandidate(input: string): CandidateResult {
     operations.push('collapse_excess_blank_lines');
   }
 
+  if (policyOperations.includes('collapse_consecutive_spaces')) {
+    const collapsedSpaces = candidate
+      .split('\n')
+      .map((line) => line.replace(/[ \t]{2,}/g, ' '))
+      .join('\n');
+    if (collapsedSpaces !== candidate) {
+      candidate = collapsedSpaces;
+      operations.push('collapse_consecutive_spaces');
+    }
+  }
+
+  if (policyOperations.includes('remove_duplicate_punctuation')) {
+    const dedupedPunctuation = candidate.replace(/([!?])\1+/g, '$1');
+    if (dedupedPunctuation !== candidate) {
+      candidate = dedupedPunctuation;
+      operations.push('remove_duplicate_punctuation');
+    }
+  }
+
+  if (policyOperations.includes('trim_outer_whitespace')) {
+    const trimmedOuterWhitespace = candidate.trim();
+    if (trimmedOuterWhitespace !== candidate) {
+      candidate = trimmedOuterWhitespace;
+      operations.push('trim_outer_whitespace');
+    }
+  }
+
   return { candidate, operations };
 }
 
@@ -71,12 +149,18 @@ export class PromptRefiner {
   private readonly mode: PromptRefinerMode;
   private readonly logPath: string;
   private readonly maxLogChars: number;
+  private readonly policyPath?: string;
   private logWriteWarned = false;
+  private policyReadWarned = false;
+  private policyMtimeMs?: number;
+  private policyHash?: string;
+  private policyOperations: PolicyOperation[] = [];
 
   constructor(config?: BridgeConfig['promptRefiner']) {
     this.mode = normalizeMode(config?.mode);
     this.logPath = config?.logPath || DEFAULT_SHADOW_LOG_PATH;
     this.maxLogChars = resolveMaxLogChars(config?.maxLogChars);
+    this.policyPath = normalizePolicyPath(config?.policyPath || process.env.MUDCODE_PROMPT_REFINER_POLICY_PATH);
   }
 
   getMode(): PromptRefinerMode {
@@ -94,7 +178,8 @@ export class PromptRefiner {
       };
     }
 
-    const { candidate, operations } = buildCandidate(input);
+    const policyOperations = this.loadPolicyOperations();
+    const { candidate, operations } = buildCandidate(input, policyOperations);
     const changed = candidate !== input;
     const output = this.mode === 'enforce' ? candidate : input;
 
@@ -104,6 +189,9 @@ export class PromptRefiner {
       changed,
       operations,
       outputMode: this.mode,
+      policyPath: this.policyPath,
+      policyHash: this.policyHash,
+      policyOperations,
     });
 
     return {
@@ -121,6 +209,9 @@ export class PromptRefiner {
     changed: boolean;
     operations: string[];
     outputMode: PromptRefinerMode;
+    policyPath?: string;
+    policyHash?: string;
+    policyOperations: PolicyOperation[];
   }): void {
     try {
       mkdirSync(dirname(this.logPath), { recursive: true });
@@ -141,6 +232,9 @@ export class PromptRefiner {
         candidateTruncated,
         baseline: payload.baseline.slice(0, this.maxLogChars),
         candidate: payload.candidate.slice(0, this.maxLogChars),
+        policyPath: payload.policyPath || null,
+        policyHash: payload.policyHash || null,
+        policyOperations: payload.policyOperations,
       };
       appendFileSync(this.logPath, `${JSON.stringify(entry)}\n`, 'utf8');
     } catch (error) {
@@ -151,5 +245,40 @@ export class PromptRefiner {
       );
     }
   }
-}
 
+  private loadPolicyOperations(): PolicyOperation[] {
+    if (!this.policyPath) {
+      this.policyOperations = [];
+      this.policyMtimeMs = undefined;
+      this.policyHash = undefined;
+      return this.policyOperations;
+    }
+
+    try {
+      const stat = statSync(this.policyPath);
+      if (this.policyMtimeMs !== undefined && stat.mtimeMs === this.policyMtimeMs) {
+        return this.policyOperations;
+      }
+      const text = readFileSync(this.policyPath, 'utf8');
+      this.policyOperations = parsePolicyOperations(text);
+      this.policyMtimeMs = stat.mtimeMs;
+      this.policyHash = shortHash(text);
+      this.policyReadWarned = false;
+      return this.policyOperations;
+    } catch (error) {
+      this.policyOperations = [];
+      this.policyMtimeMs = undefined;
+      this.policyHash = undefined;
+      const errorCode = (error as NodeJS.ErrnoException | undefined)?.code;
+      if (errorCode === 'ENOENT' || errorCode === 'ENOTDIR') {
+        return this.policyOperations;
+      }
+      if (this.policyReadWarned) return this.policyOperations;
+      this.policyReadWarned = true;
+      console.warn(
+        `Prompt refiner policy read failed (${this.policyPath}): ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return this.policyOperations;
+    }
+  }
+}

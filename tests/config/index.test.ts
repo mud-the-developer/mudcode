@@ -104,6 +104,7 @@ describe('ConfigManager', () => {
         promptRefinerMode: 'shadow',
         promptRefinerLogPath: '/tmp/shadow-log.jsonl',
         promptRefinerMaxLogChars: 9000,
+        promptRefinerPolicyPath: '/tmp/prompt-refiner-active-policy.txt',
         capturePollMs: 1200,
         capturePendingQuietPolls: 3,
         capturePendingInitialQuietPollsCodex: 0,
@@ -134,6 +135,7 @@ describe('ConfigManager', () => {
       expect(config.promptRefiner?.mode).toBe('shadow');
       expect(config.promptRefiner?.logPath).toBe('/tmp/shadow-log.jsonl');
       expect(config.promptRefiner?.maxLogChars).toBe(9000);
+      expect(config.promptRefiner?.policyPath).toBe('/tmp/prompt-refiner-active-policy.txt');
       expect(config.capture?.pollMs).toBe(1200);
       expect(config.capture?.pendingQuietPolls).toBe(3);
       expect(config.capture?.pendingInitialQuietPollsCodex).toBe(0);
@@ -160,6 +162,7 @@ describe('ConfigManager', () => {
       env.set('MUDCODE_PROMPT_REFINER_MODE', 'shadow');
       env.set('MUDCODE_PROMPT_REFINER_LOG_PATH', '/tmp/env-shadow-log.jsonl');
       env.set('MUDCODE_PROMPT_REFINER_MAX_LOG_CHARS', '7000');
+      env.set('MUDCODE_PROMPT_REFINER_POLICY_PATH', '/tmp/env-active-policy.txt');
       env.set('AGENT_DISCORD_CAPTURE_POLL_MS', '1500');
       env.set('AGENT_DISCORD_CAPTURE_PENDING_QUIET_POLLS', '4');
       env.set('AGENT_DISCORD_CAPTURE_PENDING_INITIAL_QUIET_POLLS_CODEX', '1');
@@ -185,6 +188,7 @@ describe('ConfigManager', () => {
       expect(config.promptRefiner?.mode).toBe('shadow');
       expect(config.promptRefiner?.logPath).toBe('/tmp/env-shadow-log.jsonl');
       expect(config.promptRefiner?.maxLogChars).toBe(7000);
+      expect(config.promptRefiner?.policyPath).toBe('/tmp/env-active-policy.txt');
       expect(config.capture?.pollMs).toBe(1500);
       expect(config.capture?.pendingQuietPolls).toBe(4);
       expect(config.capture?.pendingInitialQuietPollsCodex).toBe(1);
@@ -279,6 +283,7 @@ describe('ConfigManager', () => {
         hookServerPort: 8888,
         opencodePermissionMode: 'default',
         promptRefinerMode: 'enforce',
+        promptRefinerPolicyPath: '/tmp/stored-active-policy.txt',
       };
       storage.setFile(configFile, JSON.stringify(storedConfig));
 
@@ -290,6 +295,7 @@ describe('ConfigManager', () => {
       expect(manager.getConfigValue('hookServerPort')).toBe(8888);
       expect(manager.getConfigValue('opencodePermissionMode')).toBe('default');
       expect(manager.getConfigValue('promptRefinerMode')).toBe('enforce');
+      expect(manager.getConfigValue('promptRefinerPolicyPath')).toBe('/tmp/stored-active-policy.txt');
     });
   });
 
@@ -378,6 +384,17 @@ describe('ConfigManager', () => {
       const manager = new ConfigManager(storage, env, configDir);
 
       expect(() => manager.validateConfig()).toThrow(/MUDCODE_PROMPT_REFINER_MODE/);
+    });
+
+    it('validateConfig throws for invalid MUDCODE_PROMPT_REFINER_POLICY_PATH value', () => {
+      const storage = new MockStorage();
+      const env = new MockEnvironment();
+      env.set('DISCORD_BOT_TOKEN', 'valid-token');
+      env.set('MUDCODE_PROMPT_REFINER_POLICY_PATH', '   ');
+
+      const manager = new ConfigManager(storage, env, configDir);
+
+      expect(() => manager.validateConfig()).toThrow(/MUDCODE_PROMPT_REFINER_POLICY_PATH/);
     });
 
     it('validateConfig throws for invalid HOOK_SERVER_PORT value', () => {

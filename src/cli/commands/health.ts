@@ -119,7 +119,26 @@ function parseProgressModeFromEnv(raw: string | undefined): 'off' | 'thread' | '
 }
 
 function resolveCodexEventOnlyEnabled(): boolean {
-  return parseBoolEnv(process.env.AGENT_DISCORD_CODEX_EVENT_ONLY) === true;
+  const resolved = parseBoolEnv(process.env.AGENT_DISCORD_CODEX_EVENT_ONLY);
+  return resolved !== false;
+}
+
+function resolveCodexEventOnlyCaptureFallbackEnabled(): boolean {
+  const resolved = parseBoolEnv(process.env.AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK);
+  return resolved === true;
+}
+
+function resolvePromptEchoFallbackRawDeltaOnEventHookEnabled(): boolean {
+  const resolved = parseBoolEnv(process.env.AGENT_DISCORD_CAPTURE_PROMPT_ECHO_FALLBACK_EVENT_HOOK);
+  return resolved === true;
+}
+
+function resolveEventHookCaptureFallbackStaleGraceMs(): number {
+  const fromEnv = Number(process.env.AGENT_DISCORD_EVENT_HOOK_CAPTURE_FALLBACK_STALE_GRACE_MS || '');
+  if (Number.isFinite(fromEnv) && fromEnv >= 0 && fromEnv <= 5 * 60 * 1000) {
+    return Math.trunc(fromEnv);
+  }
+  return 10_000;
 }
 
 function resolveExpectedCodexProgressMode(): 'off' | 'thread' | 'channel' | undefined {
@@ -412,6 +431,9 @@ export async function healthCommand(
   let daemonRunning = false;
   const runtimeByInstance = new Map<string, RuntimeSnapshot>();
   const codexEventOnlyEnabled = resolveCodexEventOnlyEnabled();
+  const codexEventOnlyCaptureFallbackEnabled = resolveCodexEventOnlyCaptureFallbackEnabled();
+  const promptEchoFallbackRawDeltaOnEventHookEnabled = resolvePromptEchoFallbackRawDeltaOnEventHookEnabled();
+  const eventHookCaptureFallbackStaleGraceMs = resolveEventHookCaptureFallbackStaleGraceMs();
   const expectedCodexProgressMode = resolveExpectedCodexProgressMode();
   const progressModeStaleWarnMs = resolveProgressModeStaleWarnMs();
 
@@ -453,6 +475,30 @@ export async function healthCommand(
   }
 
   const projects = stateManager.listProjects();
+  if (codexEventOnlyEnabled && codexEventOnlyCaptureFallbackEnabled) {
+    pushCheck(
+      checks,
+      'contract:event-only',
+      'warn',
+      'event-only strict parity disabled: AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK=1',
+    );
+  }
+  if (codexEventOnlyEnabled && promptEchoFallbackRawDeltaOnEventHookEnabled) {
+    pushCheck(
+      checks,
+      'contract:event-only',
+      'warn',
+      'event-hook capture path allows prompt-echo raw delta fallback. Consider AGENT_DISCORD_CAPTURE_PROMPT_ECHO_FALLBACK_EVENT_HOOK=0',
+    );
+  }
+  if (codexEventOnlyCaptureFallbackEnabled && eventHookCaptureFallbackStaleGraceMs > 30_000) {
+    pushCheck(
+      checks,
+      'contract:event-only',
+      'warn',
+      `event-hook capture fallback stale grace is high (${eventHookCaptureFallbackStaleGraceMs}ms)`,
+    );
+  }
   if (projects.length === 0) {
     pushCheck(checks, 'projects', 'warn', 'no configured projects');
   } else {

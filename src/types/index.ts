@@ -53,6 +53,11 @@ export interface BridgeConfig {
      * Maximum characters saved for baseline/candidate in each log entry.
      */
     maxLogChars?: number;
+    /**
+     * Optional policy text file path (for example GEPA best prompt output).
+     * When set, refiner enables additional keyword-driven rewrite operations.
+     */
+    policyPath?: string;
   };
   tmux: {
     sessionPrefix: string;
@@ -169,6 +174,95 @@ export interface ProjectInstanceState {
   eventHook?: boolean;
 }
 
+export interface ProjectOrchestratorState {
+  /**
+   * Enable supervisor/worker orchestration policy for this project.
+   */
+  enabled: boolean;
+  /**
+   * Instance ID that acts as the supervisor for user-facing control/output.
+   */
+  supervisorInstanceId?: string;
+  /**
+   * Worker instance IDs managed under the supervisor.
+   */
+  workerInstanceIds?: string[];
+  /**
+   * Worker terminal output visibility policy.
+   * - hidden: suppress worker final/idle output in mapped channel
+   * - thread: route worker output to progress thread when possible (reserved)
+   * - channel: allow worker output in mapped channel (legacy behavior)
+   */
+  workerFinalVisibility?: 'hidden' | 'thread' | 'channel';
+  /**
+   * Directive-level progress streaming policy for event path.
+   */
+  progressPolicy?: {
+    /**
+     * Project-wide defaults.
+     */
+    default?: {
+      mode?: 'off' | 'thread' | 'channel';
+      blockStreamingEnabled?: boolean;
+      blockWindowMs?: number;
+      blockMaxChars?: number;
+    };
+    /**
+     * Channel-level overrides.
+     */
+    byChannelId?: Record<
+      string,
+      | {
+          mode?: 'off' | 'thread' | 'channel';
+          blockStreamingEnabled?: boolean;
+          blockWindowMs?: number;
+          blockMaxChars?: number;
+        }
+      | undefined
+    >;
+    /**
+     * Instance-level overrides.
+     */
+    byInstanceId?: Record<
+      string,
+      | {
+          mode?: 'off' | 'thread' | 'channel';
+          blockStreamingEnabled?: boolean;
+          blockWindowMs?: number;
+          blockMaxChars?: number;
+        }
+      | undefined
+    >;
+    /**
+     * Agent-type(provider)-level overrides.
+     */
+    byAgentType?: Record<
+      string,
+      | {
+          mode?: 'off' | 'thread' | 'channel';
+          blockStreamingEnabled?: boolean;
+          blockWindowMs?: number;
+          blockMaxChars?: number;
+        }
+      | undefined
+    >;
+  };
+  /**
+   * Worker QoS policy.
+   */
+  qos?: {
+    maxConcurrentWorkers?: number;
+    workerPriorityByInstanceId?: Record<string, number | undefined>;
+  };
+  /**
+   * Supervisor final response format policy.
+   */
+  supervisorFinalFormat?: {
+    enforce?: boolean;
+    maxRetries?: number;
+  };
+}
+
 export interface ProjectState {
   projectName: string;
   projectPath: string;
@@ -202,6 +296,10 @@ export interface ProjectState {
   eventHooks?: {
     [agentType: string]: boolean | undefined;
   };
+  /**
+   * Optional supervisor/worker orchestration policy.
+   */
+  orchestrator?: ProjectOrchestratorState;
   discordChannels: {
     [agentType: string]: string | undefined;
   };

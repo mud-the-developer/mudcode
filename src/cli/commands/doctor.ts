@@ -50,6 +50,17 @@ export type DoctorResult = {
     runtimeProgressModeChannel?: number;
     runtimeProgressModeUnknown?: number;
     runtimeCodexProgressModeChannel?: number;
+    runtimeOrchestratorSupervisorCount?: number;
+    runtimeOrchestratorWorkerCount?: number;
+    runtimeOrchestratorWorkerHiddenModeLeakCount?: number;
+    runtimeOrchestratorWorkerThreadChannelMismatchCount?: number;
+    runtimeOrchestratorSupervisorFinalFormatEnforceCount?: number;
+    eventHookCaptureFallbackStaleGraceMs?: number;
+    eventOnlyCaptureFallbackEnabled?: boolean;
+    eventOnlyPromptEchoFallbackEventHookEnabled?: boolean;
+    promptRefinerMode?: string;
+    promptRefinerPolicyPath?: string;
+    promptRefinerPolicyPathExists?: boolean;
   };
 };
 
@@ -59,6 +70,9 @@ type RuntimeStatusEntry = {
   agentType?: string;
   lifecycleRejectedEventCount?: number;
   eventProgressMode?: string;
+  orchestratorRole?: 'supervisor' | 'worker' | 'none';
+  orchestratorWorkerVisibility?: 'hidden' | 'thread' | 'channel';
+  orchestratorSupervisorFinalFormatEnforce?: boolean;
 };
 
 type RuntimeStatusPayload = {
@@ -74,6 +88,11 @@ type RuntimeContractSnapshot = {
   rejectedCount: number;
   rejectedInstances: number;
   codexChannelProgressInstances: number;
+  orchestratorSupervisorCount: number;
+  orchestratorWorkerCount: number;
+  orchestratorWorkerHiddenModeLeakCount: number;
+  orchestratorWorkerThreadChannelMismatchCount: number;
+  orchestratorSupervisorFinalFormatEnforceCount: number;
   progressModeCounts: {
     off: number;
     thread: number;
@@ -221,10 +240,18 @@ function parseBoolEnv(raw: string | undefined, fallback: boolean): boolean {
   return fallback;
 }
 
+function parseIntEnv(raw: string | undefined, min: number, max: number): number | undefined {
+  if (!raw) return undefined;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) return undefined;
+  if (parsed < min || parsed > max) return undefined;
+  return Math.trunc(parsed);
+}
+
 function resolveStrictLifecycleMode(): 'off' | 'warn' | 'reject' {
   const raw = (process.env.AGENT_DISCORD_EVENT_LIFECYCLE_STRICT_MODE || '').trim().toLowerCase();
   if (raw === 'off' || raw === 'warn' || raw === 'reject') return raw;
-  return 'off';
+  return 'warn';
 }
 
 function parseRuntimeProgressMode(raw: unknown): 'off' | 'thread' | 'channel' | undefined {
@@ -254,6 +281,11 @@ async function fetchRuntimeContractSnapshot(
     let rejectedCount = 0;
     let rejectedInstances = 0;
     let codexChannelProgressInstances = 0;
+    let orchestratorSupervisorCount = 0;
+    let orchestratorWorkerCount = 0;
+    let orchestratorWorkerHiddenModeLeakCount = 0;
+    let orchestratorWorkerThreadChannelMismatchCount = 0;
+    let orchestratorSupervisorFinalFormatEnforceCount = 0;
     const progressModeCounts = {
       off: 0,
       thread: 0,
@@ -270,6 +302,22 @@ async function fetchRuntimeContractSnapshot(
       if (agentType === 'codex' && progressMode === 'channel') {
         codexChannelProgressInstances += 1;
       }
+      const role = entry.orchestratorRole;
+      if (role === 'supervisor') {
+        orchestratorSupervisorCount += 1;
+        if (entry.orchestratorSupervisorFinalFormatEnforce === true) {
+          orchestratorSupervisorFinalFormatEnforceCount += 1;
+        }
+      } else if (role === 'worker') {
+        orchestratorWorkerCount += 1;
+        const visibility = entry.orchestratorWorkerVisibility;
+        if (visibility === 'hidden' && progressMode && progressMode !== 'off') {
+          orchestratorWorkerHiddenModeLeakCount += 1;
+        }
+        if (visibility === 'thread' && progressMode === 'channel') {
+          orchestratorWorkerThreadChannelMismatchCount += 1;
+        }
+      }
 
       const count =
         typeof entry.lifecycleRejectedEventCount === 'number' &&
@@ -280,7 +328,17 @@ async function fetchRuntimeContractSnapshot(
       rejectedCount += count;
       rejectedInstances += 1;
     }
-    return { rejectedCount, rejectedInstances, codexChannelProgressInstances, progressModeCounts };
+    return {
+      rejectedCount,
+      rejectedInstances,
+      codexChannelProgressInstances,
+      orchestratorSupervisorCount,
+      orchestratorWorkerCount,
+      orchestratorWorkerHiddenModeLeakCount,
+      orchestratorWorkerThreadChannelMismatchCount,
+      orchestratorSupervisorFinalFormatEnforceCount,
+      progressModeCounts,
+    };
   } catch {
     return undefined;
   } finally {
@@ -324,6 +382,60 @@ function printHumanResult(result: DoctorResult): void {
     console.log(
       chalk.gray(
         `   Runtime codex channel-mode instances: ${result.summary.runtimeCodexProgressModeChannel}`,
+      ),
+    );
+  }
+  if (
+    typeof result.summary.eventOnlyCaptureFallbackEnabled === 'boolean' ||
+    typeof result.summary.eventOnlyPromptEchoFallbackEventHookEnabled === 'boolean' ||
+    typeof result.summary.eventHookCaptureFallbackStaleGraceMs === 'number'
+  ) {
+    console.log(
+      chalk.gray(
+        `   Event-only fallback knobs: ` +
+        `captureFallback=${result.summary.eventOnlyCaptureFallbackEnabled === undefined ? '(unknown)' : result.summary.eventOnlyCaptureFallbackEnabled ? 'on' : 'off'}, ` +
+        `promptEchoRawDeltaOnEventHook=${result.summary.eventOnlyPromptEchoFallbackEventHookEnabled === undefined ? '(unknown)' : result.summary.eventOnlyPromptEchoFallbackEventHookEnabled ? 'on' : 'off'}, ` +
+        `staleGraceMs=${result.summary.eventHookCaptureFallbackStaleGraceMs ?? '(default)'}`,
+      ),
+    );
+  }
+  if (
+    typeof result.summary.runtimeOrchestratorSupervisorCount === 'number' ||
+    typeof result.summary.runtimeOrchestratorWorkerCount === 'number'
+  ) {
+    console.log(
+      chalk.gray(
+        `   Runtime orchestrator roles: ` +
+        `supervisor=${result.summary.runtimeOrchestratorSupervisorCount ?? 0}, ` +
+        `worker=${result.summary.runtimeOrchestratorWorkerCount ?? 0}`,
+      ),
+    );
+  }
+  if (typeof result.summary.runtimeOrchestratorSupervisorFinalFormatEnforceCount === 'number') {
+    console.log(
+      chalk.gray(
+        `   Runtime supervisor final-format enforce: ${result.summary.runtimeOrchestratorSupervisorFinalFormatEnforceCount}`,
+      ),
+    );
+  }
+  if (result.summary.promptRefinerMode || result.summary.promptRefinerPolicyPath) {
+    console.log(
+      chalk.gray(
+        `   Prompt refiner runtime: mode=${result.summary.promptRefinerMode || 'off'}, ` +
+        `policyPath=${result.summary.promptRefinerPolicyPath || '(unset)'}, ` +
+        `policyExists=${result.summary.promptRefinerPolicyPathExists === undefined ? '(unknown)' : result.summary.promptRefinerPolicyPathExists ? 'yes' : 'no'}`,
+      ),
+    );
+  }
+  if (
+    typeof result.summary.runtimeOrchestratorWorkerHiddenModeLeakCount === 'number' ||
+    typeof result.summary.runtimeOrchestratorWorkerThreadChannelMismatchCount === 'number'
+  ) {
+    console.log(
+      chalk.gray(
+        `   Runtime orchestrator policy drift: ` +
+        `hidden-leak=${result.summary.runtimeOrchestratorWorkerHiddenModeLeakCount ?? 0}, ` +
+        `thread-channel-mismatch=${result.summary.runtimeOrchestratorWorkerThreadChannelMismatchCount ?? 0}`,
       ),
     );
   }
@@ -382,13 +494,67 @@ export async function runDoctor(options: { fix?: boolean } = {}): Promise<Doctor
   const issues = buildIssues(storedRaw, envRaw);
   const fixes: DoctorFix[] = [];
   const strictLifecycleMode = resolveStrictLifecycleMode();
-  const codexEventOnly = parseBoolEnv(process.env.AGENT_DISCORD_CODEX_EVENT_ONLY, false);
+  const codexEventOnly = parseBoolEnv(process.env.AGENT_DISCORD_CODEX_EVENT_ONLY, true);
+  const codexEventOnlyCaptureFallback = parseBoolEnv(
+    process.env.AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK,
+    false,
+  );
+  const promptEchoFallbackEventHookEnabled = parseBoolEnv(
+    process.env.AGENT_DISCORD_CAPTURE_PROMPT_ECHO_FALLBACK_EVENT_HOOK,
+    false,
+  );
+  const eventHookCaptureFallbackStaleGraceMs =
+    parseIntEnv(process.env.AGENT_DISCORD_EVENT_HOOK_CAPTURE_FALLBACK_STALE_GRACE_MS, 0, 5 * 60 * 1000) ?? 10_000;
   if (codexEventOnly && strictLifecycleMode === 'off') {
     issues.push({
       level: 'warn',
       code: 'event-contract-strict-off',
       message:
         'AGENT_DISCORD_CODEX_EVENT_ONLY is enabled, but AGENT_DISCORD_EVENT_LIFECYCLE_STRICT_MODE=off. Consider warn/reject to catch missing start/final contracts.',
+    });
+  }
+  if (codexEventOnly && codexEventOnlyCaptureFallback) {
+    issues.push({
+      level: 'warn',
+      code: 'event-only-capture-fallback-enabled',
+      message:
+        'AGENT_DISCORD_CODEX_EVENT_ONLY is enabled, but AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK is also enabled. Set it to 0 for strict event-only parity.',
+    });
+  }
+  if (codexEventOnly && promptEchoFallbackEventHookEnabled) {
+    issues.push({
+      level: 'warn',
+      code: 'event-only-prompt-echo-fallback-event-hook-enabled',
+      message:
+        'AGENT_DISCORD_CAPTURE_PROMPT_ECHO_FALLBACK_EVENT_HOOK is enabled while codex event-only is active. This can leak intermediary prompt-echo deltas during event-hook capture fallback.',
+    });
+  }
+  if (codexEventOnly && codexEventOnlyCaptureFallback && eventHookCaptureFallbackStaleGraceMs > 30_000) {
+    issues.push({
+      level: 'warn',
+      code: 'event-only-capture-fallback-grace-high',
+      message:
+        `AGENT_DISCORD_EVENT_HOOK_CAPTURE_FALLBACK_STALE_GRACE_MS=${eventHookCaptureFallbackStaleGraceMs}ms is high. ` +
+        'Fallback recovery may be delayed when hook lifecycle is stale.',
+    });
+  }
+
+  const promptRefinerMode = config.promptRefiner?.mode || 'off';
+  const promptRefinerPolicyPath = config.promptRefiner?.policyPath?.trim() || '';
+  const promptRefinerPolicyPathExists = promptRefinerPolicyPath ? existsSync(promptRefinerPolicyPath) : false;
+  if (promptRefinerMode === 'enforce' && !promptRefinerPolicyPath) {
+    issues.push({
+      level: 'warn',
+      code: 'prompt-refiner-enforce-no-policy-path',
+      message:
+        'Prompt refiner mode=enforce but promptRefinerPolicyPath is not set. Configure policy path or switch to shadow.',
+    });
+  }
+  if (promptRefinerPolicyPath && !promptRefinerPolicyPathExists) {
+    issues.push({
+      level: 'warn',
+      code: 'prompt-refiner-policy-path-missing',
+      message: `Prompt refiner policy path does not exist on disk: ${promptRefinerPolicyPath}`,
     });
   }
 
@@ -421,6 +587,14 @@ export async function runDoctor(options: { fix?: boolean } = {}): Promise<Doctor
         });
       }
     }
+
+    if (promptRefinerMode === 'enforce' && !promptRefinerPolicyPath) {
+      saveConfig({ promptRefinerMode: 'shadow' });
+      fixes.push({
+        code: 'prompt-refiner-safe-downgrade',
+        message: 'Downgraded promptRefinerMode to shadow because enforce mode had no policy path.',
+      });
+    }
   }
 
   let validationError: string | undefined;
@@ -450,6 +624,24 @@ export async function runDoctor(options: { fix?: boolean } = {}): Promise<Doctor
         ` codex instance(s) currently report runtime progressMode=channel.`,
     });
   }
+  if (runtimeContract && runtimeContract.orchestratorWorkerHiddenModeLeakCount > 0) {
+    resultIssues.push({
+      level: 'warn',
+      code: 'orchestrator-worker-hidden-progress-leak',
+      message:
+        `Detected ${runtimeContract.orchestratorWorkerHiddenModeLeakCount} worker instance(s)` +
+        ' with hidden visibility but runtime progressMode is not off.',
+    });
+  }
+  if (runtimeContract && runtimeContract.orchestratorWorkerThreadChannelMismatchCount > 0) {
+    resultIssues.push({
+      level: 'warn',
+      code: 'orchestrator-worker-thread-channel-mismatch',
+      message:
+        `Detected ${runtimeContract.orchestratorWorkerThreadChannelMismatchCount} worker instance(s)` +
+        ' with thread visibility but runtime progressMode=channel.',
+    });
+  }
   if (validationError) {
     resultIssues.push({
       level: 'fail',
@@ -475,6 +667,19 @@ export async function runDoctor(options: { fix?: boolean } = {}): Promise<Doctor
       runtimeProgressModeChannel: runtimeContract?.progressModeCounts.channel,
       runtimeProgressModeUnknown: runtimeContract?.progressModeCounts.unknown,
       runtimeCodexProgressModeChannel: runtimeContract?.codexChannelProgressInstances,
+      runtimeOrchestratorSupervisorCount: runtimeContract?.orchestratorSupervisorCount,
+      runtimeOrchestratorWorkerCount: runtimeContract?.orchestratorWorkerCount,
+      runtimeOrchestratorWorkerHiddenModeLeakCount: runtimeContract?.orchestratorWorkerHiddenModeLeakCount,
+      runtimeOrchestratorWorkerThreadChannelMismatchCount:
+        runtimeContract?.orchestratorWorkerThreadChannelMismatchCount,
+      runtimeOrchestratorSupervisorFinalFormatEnforceCount:
+        runtimeContract?.orchestratorSupervisorFinalFormatEnforceCount,
+      eventHookCaptureFallbackStaleGraceMs,
+      eventOnlyCaptureFallbackEnabled: codexEventOnlyCaptureFallback,
+      eventOnlyPromptEchoFallbackEventHookEnabled: promptEchoFallbackEventHookEnabled,
+      promptRefinerMode,
+      promptRefinerPolicyPath: promptRefinerPolicyPath || undefined,
+      promptRefinerPolicyPathExists: promptRefinerPolicyPath ? promptRefinerPolicyPathExists : undefined,
     },
   };
   return result;
