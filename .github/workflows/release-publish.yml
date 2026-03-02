@@ -64,14 +64,14 @@ jobs:
         run: bun install
 
       - name: Build host release binaries
-        if: ${{ matrix.full_only != true || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.profile == 'full') }}
+        if: ${{ matrix.full_only != true || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.profile == 'full') }}
         env:
-          MUDCODE_NPM_SCOPE: ${{ github.event_name == 'workflow_dispatch' && inputs.scope || '@mudramo' }}
+          MUDCODE_NPM_SCOPE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.scope || '@mudramo' }}
           MUDCODE_RS_SKIP_LOCAL_BUILD: "1"
         run: bun run build:release:binaries:host
 
       - name: Upload release fragment
-        if: ${{ matrix.full_only != true || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.profile == 'full') }}
+        if: ${{ matrix.full_only != true || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.profile == 'full') }}
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.name }}
@@ -134,7 +134,7 @@ jobs:
 
       - name: Rebuild manifest + npm meta package
         env:
-          MUDCODE_NPM_SCOPE: ${{ github.event_name == 'workflow_dispatch' && inputs.scope || '@mudramo' }}
+          MUDCODE_NPM_SCOPE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.scope || '@mudramo' }}
         run: |
           bun run build:release:manifest
           bun run build:release:npm
@@ -153,12 +153,12 @@ jobs:
 
       - name: Publish release packages (bun)
         env:
-          MUDCODE_NPM_SCOPE: ${{ github.event_name == 'workflow_dispatch' && inputs.scope || '@mudramo' }}
-          MUDCODE_RELEASE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.profile || 'full' }}
+          MUDCODE_NPM_SCOPE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.scope || '@mudramo' }}
+          MUDCODE_RELEASE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.profile || 'full' }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          ARGS="--pm bun --skip-build --access public --tag ${{ github.event_name == 'workflow_dispatch' && inputs.tag || 'latest' }} --profile ${{ github.event_name == 'workflow_dispatch' && inputs.profile || 'full' }}"
-          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}" = "true" ]; then
+          ARGS="--pm bun --skip-build --access public --tag ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || 'latest' }} --profile ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.profile || 'full' }}"
+          if [ "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run || false }}" = "true" ]; then
             ARGS="$ARGS --dry-run"
           fi
           node scripts/release/publish-release.mjs $ARGS
