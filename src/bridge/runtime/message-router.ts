@@ -1,10 +1,12 @@
 import type { MessageContext, MessagingClient } from '../../messaging/interface.js';
 import { TmuxManager } from '../../tmux/manager.js';
 import type { IStateManager } from '../../types/interfaces.js';
+import type { ProjectInstanceState } from '../../types/index.js';
 import {
   findProjectInstanceByChannel,
   getPrimaryInstanceForAgent,
   getProjectInstance,
+  listProjectInstances,
   normalizeProjectState,
 } from '../../state/instances.js';
 import { downloadFileAttachments, buildFileMarkers } from '../../infra/file-downloader.js';
@@ -15,7 +17,28 @@ import type { CodexIoV2Tracker } from '../events/codex-io-v2.js';
 import type { SkillAutoLinker } from '../skills/skill-autolinker.js';
 import type { AgentEventHookClient } from '../events/agent-event-hook.js';
 import { spawn } from 'child_process';
+import { createHash } from 'crypto';
+import { mkdirSync, writeFileSync } from 'fs';
+import { join, relative } from 'path';
 import { runDoctor, type DoctorResult } from '../../cli/commands/doctor.js';
+
+export interface OrchestratorWorkerProvisioner {
+  spawnCodexWorkers(params: {
+    projectName: string;
+    count: number;
+  }): Promise<{
+    created: ProjectInstanceState[];
+    warnings?: string[];
+  }>;
+  teardownWorker(params: {
+    projectName: string;
+    workerInstanceId: string;
+  }): Promise<{
+    removed: boolean;
+    removedInstance?: ProjectInstanceState;
+    warning?: string;
+  }>;
+}
 
 export interface BridgeMessageRouterDeps {
   messaging: MessagingClient;
@@ -28,6 +51,7 @@ export interface BridgeMessageRouterDeps {
   eventHookClient?: AgentEventHookClient;
   doctorRunner?: (options: { fix?: boolean }) => Promise<DoctorResult>;
   backgroundCliRunner?: (args: string[], delayMs?: number) => void;
+  orchestratorWorkerProvisioner?: OrchestratorWorkerProvisioner;
 }
 
 type RouteResolutionSource = 'mapped' | 'reply' | 'conversation' | 'channel' | 'primary';
@@ -52,16 +76,93 @@ type SessionControlCommand = 'q' | 'qw';
 type MaintenanceCommand =
   | { kind: 'doctor'; fix: boolean }
   | { kind: 'update'; git: boolean }
-  | { kind: 'daemon-restart' };
+  | { kind: 'daemon-restart' }
+  | { kind: 'orchestrator-status' }
+  | {
+      kind: 'orchestrator-enable';
+      supervisorInstanceId?: string;
+      workerFinalVisibility?: 'hidden' | 'thread' | 'channel';
+    }
+  | {
+      kind: 'orchestrator-run';
+      workerInstanceId: string;
+      prompt: string;
+      priority?: number;
+    }
+  | {
+      kind: 'orchestrator-spawn';
+      count: number;
+    }
+  | {
+      kind: 'orchestrator-remove';
+      workerInstanceId: string;
+    }
+  | { kind: 'orchestrator-remove-all' }
+  | { kind: 'orchestrator-worker-info'; workerToken: string }
+  | { kind: 'orchestrator-worker-log'; workerToken: string; tailLines?: number }
+  | { kind: 'orchestrator-disable' }
+  | { kind: 'orchestrator-help'; message: string };
 type CodexLongTaskReportMode = 'off' | 'continue' | 'auto' | 'always';
+
+interface OrchestratorQueuedTask {
+  taskId: string;
+  projectName: string;
+  supervisorInstanceId: string;
+  workerInstanceId: string;
+  prompt: string;
+  sourceChannelId: string;
+  routeHint?: 'reply' | 'thread' | 'memory';
+  turnId: string;
+  queuedAtMs: number;
+  attempts: number;
+  nextAttemptAtMs?: number;
+  priority: number;
+}
+
+interface OrchestratorWorkerActivity {
+  atMs: number;
+  turnId: string;
+  stage: 'dispatched' | 'queued' | 'retry-queued' | 'queue-drained' | 'queue-timeout' | 'dispatch-failed';
+  promptSummary: string;
+  queueDepth?: number;
+}
+
+interface OrchestratorDispatchOrQueueOutcome {
+  kind: 'dispatched' | 'queued' | 'queue-full' | 'dispatch-failed';
+  turnId: string;
+  queueDepth?: number;
+  queuePosition?: number;
+  immediateFailureQueued?: boolean;
+  errorMessage?: string;
+}
+
+interface AutoPlannerAssignment {
+  task: string;
+  prompt: string;
+  packetArtifactPath?: string;
+}
+
+interface OrchestratorTaskPacketParams {
+  projectName: string;
+  projectPath: string;
+  supervisorInstanceId: string;
+  workerInstanceId: string;
+  task: string;
+  prompt: string;
+}
 
 export class BridgeMessageRouter {
   private routeByMessageId: Map<string, RouteMemory> = new Map();
   private routeByConversationKey: Map<string, RouteMemory> = new Map();
   private lastPromptByInstance: Map<string, string> = new Map();
+  private lastOrchestratorActivityByWorker: Map<string, OrchestratorWorkerActivity> = new Map();
+  private orchestratorQueueByWorker: Map<string, OrchestratorQueuedTask[]> = new Map();
+  private orchestratorQueueDrainInFlight = new Set<string>();
+  private orchestratorQueueDrainTimerByWorker = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly maxMessageRoutes = 4000;
   private readonly maxConversationRoutes = 2000;
   private readonly maxPromptMemory = 2000;
+  private readonly maxWorkerActivityMemory = 4000;
 
   constructor(private deps: BridgeMessageRouterDeps) {}
 
@@ -127,6 +228,64 @@ export class BridgeMessageRouter {
     return this.lastPromptByInstance.get(key);
   }
 
+  private workerActivityKey(projectName: string, workerInstanceId: string): string {
+    return `${projectName}:${workerInstanceId}`;
+  }
+
+  private summarizeOrchestratorWorkerPrompt(prompt: string, maxChars: number = 180): string {
+    const compact = this.stripMudcodeControlBlocks(prompt).replace(/\s+/g, ' ').trim();
+    if (compact.length === 0) return '(empty)';
+    if (compact.length <= maxChars) return compact;
+    return `${compact.slice(0, Math.max(40, maxChars))}...`;
+  }
+
+  private rememberOrchestratorWorkerActivity(params: {
+    projectName: string;
+    workerInstanceId: string;
+    turnId: string;
+    stage: OrchestratorWorkerActivity['stage'];
+    prompt: string;
+    queueDepth?: number;
+  }): void {
+    const key = this.workerActivityKey(params.projectName, params.workerInstanceId);
+    this.lastOrchestratorActivityByWorker.set(key, {
+      atMs: Date.now(),
+      turnId: params.turnId,
+      stage: params.stage,
+      promptSummary: this.summarizeOrchestratorWorkerPrompt(params.prompt),
+      ...(typeof params.queueDepth === 'number' && Number.isFinite(params.queueDepth)
+        ? { queueDepth: Math.max(0, Math.trunc(params.queueDepth)) }
+        : {}),
+    });
+    this.pruneOldest(this.lastOrchestratorActivityByWorker, this.maxWorkerActivityMemory);
+  }
+
+  private getOrchestratorWorkerActivity(
+    projectName: string,
+    workerInstanceId: string,
+  ): OrchestratorWorkerActivity | undefined {
+    return this.lastOrchestratorActivityByWorker.get(this.workerActivityKey(projectName, workerInstanceId));
+  }
+
+  private formatWorkerActivityStage(stage: OrchestratorWorkerActivity['stage']): string {
+    if (stage === 'dispatched') return 'dispatched';
+    if (stage === 'queued') return 'queued';
+    if (stage === 'retry-queued') return 'retry queued';
+    if (stage === 'queue-drained') return 'queue drained';
+    if (stage === 'queue-timeout') return 'queue timeout';
+    return 'dispatch failed';
+  }
+
+  private buildWorkerQueueHeadSummary(
+    projectName: string,
+    workerInstanceId: string,
+    maxChars: number = 100,
+  ): string | undefined {
+    const head = this.peekOrchestratorTask(projectName, workerInstanceId);
+    if (!head) return undefined;
+    return `head(${this.formatAge(Date.now() - head.queuedAtMs)}): ${this.summarizeOrchestratorWorkerPrompt(head.prompt, maxChars)}`;
+  }
+
   private parseUtilityCommand(content: string): 'retry' | 'health' | 'snapshot' | 'io' | undefined {
     const normalized = content.trim().toLowerCase();
     if (normalized === '/retry') return 'retry';
@@ -136,10 +295,162 @@ export class BridgeMessageRouter {
     return undefined;
   }
 
+  private parseOrchestratorRunPrompt(rawPrompt: string): { prompt: string; priority?: number } | undefined {
+    let prompt = rawPrompt.trim();
+    let priority: number | undefined;
+    const priorityNamed = prompt.match(/^(?:--priority(?:=|\s+))(high|normal|low)\s+([\s\S]+)$/i);
+    if (priorityNamed) {
+      const named = (priorityNamed[1] || '').toLowerCase();
+      priority = named === 'high' ? 2 : named === 'low' ? -2 : 0;
+      prompt = (priorityNamed[2] || '').trim();
+    } else {
+      const priorityShort = prompt.match(/^(p0|p1|p2)\s+([\s\S]+)$/i);
+      if (priorityShort) {
+        const short = (priorityShort[1] || '').toLowerCase();
+        priority = short === 'p2' ? 2 : short === 'p0' ? -2 : 0;
+        prompt = (priorityShort[2] || '').trim();
+      }
+    }
+    if (!prompt) return undefined;
+    return {
+      prompt,
+      ...(priority !== undefined ? { priority } : {}),
+    };
+  }
+
+  private parseSubagentsAliasCommand(content: string): MaintenanceCommand | undefined {
+    const trimmed = content.trim();
+    const parts = trimmed.split(/\s+/).filter(Boolean);
+    if (parts.length === 0) return undefined;
+    const command = parts[0]!.toLowerCase();
+    if (command !== '/subagents' && command !== '/subagent') return undefined;
+
+    const sub = (parts[1] || 'list').toLowerCase();
+    if (sub === 'list' || sub === 'ls' || sub === 'status' || sub === 'show') {
+      return { kind: 'orchestrator-status' };
+    }
+    if (sub === 'spawn' || sub === 'add') {
+      const raw = (parts[2] || '').trim();
+      if (!raw) return { kind: 'orchestrator-spawn', count: 1 };
+      const parsed = Number(raw);
+      if (!Number.isFinite(parsed) || parsed < 1) {
+        return {
+          kind: 'orchestrator-help',
+          message: '⚠️ Usage: `/subagents spawn [count>=1]`',
+        };
+      }
+      return {
+        kind: 'orchestrator-spawn',
+        count: Math.min(8, Math.trunc(parsed)),
+      };
+    }
+    if (sub === 'send' || sub === 'run' || sub === 'steer') {
+      const runMatch = trimmed.match(/^\/subagents?\s+(?:send|run|steer)\s+(\S+)\s+([\s\S]+)$/i);
+      if (!runMatch) {
+        return {
+          kind: 'orchestrator-help',
+          message: '⚠️ Usage: `/subagents send <workerInstanceId> [--priority high|normal|low] <task>`',
+        };
+      }
+      const workerInstanceId = (runMatch[1] || '').trim();
+      const parsed = this.parseOrchestratorRunPrompt(runMatch[2] || '');
+      if (!workerInstanceId || !parsed) {
+        return {
+          kind: 'orchestrator-help',
+          message: '⚠️ Usage: `/subagents send <workerInstanceId> [--priority high|normal|low] <task>`',
+        };
+      }
+      return {
+        kind: 'orchestrator-run',
+        workerInstanceId,
+        prompt: parsed.prompt,
+        ...(parsed.priority !== undefined ? { priority: parsed.priority } : {}),
+      };
+    }
+    if (sub === 'info') {
+      const workerToken = (parts[2] || '').trim();
+      if (!workerToken) {
+        return {
+          kind: 'orchestrator-help',
+          message: '⚠️ Usage: `/subagents info <workerInstanceId|#index>`',
+        };
+      }
+      return {
+        kind: 'orchestrator-worker-info',
+        workerToken,
+      };
+    }
+    if (sub === 'log' || sub === 'logs') {
+      const workerToken = (parts[2] || '').trim();
+      if (!workerToken) {
+        return {
+          kind: 'orchestrator-help',
+          message: '⚠️ Usage: `/subagents log <workerInstanceId|#index> [tailLines]`',
+        };
+      }
+      const rawTail = (parts[3] || '').trim();
+      if (!rawTail) {
+        return {
+          kind: 'orchestrator-worker-log',
+          workerToken,
+        };
+      }
+      const parsedTail = Number(rawTail);
+      if (!Number.isFinite(parsedTail) || parsedTail < 20) {
+        return {
+          kind: 'orchestrator-help',
+          message: '⚠️ Usage: `/subagents log <workerInstanceId|#index> [tailLines>=20]`',
+        };
+      }
+      return {
+        kind: 'orchestrator-worker-log',
+        workerToken,
+        tailLines: Math.min(500, Math.trunc(parsedTail)),
+      };
+    }
+    if (sub === 'kill' || sub === 'remove' || sub === 'rm' || sub === 'teardown') {
+      const target = (parts[2] || '').trim();
+      if (!target) {
+        return {
+          kind: 'orchestrator-help',
+          message: '⚠️ Usage: `/subagents kill <workerInstanceId|all>`',
+        };
+      }
+      if (target.toLowerCase() === 'all') {
+        return { kind: 'orchestrator-remove-all' };
+      }
+      return {
+        kind: 'orchestrator-remove',
+        workerInstanceId: target,
+      };
+    }
+    if (sub === 'help' || sub === '--help' || sub === '-h') {
+      return {
+        kind: 'orchestrator-help',
+        message: [
+          '🧩 `/subagents` aliases',
+          '- `/subagents list` -> `/orchestrator status`',
+          '- `/subagents spawn [count]` -> `/orchestrator spawn [count]`',
+          '- `/subagents send <worker> <task>` -> `/orchestrator run <worker> <task>`',
+          '- `/subagents steer <worker> <task>` -> `/orchestrator run <worker> <task>`',
+          '- `/subagents info <worker|#index>` -> worker runtime detail',
+          '- `/subagents log <worker|#index> [tailLines]` -> worker tmux tail',
+          '- `/subagents kill <worker|all>` -> `/orchestrator remove <worker>` / remove-all',
+        ].join('\n'),
+      };
+    }
+    return {
+      kind: 'orchestrator-help',
+      message:
+        '⚠️ Unknown `/subagents` command. Use `list`, `spawn`, `send`, `steer`, `info`, `log`, or `kill`.',
+    };
+  }
+
   private parseMaintenanceCommand(content: string): MaintenanceCommand | undefined {
     const parts = content.trim().split(/\s+/).filter(Boolean);
     if (parts.length === 0) return undefined;
     const command = parts[0]!.toLowerCase();
+    const manualOrchestratorCommandsEnabled = this.resolveOrchestratorManualCommandsEnabled();
 
     if (command === '/doctor') {
       const fix = parts.slice(1).some((part) => {
@@ -161,7 +472,1489 @@ export class BridgeMessageRouter {
       return { kind: 'daemon-restart' };
     }
 
+    const subagentsAlias = this.parseSubagentsAliasCommand(content);
+    if (subagentsAlias) {
+      if (!manualOrchestratorCommandsEnabled) {
+        return {
+          kind: 'orchestrator-help',
+          message: this.buildOrchestratorManualCommandDisabledMessage('/subagents'),
+        };
+      }
+      return subagentsAlias;
+    }
+
+    if (command === '/orchestrator' || command === '/orch') {
+      if (!manualOrchestratorCommandsEnabled) {
+        return {
+          kind: 'orchestrator-help',
+          message: this.buildOrchestratorManualCommandDisabledMessage('/orchestrator'),
+        };
+      }
+      const sub = (parts[1] || 'status').toLowerCase();
+      if (sub === 'status' || sub === 'show') return { kind: 'orchestrator-status' };
+      if (sub === 'disable' || sub === 'off') return { kind: 'orchestrator-disable' };
+      if (sub === 'run') {
+        const runMatch = content.trim().match(/^\/(?:orchestrator|orch)\s+run\s+(\S+)\s+([\s\S]+)$/i);
+        if (!runMatch) {
+          return {
+            kind: 'orchestrator-help',
+            message: '⚠️ Usage: `/orchestrator run <workerInstanceId> [--priority high|normal|low] <task>`',
+          };
+        }
+        const workerInstanceId = (runMatch[1] || '').trim();
+        const parsed = this.parseOrchestratorRunPrompt(runMatch[2] || '');
+        if (!workerInstanceId || !parsed) {
+          return {
+            kind: 'orchestrator-help',
+            message: '⚠️ Usage: `/orchestrator run <workerInstanceId> [--priority high|normal|low] <task>`',
+          };
+        }
+        return {
+          kind: 'orchestrator-run',
+          workerInstanceId,
+          prompt: parsed.prompt,
+          ...(parsed.priority !== undefined ? { priority: parsed.priority } : {}),
+        };
+      }
+      if (sub === 'spawn' || sub === 'add') {
+        const raw = (parts[2] || '').trim();
+        if (!raw) {
+          return {
+            kind: 'orchestrator-spawn',
+            count: 1,
+          };
+        }
+        const parsed = Number(raw);
+        if (!Number.isFinite(parsed) || parsed < 1) {
+          return {
+            kind: 'orchestrator-help',
+            message: '⚠️ Usage: `/orchestrator spawn [count>=1]`',
+          };
+        }
+        return {
+          kind: 'orchestrator-spawn',
+          count: Math.min(8, Math.trunc(parsed)),
+        };
+      }
+      if (sub === 'remove' || sub === 'rm' || sub === 'teardown') {
+        const workerInstanceId = (parts[2] || '').trim();
+        if (!workerInstanceId) {
+          return {
+            kind: 'orchestrator-help',
+            message: '⚠️ Usage: `/orchestrator remove <workerInstanceId>`',
+          };
+        }
+        return {
+          kind: 'orchestrator-remove',
+          workerInstanceId,
+        };
+      }
+      if (sub === 'enable' || sub === 'on') {
+        let supervisorInstanceId: string | undefined;
+        let workerFinalVisibility: 'hidden' | 'thread' | 'channel' | undefined;
+        for (const tokenRaw of parts.slice(2)) {
+          const token = tokenRaw.trim();
+          if (!token) continue;
+          const lower = token.toLowerCase();
+          if (lower.startsWith('supervisor=')) {
+            const value = token.slice('supervisor='.length).trim();
+            if (value) supervisorInstanceId = value;
+            continue;
+          }
+          if (lower === 'hidden' || lower === 'thread' || lower === 'channel') {
+            workerFinalVisibility = lower;
+            continue;
+          }
+          if (!supervisorInstanceId) {
+            supervisorInstanceId = token;
+            continue;
+          }
+          return {
+            kind: 'orchestrator-help',
+            message:
+              '⚠️ Invalid /orchestrator enable arguments. Usage: `/orchestrator enable [supervisorInstanceId|supervisor=<id>] [hidden|thread|channel]`',
+          };
+        }
+        return {
+          kind: 'orchestrator-enable',
+          ...(supervisorInstanceId ? { supervisorInstanceId } : {}),
+          ...(workerFinalVisibility ? { workerFinalVisibility } : {}),
+        };
+      }
+      return {
+        kind: 'orchestrator-help',
+        message:
+          '⚠️ Unknown /orchestrator command. Use `/orchestrator status`, `/orchestrator run`, `/orchestrator spawn`, `/orchestrator remove`, `/orchestrator enable`, or `/orchestrator disable`.',
+      };
+    }
+
     return undefined;
+  }
+
+  private buildOrchestratorManualCommandDisabledMessage(command: '/orchestrator' | '/subagents'): string {
+    return [
+      'ℹ️ Manual orchestrator commands are disabled in Discord.',
+      `ignored: \`${command}\``,
+      'Auto orchestration is handled by runtime policy and prompt flow.',
+      'To re-enable manual commands, set `AGENT_DISCORD_ORCHESTRATOR_MANUAL_COMMANDS=1` and restart daemon.',
+    ].join('\n');
+  }
+
+  private buildOrchestratorStatusSummary(
+    project: ReturnType<typeof normalizeProjectState>,
+  ): string {
+    const orchestrator = project.orchestrator;
+    if (!orchestrator?.enabled) {
+      return [
+        '🧭 Orchestrator: disabled',
+        'Use `/orchestrator enable [supervisorInstanceId] [hidden|thread|channel]` to enable.',
+      ].join('\n');
+    }
+
+    const supervisor = orchestrator.supervisorInstanceId || '(unset)';
+    const workers = this.resolveOrchestratorWorkerIds(project);
+    const visibility = orchestrator.workerFinalVisibility || 'hidden';
+    const maxConcurrency = this.resolveOrchestratorQosMaxConcurrency(project);
+    const contextBudgetChars = this.resolveOrchestratorContextBudgetChars();
+    const rollingSummaryItems = this.resolveOrchestratorRollingSummaryMaxItems();
+    const rollingSummaryChars = this.resolveOrchestratorRollingSummaryMaxChars();
+    const packetInlineMaxChars = this.resolveOrchestratorPacketInlineMaxChars();
+    const packetArtifactEnabled = this.resolveOrchestratorPacketArtifactEnabled();
+    const nowMs = Date.now();
+    let activeWorkers = 0;
+    let queuedWorkers = 0;
+    let totalQueueDepth = 0;
+    const workerLine =
+      workers.length > 0 ? workers.map((id) => `\`${id}\``).join(', ') : '(none)';
+    const workerIndexLine =
+      workers.length > 0 ? workers.map((id, index) => `#${index + 1}->\`${id}\``).join(', ') : '(none)';
+    const workerRuntimeLines = workers.flatMap((workerId, index) => {
+      const worker = getProjectInstance(project, workerId);
+      if (!worker) return [`- #${index + 1} \`${workerId}\`: missing`];
+      const runtime = this.getPendingRuntimeSnapshot(project.projectName, worker.agentType, worker.instanceId);
+      const stage = runtime.latestStage || runtime.oldestStage || runtime.lastTerminalStage || 'idle';
+      const queue = this.getOrchestratorQueueSnapshot(project.projectName, workerId);
+      const queueHead = this.buildWorkerQueueHeadSummary(project.projectName, workerId, 90);
+      const activity = this.getOrchestratorWorkerActivity(project.projectName, workerId);
+      totalQueueDepth += queue.depth;
+      if (queue.depth > 0) queuedWorkers += 1;
+      if (runtime.pendingDepth > 0) activeWorkers += 1;
+      const queueText =
+        queue.depth > 0
+          ? `, queue=${queue.depth}${queue.oldestAgeMs !== undefined ? ` (oldest ${this.formatAge(queue.oldestAgeMs)})` : ''}`
+          : ', queue=0';
+      const statusLine = `- #${index + 1} \`${workerId}\`: pending=${runtime.pendingDepth}, stage=${stage}${queueText}`;
+      const detailLines: string[] = [];
+      if (activity) {
+        detailLines.push(
+          `  ↳ recent: ${this.formatWorkerActivityStage(activity.stage)} ${this.formatAge(nowMs - activity.atMs)} ago (turn \`${activity.turnId}\`)`,
+        );
+        detailLines.push(`  ↳ task: ${activity.promptSummary}`);
+      } else {
+        detailLines.push('  ↳ recent: (none)');
+      }
+      if (queueHead) {
+        detailLines.push(`  ↳ ${queueHead}`);
+      }
+      return [statusLine, ...detailLines];
+    });
+    return [
+      '🧭 Orchestrator: enabled',
+      `supervisor: \`${supervisor}\``,
+      `workers(${workers.length}): ${workerLine}`,
+      `worker index: ${workerIndexLine}`,
+      `worker final visibility: \`${visibility}\``,
+      `worker qos max concurrency: \`${maxConcurrency}\``,
+      `context budget: \`${contextBudgetChars}\` chars`,
+      `rolling summary: items=\`${rollingSummaryItems}\`, chars=\`${rollingSummaryChars}\``,
+      `task packet inline max: \`${packetInlineMaxChars}\` chars`,
+      `task packet artifact enabled: \`${packetArtifactEnabled ? 'on' : 'off'}\``,
+      `worker summary: active=\`${activeWorkers}\`, queued=\`${queuedWorkers}\`, totalQueueDepth=\`${totalQueueDepth}\``,
+      ...(workerRuntimeLines.length > 0 ? ['worker runtime:', ...workerRuntimeLines] : []),
+    ].join('\n');
+  }
+
+  private buildKnownWorkerList(project: ReturnType<typeof normalizeProjectState>): string {
+    const workers = this.resolveOrchestratorWorkerIds(project);
+    if (workers.length === 0) return '(none)';
+    return workers.map((id) => `\`${id}\``).join(', ');
+  }
+
+  private resolveWorkerForCommand(params: {
+    project: ReturnType<typeof normalizeProjectState>;
+    workerToken: string;
+  }): { workerInstanceId?: string; worker?: ProjectInstanceState; error?: string } {
+    const workerInstanceId = this.resolveWorkerInstanceIdFromToken(params.project, params.workerToken);
+    if (!workerInstanceId) {
+      return {
+        error:
+          `Worker \`${params.workerToken}\` is not registered. Known workers: ` +
+          this.buildKnownWorkerList(params.project),
+      };
+    }
+    const worker = getProjectInstance(params.project, workerInstanceId);
+    if (!worker) {
+      return {
+        error: `Worker instance \`${workerInstanceId}\` not found.`,
+      };
+    }
+    return { workerInstanceId, worker };
+  }
+
+  private resolveOrchestratorWorkerIds(project: ReturnType<typeof normalizeProjectState>): string[] {
+    const orchestrator = project.orchestrator;
+    if (!orchestrator?.enabled) return [];
+    const known = new Set(listProjectInstances(project).map((instance) => instance.instanceId));
+    const configured = (orchestrator.workerInstanceIds || []).filter((id) => known.has(id));
+    if (configured.length > 0) return [...new Set(configured)];
+
+    const supervisor = orchestrator.supervisorInstanceId;
+    if (!supervisor) return [];
+    return listProjectInstances(project)
+      .filter((instance) => instance.agentType === 'codex' && instance.instanceId !== supervisor)
+      .map((instance) => instance.instanceId);
+  }
+
+  private resolveSubagentsLogTailLines(configured?: number): number {
+    if (typeof configured === 'number' && Number.isFinite(configured) && configured >= 20) {
+      return Math.min(500, Math.trunc(configured));
+    }
+    return 120;
+  }
+
+  private resolveWorkerInstanceIdFromToken(
+    project: ReturnType<typeof normalizeProjectState>,
+    workerToken: string,
+  ): string | undefined {
+    const token = workerToken.trim();
+    if (!token) return undefined;
+    const workers = this.resolveOrchestratorWorkerIds(project);
+    if (workers.includes(token)) return token;
+
+    const indexed = token.match(/^#?(\d+)$/);
+    if (!indexed) return undefined;
+    const index = Number.parseInt(indexed[1] || '', 10);
+    if (!Number.isFinite(index) || index < 1) return undefined;
+    return workers[index - 1];
+  }
+
+  private buildOrchestratorQueueKey(projectName: string, workerInstanceId: string): string {
+    return `${projectName}:${workerInstanceId}`;
+  }
+
+  private resolveOrchestratorQueueMaxDepth(): number {
+    const value = this.getEnvInt('AGENT_DISCORD_ORCHESTRATOR_QUEUE_MAX_DEPTH', 32);
+    return Math.min(200, Math.max(1, value));
+  }
+
+  private resolveOrchestratorQueueDrainIntervalMs(): number {
+    const value = this.getEnvInt('AGENT_DISCORD_ORCHESTRATOR_QUEUE_DRAIN_INTERVAL_MS', 1200);
+    return Math.min(10_000, Math.max(50, value));
+  }
+
+  private resolveOrchestratorQueueWaitTimeoutMs(): number {
+    const value = this.getEnvInt('AGENT_DISCORD_ORCHESTRATOR_QUEUE_WAIT_TIMEOUT_MS', 10 * 60 * 1000);
+    return Math.min(24 * 60 * 60 * 1000, Math.max(1_000, value));
+  }
+
+  private resolveOrchestratorQueueMaxRetries(): number {
+    const value = this.getEnvInt('AGENT_DISCORD_ORCHESTRATOR_QUEUE_MAX_RETRIES', 2);
+    return Math.min(10, Math.max(0, value));
+  }
+
+  private resolveOrchestratorQueueRetryBackoffMs(): number {
+    const value = this.getEnvInt('AGENT_DISCORD_ORCHESTRATOR_QUEUE_RETRY_BACKOFF_MS', 1500);
+    return Math.min(120_000, Math.max(200, value));
+  }
+
+  private resolveOrchestratorQosMaxConcurrency(project: ReturnType<typeof normalizeProjectState>): number {
+    const fromState = project.orchestrator?.qos?.maxConcurrentWorkers;
+    if (typeof fromState === 'number' && Number.isFinite(fromState) && fromState >= 1) {
+      return Math.min(16, Math.max(1, Math.trunc(fromState)));
+    }
+    const fromEnv = this.getEnvInt('AGENT_DISCORD_ORCHESTRATOR_QOS_MAX_CONCURRENCY', 2);
+    return Math.min(16, Math.max(1, fromEnv));
+  }
+
+  private resolveOrchestratorWorkerPriority(
+    project: ReturnType<typeof normalizeProjectState>,
+    workerInstanceId: string,
+    explicitPriority?: number,
+  ): number {
+    if (typeof explicitPriority === 'number' && Number.isFinite(explicitPriority)) {
+      return Math.min(10, Math.max(-10, Math.trunc(explicitPriority)));
+    }
+    const fromState = project.orchestrator?.qos?.workerPriorityByInstanceId?.[workerInstanceId];
+    if (typeof fromState === 'number' && Number.isFinite(fromState)) {
+      return Math.min(10, Math.max(-10, Math.trunc(fromState)));
+    }
+    return 0;
+  }
+
+  private getOrchestratorQueue(projectName: string, workerInstanceId: string): OrchestratorQueuedTask[] {
+    const key = this.buildOrchestratorQueueKey(projectName, workerInstanceId);
+    const queue = this.orchestratorQueueByWorker.get(key);
+    if (queue) return queue;
+    const next: OrchestratorQueuedTask[] = [];
+    this.orchestratorQueueByWorker.set(key, next);
+    return next;
+  }
+
+  private getOrchestratorQueueSnapshot(projectName: string, workerInstanceId: string): {
+    depth: number;
+    oldestAgeMs?: number;
+  } {
+    const queue = this.orchestratorQueueByWorker.get(this.buildOrchestratorQueueKey(projectName, workerInstanceId));
+    if (!queue || queue.length === 0) return { depth: 0 };
+    const oldest = queue[0];
+    if (!oldest) return { depth: queue.length };
+    return {
+      depth: queue.length,
+      oldestAgeMs: Math.max(0, Date.now() - oldest.queuedAtMs),
+    };
+  }
+
+  private enqueueOrchestratorTask(task: OrchestratorQueuedTask):
+    | { ok: true; queueDepth: number; position: number }
+    | { ok: false; reason: 'full' } {
+    const queue = this.getOrchestratorQueue(task.projectName, task.workerInstanceId);
+    const maxDepth = this.resolveOrchestratorQueueMaxDepth();
+    if (queue.length >= maxDepth) {
+      return { ok: false, reason: 'full' };
+    }
+    let inserted = false;
+    for (let i = 0; i < queue.length; i += 1) {
+      const existing = queue[i];
+      if (!existing) continue;
+      if (task.priority > existing.priority) {
+        queue.splice(i, 0, task);
+        inserted = true;
+        break;
+      }
+    }
+    if (!inserted) {
+      queue.push(task);
+    }
+    const position = queue.findIndex((entry) => entry.taskId === task.taskId) + 1;
+    return {
+      ok: true,
+      queueDepth: queue.length,
+      position: position > 0 ? position : queue.length,
+    };
+  }
+
+  private dequeueOrchestratorTask(projectName: string, workerInstanceId: string): OrchestratorQueuedTask | undefined {
+    const key = this.buildOrchestratorQueueKey(projectName, workerInstanceId);
+    const queue = this.orchestratorQueueByWorker.get(key);
+    if (!queue || queue.length === 0) return undefined;
+    const task = queue.shift();
+    if (queue.length === 0) {
+      this.orchestratorQueueByWorker.delete(key);
+    }
+    return task;
+  }
+
+  private peekOrchestratorTask(projectName: string, workerInstanceId: string): OrchestratorQueuedTask | undefined {
+    const key = this.buildOrchestratorQueueKey(projectName, workerInstanceId);
+    return this.orchestratorQueueByWorker.get(key)?.[0];
+  }
+
+  private clearOrchestratorQueueForProject(projectName: string): void {
+    for (const key of this.orchestratorQueueByWorker.keys()) {
+      if (key.startsWith(`${projectName}:`)) {
+        this.orchestratorQueueByWorker.delete(key);
+      }
+    }
+    for (const [key, timer] of this.orchestratorQueueDrainTimerByWorker.entries()) {
+      if (!key.startsWith(`${projectName}:`)) continue;
+      clearTimeout(timer);
+      this.orchestratorQueueDrainTimerByWorker.delete(key);
+    }
+    for (const key of this.orchestratorQueueDrainInFlight) {
+      if (key.startsWith(`${projectName}:`)) {
+        this.orchestratorQueueDrainInFlight.delete(key);
+      }
+    }
+    for (const key of this.lastOrchestratorActivityByWorker.keys()) {
+      if (key.startsWith(`${projectName}:`)) {
+        this.lastOrchestratorActivityByWorker.delete(key);
+      }
+    }
+  }
+
+  private clearOrchestratorQueueForWorker(projectName: string, workerInstanceId: string): void {
+    const key = this.buildOrchestratorQueueKey(projectName, workerInstanceId);
+    this.orchestratorQueueByWorker.delete(key);
+    const timer = this.orchestratorQueueDrainTimerByWorker.get(key);
+    if (timer) {
+      clearTimeout(timer);
+      this.orchestratorQueueDrainTimerByWorker.delete(key);
+    }
+    this.orchestratorQueueDrainInFlight.delete(key);
+    this.lastOrchestratorActivityByWorker.delete(this.workerActivityKey(projectName, workerInstanceId));
+  }
+
+  private scheduleOrchestratorQueueDrain(projectName: string, workerInstanceId: string, delayMs?: number): void {
+    const key = this.buildOrchestratorQueueKey(projectName, workerInstanceId);
+    if (this.orchestratorQueueDrainTimerByWorker.has(key)) return;
+    const delay = Math.max(0, Math.trunc(delayMs ?? this.resolveOrchestratorQueueDrainIntervalMs()));
+    const timer = setTimeout(() => {
+      this.orchestratorQueueDrainTimerByWorker.delete(key);
+      void this.drainOrchestratorQueueWorker(projectName, workerInstanceId);
+    }, delay);
+    timer.unref?.();
+    this.orchestratorQueueDrainTimerByWorker.set(key, timer);
+  }
+
+  private async notifyOrchestratorQueueEvent(channelId: string, message: string): Promise<void> {
+    try {
+      await this.deps.messaging.sendToChannel(channelId, message);
+    } catch (error) {
+      console.warn(`Failed to send orchestrator queue notice: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private async drainOrchestratorQueueWorker(projectName: string, workerInstanceId: string): Promise<void> {
+    const key = this.buildOrchestratorQueueKey(projectName, workerInstanceId);
+    if (this.orchestratorQueueDrainInFlight.has(key)) return;
+    this.orchestratorQueueDrainInFlight.add(key);
+
+    try {
+      while (true) {
+        const head = this.peekOrchestratorTask(projectName, workerInstanceId);
+        if (!head) return;
+
+        const now = Date.now();
+        const waitTimeoutMs = this.resolveOrchestratorQueueWaitTimeoutMs();
+        if (now - head.queuedAtMs > waitTimeoutMs) {
+          this.dequeueOrchestratorTask(projectName, workerInstanceId);
+          this.rememberOrchestratorWorkerActivity({
+            projectName,
+            workerInstanceId,
+            turnId: head.turnId,
+            stage: 'queue-timeout',
+            prompt: head.prompt,
+            queueDepth: this.getOrchestratorQueueSnapshot(projectName, workerInstanceId).depth,
+          });
+          await this.notifyOrchestratorQueueEvent(
+            head.sourceChannelId,
+            `⚠️ Orchestrator queue timeout: dropped worker task \`${head.workerInstanceId}\` (queued ${this.formatAge(now - head.queuedAtMs)} ago).`,
+          );
+          continue;
+        }
+
+        if (head.nextAttemptAtMs && now < head.nextAttemptAtMs) {
+          this.scheduleOrchestratorQueueDrain(projectName, workerInstanceId, head.nextAttemptAtMs - now);
+          return;
+        }
+
+        const project = this.deps.stateManager.getProject(projectName);
+        if (!project) {
+          this.dequeueOrchestratorTask(projectName, workerInstanceId);
+          await this.notifyOrchestratorQueueEvent(
+            head.sourceChannelId,
+            `⚠️ Orchestrator queue dropped task for \`${head.workerInstanceId}\`: project \`${projectName}\` not found.`,
+          );
+          continue;
+        }
+        const normalizedProject = normalizeProjectState(project);
+        const orchestrator = normalizedProject.orchestrator;
+        if (!orchestrator?.enabled) {
+          this.dequeueOrchestratorTask(projectName, workerInstanceId);
+          await this.notifyOrchestratorQueueEvent(
+            head.sourceChannelId,
+            `⚠️ Orchestrator queue dropped task for \`${head.workerInstanceId}\`: orchestrator is disabled.`,
+          );
+          continue;
+        }
+        if (orchestrator.supervisorInstanceId && orchestrator.supervisorInstanceId !== head.supervisorInstanceId) {
+          this.dequeueOrchestratorTask(projectName, workerInstanceId);
+          await this.notifyOrchestratorQueueEvent(
+            head.sourceChannelId,
+            `⚠️ Orchestrator queue dropped task for \`${head.workerInstanceId}\`: supervisor changed to \`${orchestrator.supervisorInstanceId}\`.`,
+          );
+          continue;
+        }
+
+        const worker = getProjectInstance(normalizedProject, workerInstanceId);
+        if (!worker) {
+          this.dequeueOrchestratorTask(projectName, workerInstanceId);
+          await this.notifyOrchestratorQueueEvent(
+            head.sourceChannelId,
+            `⚠️ Orchestrator queue dropped task: worker \`${workerInstanceId}\` is missing.`,
+          );
+          continue;
+        }
+
+        const maxConcurrency = this.resolveOrchestratorQosMaxConcurrency(normalizedProject);
+        const knownWorkers = this.resolveOrchestratorWorkerIds(normalizedProject);
+        const activeWorkerCount = knownWorkers.reduce((count, candidateId) => {
+          const candidate = getProjectInstance(normalizedProject, candidateId);
+          if (!candidate) return count;
+          const snapshot = this.getPendingRuntimeSnapshot(projectName, candidate.agentType, candidate.instanceId);
+          return snapshot.pendingDepth > 0 ? count + 1 : count;
+        }, 0);
+        if (activeWorkerCount >= maxConcurrency) {
+          this.scheduleOrchestratorQueueDrain(projectName, workerInstanceId);
+          return;
+        }
+
+        const runtime = this.getPendingRuntimeSnapshot(projectName, worker.agentType, worker.instanceId);
+        if (runtime.pendingDepth > 0) {
+          this.scheduleOrchestratorQueueDrain(projectName, workerInstanceId);
+          return;
+        }
+
+        const dispatched = await this.dispatchPromptToInstance({
+          projectName,
+          normalizedProject,
+          instance: worker,
+          prompt: head.prompt,
+          turnId: head.turnId,
+          routeHint: head.routeHint,
+          sourceChannelId: head.sourceChannelId,
+        });
+        if (dispatched.ok) {
+          this.dequeueOrchestratorTask(projectName, workerInstanceId);
+          const queueDepth = this.getOrchestratorQueueSnapshot(projectName, workerInstanceId).depth;
+          this.rememberOrchestratorWorkerActivity({
+            projectName,
+            workerInstanceId: worker.instanceId,
+            turnId: head.turnId,
+            stage: 'queue-drained',
+            prompt: head.prompt,
+            queueDepth,
+          });
+          await this.notifyOrchestratorQueueEvent(
+            head.sourceChannelId,
+            [
+              `🚀 Dispatched queued task to worker \`${worker.instanceId}\``,
+              `turnId: \`${head.turnId}\``,
+              `queue remaining: \`${queueDepth}\``,
+            ].join('\n'),
+          );
+          continue;
+        }
+
+        head.attempts += 1;
+        const maxRetries = this.resolveOrchestratorQueueMaxRetries();
+        if (head.attempts > maxRetries) {
+          this.dequeueOrchestratorTask(projectName, workerInstanceId);
+          this.rememberOrchestratorWorkerActivity({
+            projectName,
+            workerInstanceId: worker.instanceId,
+            turnId: head.turnId,
+            stage: 'dispatch-failed',
+            prompt: head.prompt,
+            queueDepth: this.getOrchestratorQueueSnapshot(projectName, workerInstanceId).depth,
+          });
+          await this.notifyOrchestratorQueueEvent(
+            head.sourceChannelId,
+            this.buildDeliveryFailureGuidance(
+              projectName,
+              dispatched.errorMessage || `queued worker dispatch failed after ${head.attempts} attempt(s)`,
+            ),
+          );
+          continue;
+        }
+
+        const backoffMs = this.resolveOrchestratorQueueRetryBackoffMs();
+        head.nextAttemptAtMs = Date.now() + backoffMs;
+        this.rememberOrchestratorWorkerActivity({
+          projectName,
+          workerInstanceId: worker.instanceId,
+          turnId: head.turnId,
+          stage: 'retry-queued',
+          prompt: head.prompt,
+          queueDepth: this.getOrchestratorQueueSnapshot(projectName, workerInstanceId).depth,
+        });
+        await this.notifyOrchestratorQueueEvent(
+          head.sourceChannelId,
+          `⚠️ Worker \`${worker.instanceId}\` dispatch failed (attempt ${head.attempts}/${maxRetries}); retrying in ${Math.ceil(backoffMs / 1000)}s.`,
+        );
+        this.scheduleOrchestratorQueueDrain(projectName, workerInstanceId, backoffMs);
+        return;
+      }
+    } finally {
+      this.orchestratorQueueDrainInFlight.delete(key);
+      if (this.peekOrchestratorTask(projectName, workerInstanceId)) {
+        this.scheduleOrchestratorQueueDrain(projectName, workerInstanceId);
+      }
+    }
+  }
+
+  private resolveCodexOrchestratorEnableConfig(params: {
+    project: ReturnType<typeof normalizeProjectState>;
+    currentInstanceId: string;
+    requestedSupervisorInstanceId?: string;
+    requestedWorkerFinalVisibility?: 'hidden' | 'thread' | 'channel';
+  }):
+    | {
+        supervisorInstanceId: string;
+        workerInstanceIds: string[];
+        workerFinalVisibility: 'hidden' | 'thread' | 'channel';
+      }
+    | { error: string } {
+    const codexInstances = listProjectInstances(params.project).filter((instance) => instance.agentType === 'codex');
+    if (codexInstances.length === 0) {
+      return { error: 'No codex instances found in this project.' };
+    }
+
+    const requested = params.requestedSupervisorInstanceId;
+    const requestedFound = requested ? codexInstances.find((instance) => instance.instanceId === requested) : undefined;
+    if (requested && !requestedFound) {
+      return { error: `Supervisor instance \`${requested}\` is not a codex instance in this project.` };
+    }
+
+    const currentFound = codexInstances.find((instance) => instance.instanceId === params.currentInstanceId);
+    const supervisorInstanceId =
+      requestedFound?.instanceId ||
+      currentFound?.instanceId ||
+      codexInstances[0]!.instanceId;
+
+    const workerInstanceIds = codexInstances
+      .map((instance) => instance.instanceId)
+      .filter((instanceId) => instanceId !== supervisorInstanceId);
+
+    return {
+      supervisorInstanceId,
+      workerInstanceIds,
+      workerFinalVisibility: params.requestedWorkerFinalVisibility || 'hidden',
+    };
+  }
+
+  private buildOrchestratorTurnId(params: {
+    projectName: string;
+    supervisorInstanceId: string;
+    workerInstanceId: string;
+  }): string {
+    const now = Date.now().toString(36);
+    const rand = Math.random().toString(36).slice(2, 8);
+    return `orch-${params.projectName}-${params.supervisorInstanceId}-${params.workerInstanceId}-${now}-${rand}`;
+  }
+
+  private resolveOrchestratorAutoEnable(): boolean {
+    return this.getEnvBool('AGENT_DISCORD_ORCHESTRATOR_AUTO_ENABLE', true);
+  }
+
+  private resolveOrchestratorManualCommandsEnabled(): boolean {
+    return this.getEnvBool('AGENT_DISCORD_ORCHESTRATOR_MANUAL_COMMANDS', false);
+  }
+
+  private resolveOrchestratorAutoVisibility(): 'hidden' | 'thread' | 'channel' {
+    const raw = (process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_VISIBILITY || '').trim().toLowerCase();
+    if (raw === 'hidden' || raw === 'thread' || raw === 'channel') return raw;
+    return 'hidden';
+  }
+
+  private resolveOrchestratorAutoDispatchMode(): CodexLongTaskReportMode {
+    const raw = (process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_DISPATCH_MODE || '').trim().toLowerCase();
+    if (raw === 'off' || raw === 'continue' || raw === 'auto' || raw === 'always') {
+      return raw;
+    }
+    if (['1', 'true', 'yes', 'on'].includes(raw)) return 'auto';
+    if (['0', 'false', 'no'].includes(raw)) return 'off';
+    return 'auto';
+  }
+
+  private resolveOrchestratorAutoDispatchMaxWorkers(): number {
+    const value = this.getEnvInt('AGENT_DISCORD_ORCHESTRATOR_AUTO_DISPATCH_MAX_WORKERS', 1);
+    return Math.min(8, Math.max(1, value));
+  }
+
+  private resolveOrchestratorAutoPlannerEnabled(): boolean {
+    return this.getEnvBool('AGENT_DISCORD_ORCHESTRATOR_AUTO_PLANNER', true);
+  }
+
+  private resolveOrchestratorAutoSpawnEnabled(): boolean {
+    return this.getEnvBool('AGENT_DISCORD_ORCHESTRATOR_AUTO_SPAWN', true);
+  }
+
+  private resolveOrchestratorAutoSpawnWorkers(): number {
+    const value = this.getEnvInt('AGENT_DISCORD_ORCHESTRATOR_AUTO_SPAWN_WORKERS', 2);
+    return Math.min(4, Math.max(1, value));
+  }
+
+  private resolveOrchestratorPlannerPromptMaxChars(): number {
+    const value = this.getEnvInt('AGENT_DISCORD_ORCHESTRATOR_AUTO_PLANNER_PROMPT_MAX_CHARS', 1600);
+    return Math.min(4000, Math.max(500, value));
+  }
+
+  private resolveOrchestratorContextBudgetChars(): number {
+    const value = this.getEnvInt('AGENT_DISCORD_ORCHESTRATOR_CONTEXT_BUDGET_CHARS', 2600);
+    return Math.min(12000, Math.max(800, value));
+  }
+
+  private resolveOrchestratorRollingSummaryMaxItems(): number {
+    const value = this.getEnvInt('AGENT_DISCORD_ORCHESTRATOR_ROLLING_SUMMARY_MAX_ITEMS', 6);
+    return Math.min(16, Math.max(2, value));
+  }
+
+  private resolveOrchestratorRollingSummaryMaxChars(): number {
+    const value = this.getEnvInt('AGENT_DISCORD_ORCHESTRATOR_ROLLING_SUMMARY_MAX_CHARS', 900);
+    return Math.min(2400, Math.max(300, value));
+  }
+
+  private resolveOrchestratorPacketInlineMaxChars(): number {
+    const value = this.getEnvInt('AGENT_DISCORD_ORCHESTRATOR_PACKET_INLINE_MAX_CHARS', 1800);
+    return Math.min(8000, Math.max(400, value));
+  }
+
+  private resolveOrchestratorPacketArtifactEnabled(): boolean {
+    return this.getEnvBool('AGENT_DISCORD_ORCHESTRATOR_PACKET_ARTIFACT_ENABLED', true);
+  }
+
+  private stripMudcodeControlBlocks(prompt: string): string {
+    const stripped = prompt
+      .replace(/\[mudcode [a-z0-9_-]+\][\s\S]*?\[\/mudcode [a-z0-9_-]+\]/gi, '')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+    return stripped || prompt.trim();
+  }
+
+  private summarizeContextLine(text: string, maxChars: number = 200): string {
+    const compact = this.stripMudcodeControlBlocks(text).replace(/\s+/g, ' ').trim();
+    if (compact.length <= maxChars) return compact;
+    return `${compact.slice(0, Math.max(40, maxChars))}...`;
+  }
+
+  private summarizeOrchestratorPromptForWorker(prompt: string, maxChars?: number): string {
+    const compact = this.stripMudcodeControlBlocks(prompt).trim();
+    const resolvedMax = Math.max(
+      400,
+      maxChars ?? this.resolveOrchestratorPlannerPromptMaxChars(),
+    );
+    if (compact.length <= resolvedMax) return compact;
+    return `${compact.slice(0, resolvedMax)}\n...[truncated by context budget gate]`;
+  }
+
+  private hashShort(value: string): string {
+    return createHash('sha256').update(value).digest('hex').slice(0, 12);
+  }
+
+  private extractPlannerFileHints(prompt: string): string[] {
+    const matches = prompt.match(/\b(?:[A-Za-z0-9._-]+\/)+[A-Za-z0-9._-]+\.[A-Za-z0-9._-]+\b/g) || [];
+    const unique = [...new Set(matches.map((entry) => entry.trim()))];
+    return unique.slice(0, 8);
+  }
+
+  private buildOrchestratorRollingSummary(
+    projectName: string,
+    supervisorInstanceId: string,
+    latestPrompt: string,
+  ): string[] {
+    const maxItems = this.resolveOrchestratorRollingSummaryMaxItems();
+    const maxChars = this.resolveOrchestratorRollingSummaryMaxChars();
+    const prefix = `${projectName}:`;
+    const seen = new Set<string>();
+    const lines: string[] = [];
+
+    const latestLine = `latest(${supervisorInstanceId}): ${this.summarizeContextLine(latestPrompt, 220)}`;
+    lines.push(latestLine);
+    seen.add(latestLine);
+
+    const entries = Array.from(this.lastPromptByInstance.entries()).reverse();
+    for (const [key, remembered] of entries) {
+      if (!key.startsWith(prefix)) continue;
+      const instanceId = key.slice(prefix.length) || 'unknown';
+      const line = `${instanceId}: ${this.summarizeContextLine(remembered, 180)}`;
+      if (seen.has(line)) continue;
+      seen.add(line);
+      lines.push(line);
+      if (lines.length >= maxItems) break;
+    }
+
+    const bounded: string[] = [];
+    let used = 0;
+    for (const line of lines) {
+      const next = used + line.length;
+      if (bounded.length > 0 && next > maxChars) break;
+      bounded.push(line);
+      used = next + 1;
+    }
+    return bounded;
+  }
+
+  private buildOrchestratorTaskPacketPrompt(params: OrchestratorTaskPacketParams): string {
+    const strippedPrompt = this.stripMudcodeControlBlocks(params.prompt);
+    const budgetChars = this.resolveOrchestratorContextBudgetChars();
+    const plannerMax = this.resolveOrchestratorPlannerPromptMaxChars();
+    const excerptBudget = Math.max(400, Math.min(plannerMax, budgetChars - 1000));
+    const requestExcerpt = this.summarizeOrchestratorPromptForWorker(strippedPrompt, excerptBudget);
+    const originalChars = strippedPrompt.length;
+    const truncated = requestExcerpt.length < strippedPrompt.length;
+    const overflowChars = truncated ? Math.max(0, originalChars - requestExcerpt.length) : 0;
+    const requestLines = strippedPrompt
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    const bulletCount = requestLines.filter((line) => /^([-*+]|(\d+[\.)]))\s+/.test(line)).length;
+    const rollingSummary = this.buildOrchestratorRollingSummary(
+      params.projectName,
+      params.supervisorInstanceId,
+      strippedPrompt,
+    );
+    const fileHints = this.extractPlannerFileHints(strippedPrompt);
+
+    return [
+      '[mudcode orchestrator-plan]',
+      `Task packet: v1 (${this.hashShort(`${params.projectName}:${params.workerInstanceId}:${params.task}:${strippedPrompt}`)})`,
+      `project=${params.projectName}`,
+      `supervisor=${params.supervisorInstanceId}`,
+      `worker=${params.workerInstanceId}`,
+      '',
+      '[objective]',
+      params.task,
+      '[/objective]',
+      '',
+      '[request-summary]',
+      requestExcerpt,
+      '[/request-summary]',
+      '',
+      '[rolling-summary]',
+      ...rollingSummary.map((line) => `- ${line}`),
+      '[/rolling-summary]',
+      '',
+      '[signals]',
+      `continuation=${this.isCodexContinuationPrompt(strippedPrompt)}`,
+      `large_context=${this.isLargeContextPrompt(strippedPrompt)}`,
+      `lines=${requestLines.length}`,
+      `bullets=${bulletCount}`,
+      `original_chars=${originalChars}`,
+      `budget_chars=${budgetChars}`,
+      `truncated=${truncated}`,
+      `overflow_chars=${overflowChars}`,
+      '[/signals]',
+      '',
+      '[context-hints]',
+      '- Use state artifacts and local files first; do not replay full chat history.',
+      '- Prefer diff-only scope discovery (`git diff --name-only`, touched files only).',
+      '- Treat progress/events as metadata; exclude them from worker context payloads.',
+      ...(fileHints.length > 0
+        ? ['- Mentioned files:', ...fileHints.map((path) => `  - ${path}`)]
+        : ['- Mentioned files: (none)']),
+      '[/context-hints]',
+      '',
+      'Execution constraints:',
+      '- Focus only on this task scope and report concrete diffs/tests.',
+      '- If blocked, include exact blocker and attempted checks.',
+      '- Do not rewrite whole codebase context unless strictly needed.',
+      '[/mudcode orchestrator-plan]',
+    ].join('\n');
+  }
+
+  private writeOrchestratorTaskPacketArtifact(params: {
+    projectPath: string;
+    workerInstanceId: string;
+    packetContent: string;
+  }): string | undefined {
+    if (!this.resolveOrchestratorPacketArtifactEnabled()) return undefined;
+    if (!params.projectPath || params.projectPath.trim().length === 0) return undefined;
+
+    try {
+      const dir = join(params.projectPath, '.mudcode', 'orchestrator', 'packets');
+      mkdirSync(dir, { recursive: true });
+      const workerSuffix = this.sanitizePacketFileComponent(params.workerInstanceId);
+      const fileName = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}-${workerSuffix}.md`;
+      const fullPath = join(dir, fileName);
+      writeFileSync(fullPath, `${params.packetContent.trimEnd()}\n`, 'utf8');
+      return this.normalizeArtifactPathForPrompt(relative(params.projectPath, fullPath));
+    } catch {
+      return undefined;
+    }
+  }
+
+  private sanitizePacketFileComponent(raw: string): string {
+    const sanitized = String(raw || '')
+      .replace(/[\/\\\s]+/g, '_')
+      .replace(/[^a-zA-Z0-9._-]/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_+|_+$/g, '');
+    if (!sanitized) return 'worker';
+    return sanitized.slice(0, 64);
+  }
+
+  private normalizeArtifactPathForPrompt(path: string): string {
+    return path.split('\\').join('/');
+  }
+
+  private maybeExternalizeOrchestratorTaskPacket(params: {
+    projectPath: string;
+    workerInstanceId: string;
+    task: string;
+    packetContent: string;
+  }): { prompt: string; packetArtifactPath?: string } {
+    const inlineLimit = this.resolveOrchestratorPacketInlineMaxChars();
+    if (params.packetContent.length <= inlineLimit) {
+      return { prompt: params.packetContent };
+    }
+
+    const packetArtifactPath = this.writeOrchestratorTaskPacketArtifact({
+      projectPath: params.projectPath,
+      workerInstanceId: params.workerInstanceId,
+      packetContent: params.packetContent,
+    });
+    if (!packetArtifactPath) {
+      return { prompt: params.packetContent };
+    }
+
+    const wrapper = [
+      '[mudcode orchestrator-plan]',
+      `Task packet file: ${packetArtifactPath}`,
+      `packet_digest=${this.hashShort(params.packetContent)}`,
+      `objective=${this.summarizeContextLine(params.task, 220)}`,
+      'Read the task packet file first, execute only that scope, and avoid loading full chat history.',
+      'Return concise changes + verification only.',
+      '[/mudcode orchestrator-plan]',
+    ].join('\n');
+    return { prompt: wrapper, packetArtifactPath };
+  }
+
+  private extractPlannerTaskCandidates(prompt: string): string[] {
+    const lines = prompt
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    const fromBullets = lines
+      .map((line) => line.match(/^([-*+]|(\d+[\.)]))\s+(.+)$/)?.[3]?.trim() || '')
+      .filter((line) => line.length >= 8 && line.length <= 220)
+      .map((line) => line.replace(/\s+/g, ' ').trim());
+    return [...new Set(fromBullets)];
+  }
+
+  private buildPlannerTemplateTasks(prompt: string): string[] {
+    const tasks: string[] = [];
+    if (this.isCodexContinuationPrompt(prompt)) {
+      tasks.push('Continue the highest-impact unfinished implementation path and unblock pending work.');
+    }
+    tasks.push('Map the exact files/functions to touch, constraints, and regression risks.');
+    tasks.push('Implement focused code changes for the assigned scope with minimal side effects.');
+    tasks.push('Add/update tests and run verification commands for changed behavior.');
+    tasks.push('Perform edge-case review and prepare concise merge notes with residual risks.');
+    return tasks;
+  }
+
+  private buildAutoPlannerAssignments(params: {
+    projectName: string;
+    projectPath: string;
+    supervisorInstanceId: string;
+    prompt: string;
+    workers: Array<{ instanceId: string }>;
+  }): AutoPlannerAssignment[] {
+    if (!this.resolveOrchestratorAutoPlannerEnabled()) return [];
+    if (params.workers.length < 1) return [];
+
+    const strippedPrompt = this.stripMudcodeControlBlocks(params.prompt);
+    const candidates = this.extractPlannerTaskCandidates(strippedPrompt);
+    const templates = this.buildPlannerTemplateTasks(strippedPrompt);
+    const tasks: string[] = [];
+    for (const candidate of candidates) {
+      if (tasks.length >= params.workers.length) break;
+      tasks.push(candidate);
+    }
+    for (const template of templates) {
+      if (tasks.length >= params.workers.length) break;
+      if (tasks.includes(template)) continue;
+      tasks.push(template);
+    }
+    while (tasks.length < params.workers.length) {
+      tasks.push(`Support task ${tasks.length + 1}: validate and de-risk the requested change set.`);
+    }
+
+    const total = tasks.length;
+    return tasks.map((task, index) => {
+      const worker = params.workers[index];
+      const workerId = worker?.instanceId || `worker-${index + 1}`;
+      const plannerTask = `Planner task ${index + 1}/${total}: ${task}`;
+      const packetContent = this.buildOrchestratorTaskPacketPrompt({
+        projectName: params.projectName,
+        projectPath: params.projectPath,
+        supervisorInstanceId: params.supervisorInstanceId,
+        workerInstanceId: workerId,
+        task: plannerTask,
+        prompt: strippedPrompt,
+      });
+      const packetDelivery = this.maybeExternalizeOrchestratorTaskPacket({
+        projectPath: params.projectPath,
+        workerInstanceId: workerId,
+        task: plannerTask,
+        packetContent,
+      });
+      return {
+        task,
+        prompt: packetDelivery.prompt,
+        ...(packetDelivery.packetArtifactPath
+          ? { packetArtifactPath: packetDelivery.packetArtifactPath }
+          : {}),
+      };
+    });
+  }
+
+  private shouldAutoDispatchToWorker(prompt: string): boolean {
+    const mode = this.resolveOrchestratorAutoDispatchMode();
+    if (mode === 'off') return false;
+    if (mode === 'always') return true;
+    const continuation = this.isCodexContinuationPrompt(prompt);
+    if (mode === 'continue') return continuation;
+    return continuation || this.isLargeContextPrompt(prompt);
+  }
+
+  private canPersistProjectState(): boolean {
+    const manager = this.deps.stateManager as unknown as {
+      setProject?: (project: ReturnType<typeof normalizeProjectState>) => void;
+    };
+    return typeof manager.setProject === 'function';
+  }
+
+  private maybeAutoEnableOrchestrator(params: {
+    projectName: string;
+    normalizedProject: ReturnType<typeof normalizeProjectState>;
+    resolvedAgentType: string;
+    currentInstanceId: string;
+  }): ReturnType<typeof normalizeProjectState> {
+    if (params.resolvedAgentType !== 'codex') return params.normalizedProject;
+    if (!this.resolveOrchestratorAutoEnable()) return params.normalizedProject;
+    if (params.normalizedProject.orchestrator?.enabled) return params.normalizedProject;
+    if (!this.canPersistProjectState()) return params.normalizedProject;
+
+    const resolved = this.resolveCodexOrchestratorEnableConfig({
+      project: params.normalizedProject,
+      currentInstanceId: params.currentInstanceId,
+      requestedSupervisorInstanceId: params.currentInstanceId,
+      requestedWorkerFinalVisibility: this.resolveOrchestratorAutoVisibility(),
+    });
+    if ('error' in resolved) return params.normalizedProject;
+    if (resolved.workerInstanceIds.length === 0) return params.normalizedProject;
+
+    const nextProject = normalizeProjectState({
+      ...params.normalizedProject,
+      orchestrator: {
+        enabled: true,
+        supervisorInstanceId: resolved.supervisorInstanceId,
+        workerInstanceIds: resolved.workerInstanceIds,
+        workerFinalVisibility: resolved.workerFinalVisibility,
+      },
+      lastActive: new Date(),
+    });
+    this.deps.stateManager.setProject(nextProject);
+    console.log(
+      `🧭 [${params.projectName}/${params.currentInstanceId}] auto-enabled orchestrator (workers=${resolved.workerInstanceIds.length}, visibility=${resolved.workerFinalVisibility})`,
+    );
+    return nextProject;
+  }
+
+  private async maybeAutoPrepareOrchestrator(params: {
+    projectName: string;
+    normalizedProject: ReturnType<typeof normalizeProjectState>;
+    resolvedAgentType: string;
+    currentInstanceId: string;
+    prompt: string;
+  }): Promise<{
+    project: ReturnType<typeof normalizeProjectState>;
+    notices: string[];
+  }> {
+    const notices: string[] = [];
+    let project = params.normalizedProject;
+    if (params.resolvedAgentType !== 'codex') {
+      return { project, notices };
+    }
+    if (!this.resolveOrchestratorAutoEnable()) {
+      return { project, notices };
+    }
+    if (!this.shouldAutoDispatchToWorker(params.prompt)) {
+      return { project, notices };
+    }
+
+    let orchestrator = project.orchestrator;
+    if (!orchestrator?.enabled) {
+      if (!this.canPersistProjectState()) {
+        return { project, notices };
+      }
+      const resolved = this.resolveCodexOrchestratorEnableConfig({
+        project,
+        currentInstanceId: params.currentInstanceId,
+        requestedSupervisorInstanceId: params.currentInstanceId,
+        requestedWorkerFinalVisibility: this.resolveOrchestratorAutoVisibility(),
+      });
+      if ('error' in resolved) {
+        return { project, notices };
+      }
+
+      project = normalizeProjectState({
+        ...project,
+        orchestrator: {
+          enabled: true,
+          supervisorInstanceId: resolved.supervisorInstanceId,
+          workerInstanceIds: resolved.workerInstanceIds,
+          workerFinalVisibility: resolved.workerFinalVisibility,
+        },
+        lastActive: new Date(),
+      });
+      this.deps.stateManager.setProject(project);
+      notices.push(
+        `🧭 Auto orchestration enabled (supervisor=\`${resolved.supervisorInstanceId}\`, workers=${resolved.workerInstanceIds.length}).`,
+      );
+      orchestrator = project.orchestrator;
+    }
+
+    if (!orchestrator?.enabled) {
+      return { project, notices };
+    }
+    if (orchestrator.supervisorInstanceId && orchestrator.supervisorInstanceId !== params.currentInstanceId) {
+      return { project, notices };
+    }
+
+    const knownWorkers = this.resolveOrchestratorWorkerIds(project);
+    if (knownWorkers.length > 0) {
+      return { project, notices };
+    }
+    if (!this.resolveOrchestratorAutoSpawnEnabled()) {
+      return { project, notices };
+    }
+    if (!this.deps.orchestratorWorkerProvisioner) {
+      return { project, notices };
+    }
+
+    const autoSpawnCount = this.resolveOrchestratorAutoSpawnWorkers();
+    const spawnResult = await this.deps.orchestratorWorkerProvisioner.spawnCodexWorkers({
+      projectName: params.projectName,
+      count: autoSpawnCount,
+    });
+
+    if (spawnResult.created.length === 0) {
+      const warning = (spawnResult.warnings || []).filter(Boolean)[0];
+      if (warning) {
+        notices.push(`⚠️ Auto worker provision skipped: ${warning}`);
+      }
+      return { project, notices };
+    }
+
+    const latest = this.deps.stateManager.getProject(params.projectName);
+    const latestNormalized = normalizeProjectState(latest || project);
+    const latestOrchestrator = latestNormalized.orchestrator;
+    const mergedWorkerIds = [
+      ...new Set(
+        [
+          ...(latestOrchestrator?.workerInstanceIds || []),
+          ...spawnResult.created.map((instance) => instance.instanceId),
+        ].filter((id) => id && id !== params.currentInstanceId),
+      ),
+    ];
+    const nextProject = normalizeProjectState({
+      ...latestNormalized,
+      orchestrator: {
+        enabled: true,
+        supervisorInstanceId: latestOrchestrator?.supervisorInstanceId || params.currentInstanceId,
+        workerInstanceIds: mergedWorkerIds,
+        workerFinalVisibility: latestOrchestrator?.workerFinalVisibility || this.resolveOrchestratorAutoVisibility(),
+      },
+      lastActive: new Date(),
+    });
+    this.deps.stateManager.setProject(nextProject);
+    project = nextProject;
+
+    notices.push(
+      `🧠 Auto worker provisioned: ${spawnResult.created.map((instance) => `\`${instance.instanceId}\``).join(', ')}`,
+    );
+    const warnings = (spawnResult.warnings || []).filter(Boolean);
+    if (warnings.length > 0) {
+      notices.push(`⚠️ Provision warnings: ${warnings.join(' | ')}`);
+    }
+    return { project, notices };
+  }
+
+  private selectOrchestratorWorkersForDispatch(
+    projectName: string,
+    project: ReturnType<typeof normalizeProjectState>,
+    maxWorkers: number,
+  ): ProjectInstanceState[] {
+    const workers = this.resolveOrchestratorWorkerIds(project)
+      .map((workerId) => getProjectInstance(project, workerId))
+      .filter((worker): worker is ProjectInstanceState => Boolean(worker));
+    if (workers.length === 0) return [];
+
+    const ranked = workers
+      .map((worker) => {
+        const runtime = this.getPendingRuntimeSnapshot(projectName, worker.agentType, worker.instanceId);
+        const queue = this.getOrchestratorQueueSnapshot(projectName, worker.instanceId);
+        const priority = this.resolveOrchestratorWorkerPriority(project, worker.instanceId);
+        return {
+          worker,
+          priority,
+          score: runtime.pendingDepth + queue.depth,
+          queueDepth: queue.depth,
+          pendingDepth: runtime.pendingDepth,
+        };
+      })
+      .sort((a, b) => {
+        if (a.priority !== b.priority) return b.priority - a.priority;
+        if (a.score !== b.score) return a.score - b.score;
+        if (a.queueDepth !== b.queueDepth) return a.queueDepth - b.queueDepth;
+        if (a.pendingDepth !== b.pendingDepth) return a.pendingDepth - b.pendingDepth;
+        return a.worker.instanceId.localeCompare(b.worker.instanceId);
+      });
+    return ranked.slice(0, Math.max(1, maxWorkers)).map((entry) => entry.worker);
+  }
+
+  private async dispatchOrQueueOrchestratorWorkerTask(params: {
+    projectName: string;
+    normalizedProject: ReturnType<typeof normalizeProjectState>;
+    supervisorInstanceId: string;
+    worker: ProjectInstanceState;
+    prompt: string;
+    sourceChannelId: string;
+    routeHint?: 'reply' | 'thread' | 'memory';
+    allowQueueOnImmediateFailure?: boolean;
+    priority?: number;
+  }): Promise<OrchestratorDispatchOrQueueOutcome> {
+    const turnId = this.buildOrchestratorTurnId({
+      projectName: params.projectName,
+      supervisorInstanceId: params.supervisorInstanceId,
+      workerInstanceId: params.worker.instanceId,
+    });
+
+    const maxConcurrency = this.resolveOrchestratorQosMaxConcurrency(params.normalizedProject);
+    const knownWorkers = this.resolveOrchestratorWorkerIds(params.normalizedProject);
+    const runtimeByWorker = new Map<string, PendingRuntimeSnapshot>();
+    const activeWorkerCount = knownWorkers.reduce((count, candidateId) => {
+      const candidate = getProjectInstance(params.normalizedProject, candidateId);
+      if (!candidate) return count;
+      const snapshot = this.getPendingRuntimeSnapshot(
+        params.projectName,
+        candidate.agentType,
+        candidate.instanceId,
+      );
+      runtimeByWorker.set(candidate.instanceId, snapshot);
+      return snapshot.pendingDepth > 0 ? count + 1 : count;
+    }, 0);
+
+    const runtime =
+      runtimeByWorker.get(params.worker.instanceId) ||
+      this.getPendingRuntimeSnapshot(
+        params.projectName,
+        params.worker.agentType,
+        params.worker.instanceId,
+      );
+    if (runtime.pendingDepth <= 0 && activeWorkerCount < maxConcurrency) {
+      const dispatched = await this.dispatchPromptToInstance({
+        projectName: params.projectName,
+        normalizedProject: params.normalizedProject,
+        instance: params.worker,
+        prompt: params.prompt,
+        turnId,
+        routeHint: params.routeHint,
+        sourceChannelId: params.sourceChannelId,
+      });
+      if (dispatched.ok) {
+        this.rememberPrompt(params.projectName, params.worker.instanceId, params.prompt);
+        this.rememberOrchestratorWorkerActivity({
+          projectName: params.projectName,
+          workerInstanceId: params.worker.instanceId,
+          turnId,
+          stage: 'dispatched',
+          prompt: params.prompt,
+          queueDepth: this.getOrchestratorQueueSnapshot(params.projectName, params.worker.instanceId).depth,
+        });
+        return {
+          kind: 'dispatched',
+          turnId,
+        };
+      }
+
+      if (!params.allowQueueOnImmediateFailure) {
+        return {
+          kind: 'dispatch-failed',
+          turnId,
+          errorMessage: dispatched.errorMessage,
+        };
+      }
+
+      const enqueued = this.enqueueOrchestratorTask({
+        taskId: `${turnId}:retry`,
+        projectName: params.projectName,
+        supervisorInstanceId: params.supervisorInstanceId,
+        workerInstanceId: params.worker.instanceId,
+        prompt: params.prompt,
+        sourceChannelId: params.sourceChannelId,
+        routeHint: params.routeHint,
+        turnId,
+        queuedAtMs: Date.now(),
+        attempts: 1,
+        nextAttemptAtMs: Date.now() + this.resolveOrchestratorQueueRetryBackoffMs(),
+        priority: this.resolveOrchestratorWorkerPriority(
+          params.normalizedProject,
+          params.worker.instanceId,
+          params.priority,
+        ),
+      });
+      if (!enqueued.ok) {
+        return {
+          kind: 'dispatch-failed',
+          turnId,
+          errorMessage: dispatched.errorMessage,
+        };
+      }
+      this.scheduleOrchestratorQueueDrain(params.projectName, params.worker.instanceId);
+      this.rememberPrompt(params.projectName, params.worker.instanceId, params.prompt);
+      this.rememberOrchestratorWorkerActivity({
+        projectName: params.projectName,
+        workerInstanceId: params.worker.instanceId,
+        turnId,
+        stage: 'retry-queued',
+        prompt: params.prompt,
+        queueDepth: enqueued.queueDepth,
+      });
+      return {
+        kind: 'queued',
+        turnId,
+        queueDepth: enqueued.queueDepth,
+        queuePosition: enqueued.position,
+        immediateFailureQueued: true,
+      };
+    }
+
+    const enqueued = this.enqueueOrchestratorTask({
+      taskId: `${turnId}:queued`,
+      projectName: params.projectName,
+      supervisorInstanceId: params.supervisorInstanceId,
+      workerInstanceId: params.worker.instanceId,
+      prompt: params.prompt,
+      sourceChannelId: params.sourceChannelId,
+      routeHint: params.routeHint,
+      turnId,
+      queuedAtMs: Date.now(),
+      attempts: 0,
+      priority: this.resolveOrchestratorWorkerPriority(
+        params.normalizedProject,
+        params.worker.instanceId,
+        params.priority,
+      ),
+    });
+    if (!enqueued.ok) {
+      return {
+        kind: 'queue-full',
+        turnId,
+      };
+    }
+    this.scheduleOrchestratorQueueDrain(params.projectName, params.worker.instanceId);
+    this.rememberPrompt(params.projectName, params.worker.instanceId, params.prompt);
+    this.rememberOrchestratorWorkerActivity({
+      projectName: params.projectName,
+      workerInstanceId: params.worker.instanceId,
+      turnId,
+      stage: 'queued',
+      prompt: params.prompt,
+      queueDepth: enqueued.queueDepth,
+    });
+    return {
+      kind: 'queued',
+      turnId,
+      queueDepth: enqueued.queueDepth,
+      queuePosition: enqueued.position,
+    };
+  }
+
+  private async dispatchPromptToInstance(params: {
+    projectName: string;
+    normalizedProject: ReturnType<typeof normalizeProjectState>;
+    instance: ProjectInstanceState;
+    prompt: string;
+    turnId: string;
+    routeHint?: 'reply' | 'thread' | 'memory';
+    sourceChannelId: string;
+  }): Promise<{ ok: true } | { ok: false; restarted?: true; errorMessage?: string }> {
+    const instance = params.instance;
+    const windowName = instance.tmuxWindow || instance.instanceId;
+    const targetChannelId = instance.channelId || params.sourceChannelId;
+
+    await this.safePendingUpdate('orchestrator:markPending', () =>
+      this.deps.pendingTracker.markPending(
+        params.projectName,
+        instance.agentType,
+        targetChannelId,
+        params.turnId,
+        instance.instanceId,
+        params.prompt,
+      ),
+    );
+    await this.safePendingUpdate('orchestrator:markRouteResolved', () =>
+      this.deps.pendingTracker.markRouteResolved(
+        params.projectName,
+        instance.agentType,
+        instance.instanceId,
+        params.routeHint || 'memory',
+      ),
+    );
+    await this.safePendingUpdate('orchestrator:markDispatching', () =>
+      this.deps.pendingTracker.markDispatching(
+        params.projectName,
+        instance.agentType,
+        instance.instanceId,
+      ),
+    );
+
+    try {
+      if (instance.agentType === 'codex') {
+        const codexResult = await this.submitToCodex(
+          params.normalizedProject.tmuxSession,
+          windowName,
+          params.prompt,
+        );
+        if (codexResult === 'restarted') {
+          await this.safePendingUpdate('orchestrator:markRetry', () =>
+            this.deps.pendingTracker.markRetry(params.projectName, instance.agentType, instance.instanceId, 'tail'),
+          );
+          return { ok: false, restarted: true };
+        }
+        this.deps.ioTracker?.recordPromptSubmitted({
+          projectName: params.projectName,
+          instanceId: instance.instanceId,
+          channelId: targetChannelId,
+          projectPath: params.normalizedProject.projectPath,
+          prompt: params.prompt,
+        });
+        void this.safeEmitCodexStartEvent({
+          projectName: params.projectName,
+          instanceId: instance.instanceId,
+          turnId: params.turnId,
+          channelId: targetChannelId,
+        });
+        return { ok: true };
+      }
+
+      if (instance.agentType === 'opencode') {
+        await this.submitToOpencode(params.normalizedProject.tmuxSession, windowName, params.prompt);
+      } else {
+        this.deps.tmux.sendKeysToWindow(
+          params.normalizedProject.tmuxSession,
+          windowName,
+          params.prompt,
+          instance.agentType,
+        );
+      }
+      return { ok: true };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (instance.agentType === 'codex') {
+        this.deps.ioTracker?.recordTurnFailed({
+          projectName: params.projectName,
+          instanceId: instance.instanceId,
+          channelId: targetChannelId,
+          reason: errorMessage,
+        });
+        void this.safeEmitCodexErrorEvent({
+          projectName: params.projectName,
+          instanceId: instance.instanceId,
+          turnId: params.turnId,
+          channelId: targetChannelId,
+          text: errorMessage,
+        });
+      }
+      await this.safePendingUpdate('orchestrator:markError', () =>
+        this.deps.pendingTracker.markError(params.projectName, instance.agentType, instance.instanceId, 'tail'),
+      );
+      return { ok: false, errorMessage };
+    }
   }
 
   private resolveSnapshotTailLines(): number {
@@ -328,15 +2121,14 @@ export class BridgeMessageRouter {
   private isCodexContinuationPrompt(prompt: string): boolean {
     const normalized = prompt.trim().toLowerCase();
     if (normalized.length === 0) return false;
-    if (normalized === 'continue') return true;
-    if (normalized.startsWith('continue ')) return true;
-    if (normalized === 'go on' || normalized.startsWith('go on ')) return true;
-    if (normalized === 'keep going' || normalized.startsWith('keep going ')) return true;
-    if (normalized === '계속' || normalized.startsWith('계속 ')) return true;
-    if (normalized === '계속해' || normalized.startsWith('계속해 ')) return true;
-    if (normalized === '계속 진행' || normalized.startsWith('계속 진행')) return true;
-    if (normalized === '쭉' || normalized.startsWith('쭉 ')) return true;
-    if (normalized === '진행' || normalized.startsWith('진행 ')) return true;
+    if (/^continue(?:\s|$)/.test(normalized)) return true;
+    if (/^go on(?:\s|$)/.test(normalized)) return true;
+    if (/^keep going(?:\s|$)/.test(normalized)) return true;
+    if (/^계속(?:\s|$)/.test(normalized)) return true;
+    if (/^계속해(?:\s|$)/.test(normalized)) return true;
+    if (/^계속 진행(?:\s|$)/.test(normalized)) return true;
+    if (/^쭉(?:\s|$)/.test(normalized)) return true;
+    if (/^진행(?:\s|$)/.test(normalized)) return true;
     return false;
   }
 
@@ -512,6 +2304,93 @@ export class BridgeMessageRouter {
     }
   }
 
+  private async sendOrchestratorWorkerInfo(params: {
+    channelId: string;
+    projectName: string;
+    normalizedProject: ReturnType<typeof normalizeProjectState>;
+    worker: ProjectInstanceState;
+    workerInstanceId: string;
+  }): Promise<void> {
+    const workerWindow = params.worker.tmuxWindow || params.worker.instanceId;
+    const sessionName = params.normalizedProject.tmuxSession;
+    const sessionAlive = this.deps.tmux.sessionExistsFull(sessionName);
+    const windowAlive = sessionAlive && this.deps.tmux.windowExists(sessionName, workerWindow);
+    const paneWorkingHint = windowAlive && this.detectPaneWorkingHint(sessionName, workerWindow, params.worker.agentType);
+    const runtime = this.getPendingRuntimeSnapshot(
+      params.projectName,
+      params.worker.agentType,
+      params.worker.instanceId,
+    );
+    const queue = this.getOrchestratorQueueSnapshot(params.projectName, params.workerInstanceId);
+    const activity = this.getOrchestratorWorkerActivity(params.projectName, params.workerInstanceId);
+    const queueHead = this.buildWorkerQueueHeadSummary(params.projectName, params.workerInstanceId, 140);
+
+    const lines = [
+      `🧩 Subagent \`${params.workerInstanceId}\``,
+      `agent: \`${params.worker.agentType}\``,
+      `channel: \`${params.worker.channelId || '(none)'}\``,
+      `tmux session: \`${sessionName}\` ${sessionAlive ? '✅' : '⚠️ missing'}`,
+      `tmux window: \`${workerWindow}\` ${windowAlive ? '✅' : '⚠️ missing'}`,
+      `runtime status: ${this.buildRuntimeStatus(runtime, paneWorkingHint)}`,
+      `pending queue: \`${runtime.pendingDepth}\``,
+      `orchestrator queue: \`${queue.depth}\`${queue.oldestAgeMs !== undefined ? ` (oldest ${this.formatAge(queue.oldestAgeMs)})` : ''}`,
+      activity
+        ? `recent orchestrator task: ${this.formatWorkerActivityStage(activity.stage)} ${this.formatAge(Date.now() - activity.atMs)} ago (turn \`${activity.turnId}\`)`
+        : 'recent orchestrator task: (none)',
+      activity ? `recent task summary: ${activity.promptSummary}` : 'recent task summary: (none)',
+      queueHead ? `queue head: ${queueHead}` : 'queue head: (none)',
+      `event hook: \`${params.worker.eventHook ? 'on' : 'off'}\``,
+    ];
+    await this.deps.messaging.sendToChannel(params.channelId, lines.join('\n'));
+  }
+
+  private async sendOrchestratorWorkerLog(params: {
+    channelId: string;
+    projectName: string;
+    normalizedProject: ReturnType<typeof normalizeProjectState>;
+    worker: ProjectInstanceState;
+    workerInstanceId: string;
+    tailLines?: number;
+  }): Promise<void> {
+    const workerWindow = params.worker.tmuxWindow || params.worker.instanceId;
+    const tailLineLimit = this.resolveSubagentsLogTailLines(params.tailLines);
+    const captureHistoryLines = this.resolveSnapshotCaptureHistoryLines(tailLineLimit);
+    try {
+      const pane = this.deps.tmux.capturePaneFromWindow(
+        params.normalizedProject.tmuxSession,
+        workerWindow,
+        params.worker.agentType,
+        captureHistoryLines,
+      );
+      const snapshot = cleanCapture(pane);
+      if (!snapshot || snapshot.trim().length === 0) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          `⚠️ Log is empty for \`${params.projectName}/${params.workerInstanceId}\`.`,
+        );
+        return;
+      }
+      const lines = snapshot.split('\n');
+      const tail = lines.slice(-tailLineLimit);
+      const title =
+        tail.length < lines.length
+          ? `📜 Subagent log \`${params.projectName}/${params.workerInstanceId}\` (last ${tail.length}/${lines.length} lines)`
+          : `📜 Subagent log \`${params.projectName}/${params.workerInstanceId}\``;
+      const codeblockPayload = `${title}\n\`\`\`text\n${tail.join('\n')}\n\`\`\``;
+      if (this.shouldUseSnapshotThreadDelivery(codeblockPayload)) {
+        await this.deps.messaging.sendLongOutput!(params.channelId, codeblockPayload);
+        return;
+      }
+      if (codeblockPayload.length <= 1800) {
+        await this.deps.messaging.sendToChannel(params.channelId, codeblockPayload);
+        return;
+      }
+      await this.sendSplitMessage(params.channelId, `${title}\n${tail.join('\n')}`);
+    } catch (error) {
+      await this.deps.messaging.sendToChannel(params.channelId, this.buildDeliveryFailureGuidance(params.projectName, error));
+    }
+  }
+
   private async sendSplitMessage(channelId: string, content: string): Promise<void> {
     const split = this.deps.messaging.platform === 'slack' ? splitForSlack : splitForDiscord;
     for (const chunk of split(content)) {
@@ -622,7 +2501,500 @@ export class BridgeMessageRouter {
   private async handleMaintenanceCommand(params: {
     command: MaintenanceCommand;
     channelId: string;
+    projectName: string;
+    normalizedProject: ReturnType<typeof normalizeProjectState>;
+    routeHint?: 'reply' | 'thread' | 'memory';
+    instanceId: string;
   }): Promise<void> {
+    if (params.command.kind === 'orchestrator-help') {
+      await this.deps.messaging.sendToChannel(params.channelId, params.command.message);
+      return;
+    }
+
+    if (params.command.kind === 'orchestrator-status') {
+      await this.deps.messaging.sendToChannel(
+        params.channelId,
+        this.buildOrchestratorStatusSummary(params.normalizedProject),
+      );
+      return;
+    }
+
+    if (params.command.kind === 'orchestrator-worker-info' || params.command.kind === 'orchestrator-worker-log') {
+      const orchestrator = params.normalizedProject.orchestrator;
+      if (!orchestrator?.enabled) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          '⚠️ Orchestrator is disabled. Run `/orchestrator enable` first.',
+        );
+        return;
+      }
+      const supervisor = orchestrator.supervisorInstanceId;
+      if (!supervisor) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          '⚠️ Supervisor is not configured. Re-run `/orchestrator enable <supervisorInstanceId>`.',
+        );
+        return;
+      }
+      if (params.instanceId !== supervisor) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          `⚠️ Only supervisor \`${supervisor}\` can inspect worker instances.`,
+        );
+        return;
+      }
+
+      const resolved = this.resolveWorkerForCommand({
+        project: params.normalizedProject,
+        workerToken: params.command.workerToken,
+      });
+      if (!resolved.workerInstanceId || !resolved.worker) {
+        await this.deps.messaging.sendToChannel(params.channelId, `⚠️ ${resolved.error || 'worker not found'}`);
+        return;
+      }
+
+      if (params.command.kind === 'orchestrator-worker-info') {
+        await this.sendOrchestratorWorkerInfo({
+          channelId: params.channelId,
+          projectName: params.projectName,
+          normalizedProject: params.normalizedProject,
+          worker: resolved.worker,
+          workerInstanceId: resolved.workerInstanceId,
+        });
+        return;
+      }
+
+      await this.sendOrchestratorWorkerLog({
+        channelId: params.channelId,
+        projectName: params.projectName,
+        normalizedProject: params.normalizedProject,
+        worker: resolved.worker,
+        workerInstanceId: resolved.workerInstanceId,
+        tailLines: params.command.tailLines,
+      });
+      return;
+    }
+
+    if (params.command.kind === 'orchestrator-enable') {
+      this.clearOrchestratorQueueForProject(params.projectName);
+      const resolved = this.resolveCodexOrchestratorEnableConfig({
+        project: params.normalizedProject,
+        currentInstanceId: params.instanceId,
+        requestedSupervisorInstanceId: params.command.supervisorInstanceId,
+        requestedWorkerFinalVisibility: params.command.workerFinalVisibility,
+      });
+      if ('error' in resolved) {
+        await this.deps.messaging.sendToChannel(params.channelId, `⚠️ ${resolved.error}`);
+        return;
+      }
+      const nextProject = normalizeProjectState({
+        ...params.normalizedProject,
+        orchestrator: {
+          enabled: true,
+          supervisorInstanceId: resolved.supervisorInstanceId,
+          workerInstanceIds: resolved.workerInstanceIds,
+          workerFinalVisibility: resolved.workerFinalVisibility,
+        },
+        lastActive: new Date(),
+      });
+      this.deps.stateManager.setProject(nextProject);
+      await this.deps.messaging.sendToChannel(
+        params.channelId,
+        [
+          '✅ Orchestrator enabled',
+          `supervisor: \`${resolved.supervisorInstanceId}\``,
+          `workers: ${resolved.workerInstanceIds.length > 0 ? resolved.workerInstanceIds.map((id) => `\`${id}\``).join(', ') : '(none)'}`,
+          `worker final visibility: \`${resolved.workerFinalVisibility}\``,
+        ].join('\n'),
+      );
+      return;
+    }
+
+    if (params.command.kind === 'orchestrator-run') {
+      const orchestrator = params.normalizedProject.orchestrator;
+      if (!orchestrator?.enabled) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          '⚠️ Orchestrator is disabled. Run `/orchestrator enable` first.',
+        );
+        return;
+      }
+      const supervisor = orchestrator.supervisorInstanceId;
+      if (!supervisor) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          '⚠️ Supervisor is not configured. Re-run `/orchestrator enable <supervisorInstanceId>`.',
+        );
+        return;
+      }
+      if (params.instanceId !== supervisor) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          `⚠️ Only supervisor \`${supervisor}\` can dispatch worker tasks.`,
+        );
+        return;
+      }
+      const resolved = this.resolveWorkerForCommand({
+        project: params.normalizedProject,
+        workerToken: params.command.workerInstanceId,
+      });
+      if (!resolved.workerInstanceId || !resolved.worker) {
+        await this.deps.messaging.sendToChannel(params.channelId, `⚠️ ${resolved.error || 'worker not found'}`);
+        return;
+      }
+      const worker = resolved.worker;
+
+      const outcome = await this.dispatchOrQueueOrchestratorWorkerTask({
+        projectName: params.projectName,
+        normalizedProject: params.normalizedProject,
+        supervisorInstanceId: supervisor,
+        worker,
+        prompt: params.command.prompt,
+        sourceChannelId: params.channelId,
+        routeHint: params.routeHint,
+        allowQueueOnImmediateFailure: true,
+        priority: params.command.priority,
+      });
+      if (outcome.kind === 'dispatched') {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          [
+            `✅ Dispatched to worker \`${worker.instanceId}\``,
+            `turnId: \`${outcome.turnId}\``,
+            `task: ${params.command.prompt.slice(0, 200)}${params.command.prompt.length > 200 ? '…' : ''}`,
+          ].join('\n'),
+        );
+        return;
+      }
+      if (outcome.kind === 'queued') {
+        if (outcome.immediateFailureQueued) {
+          await this.deps.messaging.sendToChannel(
+            params.channelId,
+            [
+              `⚠️ Immediate dispatch failed for worker \`${worker.instanceId}\`; queued for retry.`,
+              `turnId: \`${outcome.turnId}\``,
+              `queue depth: \`${outcome.queueDepth ?? 0}\``,
+            ].join('\n'),
+          );
+          return;
+        }
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          [
+            `🕒 Queued for worker \`${worker.instanceId}\``,
+            `turnId: \`${outcome.turnId}\``,
+            `queue position: \`${outcome.queuePosition ?? outcome.queueDepth ?? 1}\``,
+            `task: ${params.command.prompt.slice(0, 200)}${params.command.prompt.length > 200 ? '…' : ''}`,
+          ].join('\n'),
+        );
+        return;
+      }
+      if (outcome.kind === 'queue-full') {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          `⚠️ Worker \`${worker.instanceId}\` queue is full. Increase \`AGENT_DISCORD_ORCHESTRATOR_QUEUE_MAX_DEPTH\` or wait for drain.`,
+        );
+        return;
+      }
+      await this.deps.messaging.sendToChannel(
+        params.channelId,
+        this.buildDeliveryFailureGuidance(params.projectName, outcome.errorMessage || 'dispatch failed'),
+      );
+      return;
+    }
+
+    if (params.command.kind === 'orchestrator-spawn') {
+      const orchestrator = params.normalizedProject.orchestrator;
+      if (!orchestrator?.enabled) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          '⚠️ Orchestrator is disabled. Run `/orchestrator enable` first.',
+        );
+        return;
+      }
+      const supervisor = orchestrator.supervisorInstanceId;
+      if (!supervisor) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          '⚠️ Supervisor is not configured. Re-run `/orchestrator enable <supervisorInstanceId>`.',
+        );
+        return;
+      }
+      if (params.instanceId !== supervisor) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          `⚠️ Only supervisor \`${supervisor}\` can spawn worker instances.`,
+        );
+        return;
+      }
+      if (!this.deps.orchestratorWorkerProvisioner) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          '⚠️ Dynamic worker provisioning is unavailable in this runtime.',
+        );
+        return;
+      }
+
+      const spawnResult = await this.deps.orchestratorWorkerProvisioner.spawnCodexWorkers({
+        projectName: params.projectName,
+        count: params.command.count,
+      });
+      if (spawnResult.created.length === 0) {
+        const warning = spawnResult.warnings?.[0] || 'no worker created';
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          `⚠️ Worker spawn skipped: ${warning}`,
+        );
+        return;
+      }
+
+      const latest = this.deps.stateManager.getProject(params.projectName);
+      if (latest) {
+        const normalizedLatest = normalizeProjectState(latest);
+        const latestOrchestrator = normalizedLatest.orchestrator;
+        if (latestOrchestrator?.enabled) {
+          const mergedWorkerIds = [
+            ...new Set([
+              ...(latestOrchestrator.workerInstanceIds || []),
+              ...spawnResult.created.map((instance) => instance.instanceId),
+            ]),
+          ];
+          this.deps.stateManager.setProject(
+            normalizeProjectState({
+              ...normalizedLatest,
+              orchestrator: {
+                ...latestOrchestrator,
+                enabled: true,
+                supervisorInstanceId: latestOrchestrator.supervisorInstanceId || supervisor,
+                workerInstanceIds: mergedWorkerIds,
+              },
+              lastActive: new Date(),
+            }),
+          );
+        }
+      }
+
+      const warnings = (spawnResult.warnings || []).filter((line) => !!line);
+      await this.deps.messaging.sendToChannel(
+        params.channelId,
+        [
+          `✅ Spawned worker instance(s): ${spawnResult.created.map((instance) => `\`${instance.instanceId}\``).join(', ')}`,
+          `count: \`${spawnResult.created.length}\``,
+          ...(warnings.length > 0 ? [`warnings: ${warnings.join(' | ')}`] : []),
+        ].join('\n'),
+      );
+      return;
+    }
+
+    if (params.command.kind === 'orchestrator-remove') {
+      const workerToken = params.command.workerInstanceId;
+      const orchestrator = params.normalizedProject.orchestrator;
+      if (!orchestrator?.enabled) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          '⚠️ Orchestrator is disabled. Run `/orchestrator enable` first.',
+        );
+        return;
+      }
+      const supervisor = orchestrator.supervisorInstanceId;
+      if (!supervisor) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          '⚠️ Supervisor is not configured. Re-run `/orchestrator enable <supervisorInstanceId>`.',
+        );
+        return;
+      }
+      if (params.instanceId !== supervisor) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          `⚠️ Only supervisor \`${supervisor}\` can remove worker instances.`,
+        );
+        return;
+      }
+      const resolved = this.resolveWorkerForCommand({
+        project: params.normalizedProject,
+        workerToken,
+      });
+      if (!resolved.workerInstanceId || !resolved.worker) {
+        await this.deps.messaging.sendToChannel(params.channelId, `⚠️ ${resolved.error || 'worker not found'}`);
+        return;
+      }
+      const workerInstanceId = resolved.workerInstanceId;
+      const worker = resolved.worker;
+      if (workerInstanceId === supervisor) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          '⚠️ Supervisor instance cannot be removed via `/orchestrator remove`.',
+        );
+        return;
+      }
+      if (!this.deps.orchestratorWorkerProvisioner) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          '⚠️ Dynamic worker provisioning is unavailable in this runtime.',
+        );
+        return;
+      }
+
+      this.clearOrchestratorQueueForWorker(params.projectName, workerInstanceId);
+      this.deps.pendingTracker.clearPendingForInstance(
+        params.projectName,
+        worker.agentType,
+        worker.instanceId,
+      );
+
+      const removed = await this.deps.orchestratorWorkerProvisioner.teardownWorker({
+        projectName: params.projectName,
+        workerInstanceId,
+      });
+      if (!removed.removed) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          `⚠️ Worker remove skipped: ${removed.warning || 'unknown reason'}`,
+        );
+        return;
+      }
+
+      const latest = this.deps.stateManager.getProject(params.projectName);
+      if (latest) {
+        const normalizedLatest = normalizeProjectState(latest);
+        const latestOrchestrator = normalizedLatest.orchestrator;
+        if (latestOrchestrator?.enabled) {
+          this.deps.stateManager.setProject(
+            normalizeProjectState({
+              ...normalizedLatest,
+              orchestrator: {
+                ...latestOrchestrator,
+                enabled: true,
+                supervisorInstanceId: latestOrchestrator.supervisorInstanceId || supervisor,
+                workerInstanceIds: (latestOrchestrator.workerInstanceIds || [])
+                  .filter((id) => id !== workerInstanceId),
+              },
+              lastActive: new Date(),
+            }),
+          );
+        }
+      }
+
+      await this.deps.messaging.sendToChannel(
+        params.channelId,
+        [
+          `✅ Removed worker \`${workerInstanceId}\``,
+          ...(removed.warning ? [`note: ${removed.warning}`] : []),
+        ].join('\n'),
+      );
+      return;
+    }
+
+    if (params.command.kind === 'orchestrator-remove-all') {
+      const orchestrator = params.normalizedProject.orchestrator;
+      if (!orchestrator?.enabled) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          '⚠️ Orchestrator is disabled. Run `/orchestrator enable` first.',
+        );
+        return;
+      }
+      const supervisor = orchestrator.supervisorInstanceId;
+      if (!supervisor) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          '⚠️ Supervisor is not configured. Re-run `/orchestrator enable <supervisorInstanceId>`.',
+        );
+        return;
+      }
+      if (params.instanceId !== supervisor) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          `⚠️ Only supervisor \`${supervisor}\` can remove worker instances.`,
+        );
+        return;
+      }
+      if (!this.deps.orchestratorWorkerProvisioner) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          '⚠️ Dynamic worker provisioning is unavailable in this runtime.',
+        );
+        return;
+      }
+
+      const workerIds = this.resolveOrchestratorWorkerIds(params.normalizedProject).filter((id) => id !== supervisor);
+      if (workerIds.length === 0) {
+        await this.deps.messaging.sendToChannel(params.channelId, 'ℹ️ No worker instances to remove.');
+        return;
+      }
+
+      const removedIds: string[] = [];
+      const warnings: string[] = [];
+      for (const workerInstanceId of workerIds) {
+        const worker = getProjectInstance(params.normalizedProject, workerInstanceId);
+        if (!worker) {
+          warnings.push(`${workerInstanceId}: not found`);
+          continue;
+        }
+        this.clearOrchestratorQueueForWorker(params.projectName, workerInstanceId);
+        this.deps.pendingTracker.clearPendingForInstance(
+          params.projectName,
+          worker.agentType,
+          worker.instanceId,
+        );
+        const removed = await this.deps.orchestratorWorkerProvisioner.teardownWorker({
+          projectName: params.projectName,
+          workerInstanceId,
+        });
+        if (removed.removed) {
+          removedIds.push(workerInstanceId);
+          if (removed.warning) warnings.push(`${workerInstanceId}: ${removed.warning}`);
+        } else {
+          warnings.push(`${workerInstanceId}: ${removed.warning || 'remove skipped'}`);
+        }
+      }
+
+      const latest = this.deps.stateManager.getProject(params.projectName);
+      if (latest) {
+        const normalizedLatest = normalizeProjectState(latest);
+        const latestOrchestrator = normalizedLatest.orchestrator;
+        if (latestOrchestrator?.enabled) {
+          this.deps.stateManager.setProject(
+            normalizeProjectState({
+              ...normalizedLatest,
+              orchestrator: {
+                ...latestOrchestrator,
+                enabled: true,
+                supervisorInstanceId: latestOrchestrator.supervisorInstanceId || supervisor,
+                workerInstanceIds: (latestOrchestrator.workerInstanceIds || [])
+                  .filter((id) => !removedIds.includes(id)),
+              },
+              lastActive: new Date(),
+            }),
+          );
+        }
+      }
+
+      await this.deps.messaging.sendToChannel(
+        params.channelId,
+        [
+          `✅ Removed worker instance(s): ${
+            removedIds.length > 0 ? removedIds.map((id) => `\`${id}\``).join(', ') : '(none)'
+          }`,
+          ...(warnings.length > 0 ? [`warnings: ${warnings.join(' | ')}`] : []),
+        ].join('\n'),
+      );
+      return;
+    }
+
+    if (params.command.kind === 'orchestrator-disable') {
+      this.clearOrchestratorQueueForProject(params.projectName);
+      const nextProject = normalizeProjectState({
+        ...params.normalizedProject,
+        orchestrator: undefined,
+        lastActive: new Date(),
+      });
+      this.deps.stateManager.setProject(nextProject);
+      await this.deps.messaging.sendToChannel(params.channelId, '✅ Orchestrator disabled');
+      return;
+    }
+
     if (params.command.kind === 'doctor') {
       try {
         const runner = this.deps.doctorRunner || runDoctor;
@@ -1004,7 +3376,7 @@ export class BridgeMessageRouter {
         return;
       }
 
-      const normalizedProject = normalizeProjectState(project);
+      let normalizedProject = normalizeProjectState(project);
       const routeChannelId = context?.routeChannelId || channelId;
       const fromMappedId = mappedInstanceId ? getProjectInstance(normalizedProject, mappedInstanceId) : undefined;
       const fromReply = this.resolveRememberedRoute(
@@ -1039,6 +3411,16 @@ export class BridgeMessageRouter {
       const windowName = mappedInstance.tmuxWindow || instanceKey;
       const routeMemory = this.buildRouteMemory(projectName, instanceKey, resolvedAgentType);
       const commandChannelId = mappedInstance.channelId || routeChannelId || channelId;
+      const isSlashCommandMessage = content.trim().startsWith('/');
+
+      if (!isSlashCommandMessage) {
+        normalizedProject = this.maybeAutoEnableOrchestrator({
+          projectName,
+          normalizedProject,
+          resolvedAgentType,
+          currentInstanceId: instanceKey,
+        });
+      }
 
       const sessionControlCommand = this.parseSessionControlCommand(content);
       if (sessionControlCommand) {
@@ -1092,6 +3474,10 @@ export class BridgeMessageRouter {
         await this.handleMaintenanceCommand({
           command: maintenanceCommand,
           channelId: commandChannelId,
+          projectName,
+          normalizedProject,
+          routeHint: this.routeHintFor(routeSource, context),
+          instanceId: instanceKey,
         });
         return;
       }
@@ -1099,6 +3485,14 @@ export class BridgeMessageRouter {
       let promptToSend: string | null = null;
       let specialKeyCommand: SpecialKeyCommand | null = null;
       let downloadedAttachmentCount = 0;
+      let autoWorkerDispatchOutcomes: Array<{
+        workerInstanceId: string;
+        outcome: OrchestratorDispatchOrQueueOutcome;
+        plannedTask?: string;
+        packetArtifactPath?: string;
+      }> = [];
+      let autoOrchestratorNotices: string[] = [];
+      let autoPlannerUsed = false;
       const isRetryCommand = utilityCommand === 'retry';
       if (isRetryCommand) {
         const remembered = this.getRememberedPrompt(projectName, instanceKey);
@@ -1162,6 +3556,70 @@ export class BridgeMessageRouter {
             promptToSend = longTaskHinted.prompt;
           } else {
             promptToSend = sanitized;
+          }
+        }
+      }
+
+      if (
+        resolvedAgentType === 'codex' &&
+        !specialKeyCommand &&
+        !isRetryCommand &&
+        promptToSend &&
+        promptToSend.trim().length > 0
+      ) {
+        const prepared = await this.maybeAutoPrepareOrchestrator({
+          projectName,
+          normalizedProject,
+          resolvedAgentType,
+          currentInstanceId: instanceKey,
+          prompt: promptToSend,
+        });
+        normalizedProject = prepared.project;
+        autoOrchestratorNotices = [...autoOrchestratorNotices, ...prepared.notices];
+
+        const orchestrator = normalizedProject.orchestrator;
+        if (
+          orchestrator?.enabled &&
+          orchestrator.supervisorInstanceId === instanceKey &&
+          this.shouldAutoDispatchToWorker(promptToSend)
+        ) {
+          const workers = this.selectOrchestratorWorkersForDispatch(
+            projectName,
+            normalizedProject,
+            this.resolveOrchestratorAutoDispatchMaxWorkers(),
+          );
+          const plannerAssignments = this.buildAutoPlannerAssignments({
+            projectName,
+            projectPath: normalizedProject.projectPath,
+            supervisorInstanceId: instanceKey,
+            prompt: promptToSend,
+            workers,
+          });
+          autoPlannerUsed = plannerAssignments.length > 0;
+
+          for (let index = 0; index < workers.length; index += 1) {
+            const worker = workers[index];
+            if (!worker) continue;
+            const assignment = plannerAssignments[index];
+            const workerPrompt = assignment?.prompt || promptToSend;
+            const outcome = await this.dispatchOrQueueOrchestratorWorkerTask({
+              projectName,
+              normalizedProject,
+              supervisorInstanceId: instanceKey,
+              worker,
+              prompt: workerPrompt,
+              sourceChannelId: commandChannelId,
+              routeHint: this.routeHintFor(routeSource, context),
+              allowQueueOnImmediateFailure: true,
+            });
+            autoWorkerDispatchOutcomes.push({
+              workerInstanceId: worker.instanceId,
+              outcome,
+              ...(assignment ? { plannedTask: assignment.task } : {}),
+              ...(assignment?.packetArtifactPath
+                ? { packetArtifactPath: assignment.packetArtifactPath }
+                : {}),
+            });
           }
         }
       }
@@ -1267,6 +3725,72 @@ export class BridgeMessageRouter {
         }
         this.rememberMessageRoute(messageId, routeMemory);
         this.rememberConversationRoute(context?.conversationKey, routeMemory);
+        if (autoOrchestratorNotices.length > 0) {
+          await messaging.sendToChannel(commandChannelId, autoOrchestratorNotices.join('\n'));
+        }
+        if (autoWorkerDispatchOutcomes.length === 1) {
+          const single = autoWorkerDispatchOutcomes[0]!;
+          const autoWorkerDispatchOutcome = single.outcome;
+          const autoWorkerInstanceId = single.workerInstanceId;
+          const plannedTaskLine = single.plannedTask ? [`task: ${single.plannedTask}`] : [];
+          const packetPathLine = single.packetArtifactPath ? [`packet: ${single.packetArtifactPath}`] : [];
+          if (autoWorkerDispatchOutcome.kind === 'dispatched') {
+            await messaging.sendToChannel(
+              commandChannelId,
+              [
+                `🧠 Auto orchestration: dispatched supporting task to worker \`${autoWorkerInstanceId}\``,
+                `turnId: \`${autoWorkerDispatchOutcome.turnId}\``,
+                ...plannedTaskLine,
+                ...packetPathLine,
+              ].join('\n'),
+            );
+          } else if (autoWorkerDispatchOutcome.kind === 'queued') {
+            await messaging.sendToChannel(
+              commandChannelId,
+              [
+                `🧠 Auto orchestration: queued supporting task for worker \`${autoWorkerInstanceId}\``,
+                `turnId: \`${autoWorkerDispatchOutcome.turnId}\``,
+                `queue position: \`${autoWorkerDispatchOutcome.queuePosition ?? autoWorkerDispatchOutcome.queueDepth ?? 1}\``,
+                ...plannedTaskLine,
+                ...packetPathLine,
+              ].join('\n'),
+            );
+          } else if (autoWorkerDispatchOutcome.kind === 'queue-full') {
+            await messaging.sendToChannel(
+              commandChannelId,
+              `⚠️ Auto orchestration skipped: worker \`${autoWorkerInstanceId}\` queue is full.`,
+            );
+          } else if (autoWorkerDispatchOutcome.kind === 'dispatch-failed') {
+            await messaging.sendToChannel(
+              commandChannelId,
+              `⚠️ Auto orchestration worker dispatch failed for \`${autoWorkerInstanceId}\`: ${autoWorkerDispatchOutcome.errorMessage || 'unknown error'}`,
+            );
+          }
+        } else if (autoWorkerDispatchOutcomes.length > 1) {
+          const lines = [
+            `🧠 Auto orchestration fanout${autoPlannerUsed ? ' (planner)' : ''}:`,
+          ];
+          for (const item of autoWorkerDispatchOutcomes) {
+            const outcome = item.outcome;
+            const workerId = item.workerInstanceId;
+            const taskSuffix = item.plannedTask ? ` | task=${item.plannedTask}` : '';
+            const packetSuffix = item.packetArtifactPath ? ` | packet=${item.packetArtifactPath}` : '';
+            if (outcome.kind === 'dispatched') {
+              lines.push(`- \`${workerId}\`: dispatched (\`${outcome.turnId}\`)${taskSuffix}${packetSuffix}`);
+            } else if (outcome.kind === 'queued') {
+              lines.push(
+                `- \`${workerId}\`: queued (\`${outcome.turnId}\`, pos=${outcome.queuePosition ?? outcome.queueDepth ?? 1})${taskSuffix}${packetSuffix}`,
+              );
+            } else if (outcome.kind === 'queue-full') {
+              lines.push(`- \`${workerId}\`: queue full${taskSuffix}${packetSuffix}`);
+            } else {
+              lines.push(
+                `- \`${workerId}\`: failed (${outcome.errorMessage || 'unknown error'})${taskSuffix}${packetSuffix}`,
+              );
+            }
+          }
+          await messaging.sendToChannel(commandChannelId, lines.join('\n'));
+        }
       }
       this.deps.stateManager.updateLastActive(projectName);
     });

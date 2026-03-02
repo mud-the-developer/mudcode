@@ -3,10 +3,15 @@ import type { MessagingClient } from '../../messaging/interface.js';
 import { listProjectInstances, normalizeProjectState } from '../../state/instances.js';
 import { TmuxManager } from '../../tmux/manager.js';
 import type { IStateManager } from '../../types/interfaces.js';
+import type { ProjectState } from '../../types/index.js';
 import { PendingMessageTracker } from './pending-message-tracker.js';
 import { formatDiscordOutput, wrapDiscordCodeblock } from '../formatting/discord-output-formatter.js';
 import type { CodexIoV2Tracker } from '../events/codex-io-v2.js';
 import type { AgentEventHookClient } from '../events/agent-event-hook.js';
+import {
+  resolveOrchestratorWorkerVisibility,
+  resolveProgressPolicyDirective,
+} from './orchestrator-progress-policy.js';
 
 type ProgressOutputVisibility = 'off' | 'thread' | 'channel';
 type EventProgressMode = 'off' | 'thread' | 'channel';
@@ -44,13 +49,16 @@ export class BridgeCapturePoller {
   private readonly codexInitialQuietPendingPollThreshold: number;
   private readonly codexFinalOnlyModeEnabled: boolean;
   private readonly codexEventOnlyModeEnabled: boolean;
+  private readonly codexEventOnlyCaptureFallbackEnabled: boolean;
   private readonly longOutputThreadThreshold: number;
   private readonly stalePendingAlertMs: number;
   private readonly promptEchoFilterEnabled: boolean;
   private readonly promptEchoSuppressionMaxPolls: number;
+  private readonly promptEchoFallbackRawDeltaOnEventHookCaptureEnabled: boolean;
   private readonly redrawFallbackTailLines: number;
   private readonly progressOutputVisibility: ProgressOutputVisibility;
   private readonly codexProgressHookMinIntervalMs: number;
+  private readonly eventHookCaptureFallbackStaleGraceMs: number;
   private readonly codexEventProgressMode?: EventProgressMode;
   private readonly codexEventProgressBlockStreaming?: boolean;
   private readonly codexEventProgressBlockWindowMs?: number;
@@ -73,9 +81,11 @@ export class BridgeCapturePoller {
   private bufferedOutputByInstance = new Map<string, string>();
   private bufferedOutputChannelByInstance = new Map<string, string>();
   private lastPendingTurnIdByInstance = new Map<string, string>();
+  private supervisorFinalFormatRetryStateByInstance = new Map<string, { count: number; lastTurnId?: string }>();
   private progressHookHeartbeatByInstance = new Map<string, { atMs: number; turnId?: string }>();
   private progressHookInFlightByInstance = new Set<string>();
   private eventHookFallbackActiveByInstance = new Set<string>();
+  private eventHookStaleSinceByInstance = new Map<string, number>();
 
   constructor(private deps: BridgeCapturePollerDeps) {
     this.intervalMs = this.resolveIntervalMs(deps.intervalMs);
@@ -85,15 +95,19 @@ export class BridgeCapturePoller {
     );
     this.codexFinalOnlyModeEnabled = this.resolveCodexFinalOnlyModeEnabled(deps.codexFinalOnlyModeEnabled);
     this.codexEventOnlyModeEnabled = this.resolveCodexEventOnlyModeEnabled();
+    this.codexEventOnlyCaptureFallbackEnabled = this.resolveCodexEventOnlyCaptureFallbackEnabled();
     this.longOutputThreadThreshold = this.resolveLongOutputThreadThreshold(deps.longOutputThreadThreshold);
     this.stalePendingAlertMs = this.resolveStalePendingAlertMs(deps.stalePendingAlertMs);
     this.promptEchoFilterEnabled = this.resolvePromptEchoFilterEnabled(deps.promptEchoFilterEnabled);
     this.promptEchoSuppressionMaxPolls = this.resolvePromptEchoSuppressionMaxPolls(deps.promptEchoSuppressionMaxPolls);
+    this.promptEchoFallbackRawDeltaOnEventHookCaptureEnabled =
+      this.resolvePromptEchoFallbackRawDeltaOnEventHookCaptureEnabled();
     this.redrawFallbackTailLines = this.resolveRedrawFallbackTailLines(deps.redrawFallbackTailLines);
     this.progressOutputVisibility = this.resolveProgressOutputVisibility(deps.progressOutputVisibility);
     this.codexProgressHookMinIntervalMs = this.resolveCodexProgressHookMinIntervalMs(
       deps.codexProgressHookMinIntervalMs,
     );
+    this.eventHookCaptureFallbackStaleGraceMs = this.resolveEventHookCaptureFallbackStaleGraceMs();
     this.codexEventProgressMode = this.resolveCodexEventProgressMode();
     this.codexEventProgressBlockStreaming = this.resolveCodexEventProgressBlockStreaming();
     this.codexEventProgressBlockWindowMs = this.resolveCodexEventProgressBlockWindowMs();
@@ -125,9 +139,11 @@ export class BridgeCapturePoller {
     this.bufferedOutputByInstance.clear();
     this.bufferedOutputChannelByInstance.clear();
     this.lastPendingTurnIdByInstance.clear();
+    this.supervisorFinalFormatRetryStateByInstance.clear();
     this.progressHookHeartbeatByInstance.clear();
     this.progressHookInFlightByInstance.clear();
     this.eventHookFallbackActiveByInstance.clear();
+    this.eventHookStaleSinceByInstance.clear();
   }
 
   private resolveIntervalMs(configured?: number): number {
@@ -179,6 +195,15 @@ export class BridgeCapturePoller {
 
   private resolveCodexEventOnlyModeEnabled(): boolean {
     const raw = process.env.AGENT_DISCORD_CODEX_EVENT_ONLY;
+    if (!raw) return true;
+    const normalized = raw.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+    return true;
+  }
+
+  private resolveCodexEventOnlyCaptureFallbackEnabled(): boolean {
+    const raw = process.env.AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK;
     if (!raw) return false;
     const normalized = raw.trim().toLowerCase();
     if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
@@ -239,6 +264,21 @@ export class BridgeCapturePoller {
     return 4;
   }
 
+  private resolvePromptEchoFallbackRawDeltaOnEventHookCaptureEnabled(): boolean {
+    const raw = process.env.AGENT_DISCORD_CAPTURE_PROMPT_ECHO_FALLBACK_EVENT_HOOK;
+    if (!raw) return false;
+    const normalized = raw.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+    return false;
+  }
+
+  private shouldDeliverPromptEchoFallbackRawDelta(agentType: string, eventHookCapture: boolean): boolean {
+    if (agentType !== 'codex') return true;
+    if (!eventHookCapture) return true;
+    return this.promptEchoFallbackRawDeltaOnEventHookCaptureEnabled;
+  }
+
   private resolveRedrawFallbackTailLines(configured?: number): number {
     if (typeof configured === 'number' && Number.isFinite(configured) && configured >= 10 && configured <= 400) {
       return Math.trunc(configured);
@@ -272,6 +312,14 @@ export class BridgeCapturePoller {
       return Math.trunc(fromEnv);
     }
     return 5000;
+  }
+
+  private resolveEventHookCaptureFallbackStaleGraceMs(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_EVENT_HOOK_CAPTURE_FALLBACK_STALE_GRACE_MS || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 0 && fromEnv <= 5 * 60 * 1000) {
+      return Math.trunc(fromEnv);
+    }
+    return 10_000;
   }
 
   private parseBoolean(raw: string | undefined): boolean | undefined {
@@ -410,12 +458,16 @@ export class BridgeCapturePoller {
     );
   }
 
-  private async sendProgressChunk(channelId: string, payload: string): Promise<boolean> {
-    if (this.progressOutputVisibility === 'off') {
+  private async sendProgressChunk(
+    channelId: string,
+    payload: string,
+    outputVisibility: ProgressOutputVisibility = this.progressOutputVisibility,
+  ): Promise<boolean> {
+    if (outputVisibility === 'off') {
       return false;
     }
 
-    if (this.progressOutputVisibility === 'thread') {
+    if (outputVisibility === 'thread') {
       if (typeof this.deps.messaging.sendToProgressThread === 'function') {
         await this.deps.messaging.sendToProgressThread(channelId, payload);
         return true;
@@ -428,7 +480,18 @@ export class BridgeCapturePoller {
     return true;
   }
 
-  private async sendOutput(channelId: string, text: string, eventType: OutputEventType): Promise<boolean> {
+  private async sendOutput(
+    channelId: string,
+    text: string,
+    eventType: OutputEventType,
+    outputVisibilityOverride?: ProgressOutputVisibility,
+  ): Promise<boolean> {
+    const outputVisibility =
+      outputVisibilityOverride || (eventType === 'progress' ? this.progressOutputVisibility : 'channel');
+    if (outputVisibility === 'off') {
+      return false;
+    }
+
     const discordFormatted =
       this.deps.messaging.platform === 'discord'
         ? formatDiscordOutput(text)
@@ -438,7 +501,8 @@ export class BridgeCapturePoller {
 
     const shouldUseLongOutputThread =
       this.shouldUseThreadedLongOutput(content) &&
-      (eventType === 'final' || this.progressOutputVisibility === 'channel');
+      (eventType === 'final' || outputVisibility === 'channel') &&
+      outputVisibility === 'channel';
     if (shouldUseLongOutputThread) {
       await this.deps.messaging.sendLongOutput!(channelId, content);
       return true;
@@ -453,10 +517,14 @@ export class BridgeCapturePoller {
           ? wrapDiscordCodeblock(chunk, discordFormatted.language)
           : chunk;
       if (eventType === 'progress') {
-        const sent = await this.sendProgressChunk(channelId, payload);
+        const sent = await this.sendProgressChunk(channelId, payload, outputVisibility);
         sentAnyChunk = sentAnyChunk || sent;
       } else {
-        await this.deps.messaging.sendToChannel(channelId, payload);
+        if (outputVisibility === 'thread' && typeof this.deps.messaging.sendToProgressThread === 'function') {
+          await this.deps.messaging.sendToProgressThread(channelId, payload);
+        } else {
+          await this.deps.messaging.sendToChannel(channelId, payload);
+        }
         sentAnyChunk = true;
       }
     }
@@ -632,6 +700,259 @@ export class BridgeCapturePoller {
     }
   }
 
+  private resolveSupervisorFinalFormatPolicy(params: {
+    projectName: string;
+    instanceId: string;
+    agentType: string;
+  }):
+    | {
+        normalizedProject: ReturnType<typeof normalizeProjectState>;
+        tmuxWindow: string;
+        maxRetries: number;
+      }
+    | undefined {
+    if (params.agentType !== 'codex') return undefined;
+    const rawProject = this.deps.stateManager
+      .listProjects()
+      .find((project) => project.projectName === params.projectName);
+    if (!rawProject) return undefined;
+
+    const project = normalizeProjectState(rawProject);
+    const orchestrator = project.orchestrator;
+    if (!orchestrator?.enabled) return undefined;
+    if (!orchestrator.supervisorInstanceId || orchestrator.supervisorInstanceId !== params.instanceId) {
+      return undefined;
+    }
+
+    if (orchestrator.supervisorFinalFormat?.enforce !== true) return undefined;
+    const maxRetriesRaw = orchestrator.supervisorFinalFormat?.maxRetries;
+    const maxRetries =
+      typeof maxRetriesRaw === 'number' && Number.isFinite(maxRetriesRaw) && maxRetriesRaw >= 0
+        ? Math.min(10, Math.max(0, Math.trunc(maxRetriesRaw)))
+        : 2;
+    const instance = listProjectInstances(project).find((entry) => entry.instanceId === params.instanceId);
+    if (!instance) return undefined;
+    const tmuxWindow = instance.tmuxWindow || instance.instanceId;
+    if (!tmuxWindow) return undefined;
+    return {
+      normalizedProject: project,
+      tmuxWindow,
+      maxRetries,
+    };
+  }
+
+  private isSupervisorFinalFormatCompliant(text: string): boolean {
+    const trimmed = text.trim();
+    if (trimmed.length === 0) return false;
+    const strictRaw = (process.env.AGENT_DISCORD_SUPERVISOR_FINAL_FORMAT_STRICT || '').trim().toLowerCase();
+    const strict = strictRaw.length === 0 ? true : !['0', 'false', 'no', 'off'].includes(strictRaw);
+
+    const numberedNeed =
+      /^\s*1[\.\)]\s*(need your check|manual check|확인 필요|체크 필요|need check|체크|확인)\b/im.test(trimmed);
+    const numberedChanges =
+      /^\s*2[\.\)]\s*(changes?|deltas?|변경|수정)\b/im.test(trimmed);
+    const numberedVerification =
+      /^\s*3[\.\)]\s*(verification|tests?|검증|테스트)\b/im.test(trimmed);
+    if (numberedNeed && numberedChanges && numberedVerification) return true;
+
+    const headingNeed =
+      /(?:^|\n)\s*(?:\*\*)?(need your check|manual check|확인 필요|체크 필요)(?:\*\*)?\s*:?/im.test(trimmed);
+    const headingChanges =
+      /(?:^|\n)\s*(?:\*\*)?(changes?|deltas?|변경|수정)(?:\*\*)?\s*:?/im.test(trimmed);
+    const headingVerification =
+      /(?:^|\n)\s*(?:\*\*)?(verification|tests?|검증|테스트)(?:\*\*)?\s*:?/im.test(trimmed);
+    if (headingNeed && headingChanges && headingVerification) return true;
+
+    if (!strict) {
+      if (trimmed.length <= 320) return true;
+      const hasNeedKeyword = /\bneed your check\b/i.test(trimmed) || /(체크|확인)\b/.test(trimmed);
+      const hasChangeKeyword = /\bchanges?\b/i.test(trimmed) || /(변경|수정)\b/.test(trimmed);
+      const hasVerificationKeyword = /\bverification\b/i.test(trimmed) || /(검증|테스트)\b/.test(trimmed);
+      return hasNeedKeyword && hasChangeKeyword && hasVerificationKeyword;
+    }
+    return false;
+  }
+
+  private buildSupervisorFinalFormatRetryPrompt(): string {
+    return [
+      '[mudcode supervisor-final-format]',
+      'Rewrite the previous final response in this exact concise format:',
+      '1) Need your check (manual actions only, or "none")',
+      '2) Changes (file/behavior deltas only)',
+      '3) Verification (commands run + pass/fail)',
+      'Do not include process logs or internal analysis.',
+      '[/mudcode supervisor-final-format]',
+    ].join('\n');
+  }
+
+  private buildSupervisorFinalFormatRetryTurnId(params: {
+    projectName: string;
+    instanceId: string;
+  }): string {
+    const now = Date.now().toString(36);
+    const rand = Math.random().toString(36).slice(2, 8);
+    return `fmt-${params.projectName}-${params.instanceId}-${now}-${rand}`;
+  }
+
+  private async safeTrackSupervisorFormatRetryPending(params: {
+    projectName: string;
+    agentType: string;
+    instanceId: string;
+    channelId: string;
+    turnId: string;
+    prompt: string;
+  }): Promise<void> {
+    const tracker = this.deps.pendingTracker as unknown as {
+      markPending?: (
+        projectName: string,
+        agentType: string,
+        channelId: string,
+        messageId: string,
+        instanceId?: string,
+        prompt?: string,
+      ) => Promise<void>;
+      markRouteResolved?: (
+        projectName: string,
+        agentType: string,
+        instanceId?: string,
+        hint?: 'reply' | 'thread' | 'memory',
+      ) => Promise<void>;
+      markDispatching?: (projectName: string, agentType: string, instanceId?: string) => Promise<void>;
+    };
+    if (typeof tracker.markPending === 'function') {
+      await tracker.markPending(
+        params.projectName,
+        params.agentType,
+        params.channelId,
+        params.turnId,
+        params.instanceId,
+        params.prompt,
+      );
+    }
+    if (typeof tracker.markRouteResolved === 'function') {
+      await tracker.markRouteResolved(params.projectName, params.agentType, params.instanceId, 'memory');
+    }
+    if (typeof tracker.markDispatching === 'function') {
+      await tracker.markDispatching(params.projectName, params.agentType, params.instanceId);
+    }
+  }
+
+  private async requestSupervisorFinalFormatRetry(params: {
+    key: string;
+    projectName: string;
+    instanceId: string;
+    channelId: string;
+    normalizedProject: ReturnType<typeof normalizeProjectState>;
+    tmuxWindow: string;
+    nextAttempt: number;
+    maxRetries: number;
+  }): Promise<string | undefined> {
+    const prompt = this.buildSupervisorFinalFormatRetryPrompt();
+    const turnId = this.buildSupervisorFinalFormatRetryTurnId({
+      projectName: params.projectName,
+      instanceId: params.instanceId,
+    });
+
+    try {
+      await this.safeTrackSupervisorFormatRetryPending({
+        projectName: params.projectName,
+        agentType: 'codex',
+        instanceId: params.instanceId,
+        channelId: params.channelId,
+        turnId,
+        prompt,
+      });
+      this.lastPendingTurnIdByInstance.set(params.key, turnId);
+      this.progressHookInFlightByInstance.delete(params.key);
+      this.progressHookHeartbeatByInstance.delete(params.key);
+      this.deps.tmux.typeKeysToWindow(
+        params.normalizedProject.tmuxSession,
+        params.tmuxWindow,
+        prompt,
+        'codex',
+      );
+      this.deps.tmux.sendEnterToWindow(params.normalizedProject.tmuxSession, params.tmuxWindow, 'codex');
+      await this.deps.messaging.sendToChannel(
+        params.channelId,
+        `🔁 Supervisor final-format retry ${params.nextAttempt}/${params.maxRetries} requested.`,
+      );
+      if (this.deps.eventHookClient?.enabled) {
+        this.deps.eventHookClient
+          .emitCodexStart({
+            projectName: params.projectName,
+            instanceId: params.instanceId,
+            turnId,
+            channelId: params.channelId,
+          })
+          .catch(() => undefined);
+      }
+      return turnId;
+    } catch (error) {
+      console.warn(
+        `Supervisor final-format retry request failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return undefined;
+    }
+  }
+
+  private resolveCodexProgressHookEventConfig(params: {
+    projectName: string;
+    instanceId: string;
+    channelId?: string;
+  }): {
+    mode?: EventProgressMode;
+    blockStreamingEnabled?: boolean;
+    blockWindowMs?: number;
+    blockMaxChars?: number;
+  } {
+    let mode: EventProgressMode | undefined = this.codexEventProgressMode;
+    let blockStreamingEnabled = this.codexEventProgressBlockStreaming;
+    let blockWindowMs = this.codexEventProgressBlockWindowMs;
+    let blockMaxChars = this.codexEventProgressBlockMaxChars;
+
+    const stateManager = this.deps.stateManager as unknown as {
+      getProject?: (projectName: string) => ProjectState | undefined;
+      listProjects?: () => ProjectState[];
+    };
+    const rawProject =
+      (typeof stateManager.getProject === 'function'
+        ? stateManager.getProject(params.projectName)
+        : undefined) ||
+      (typeof stateManager.listProjects === 'function'
+        ? stateManager
+            .listProjects()
+            .find((entry) => (entry as { projectName?: string })?.projectName === params.projectName)
+        : undefined);
+    if (!rawProject) {
+      return {
+        mode,
+        blockStreamingEnabled,
+        blockWindowMs,
+        blockMaxChars,
+      };
+    }
+
+    const project = normalizeProjectState(rawProject);
+    const directive = resolveProgressPolicyDirective({
+      project,
+      agentType: 'codex',
+      instanceId: params.instanceId,
+      channelId: params.channelId,
+    });
+
+    mode = directive.mode ?? mode;
+    blockStreamingEnabled = directive.blockStreamingEnabled ?? blockStreamingEnabled;
+    blockWindowMs = directive.blockWindowMs ?? blockWindowMs;
+    blockMaxChars = directive.blockMaxChars ?? blockMaxChars;
+
+    return {
+      mode,
+      blockStreamingEnabled,
+      blockWindowMs,
+      blockMaxChars,
+    };
+  }
+
   private maybeEmitCodexProgressEvent(params: {
     projectName: string;
     instanceId: string;
@@ -657,6 +978,12 @@ export class BridgeCapturePoller {
       return;
     }
 
+    const progressConfig = this.resolveCodexProgressHookEventConfig({
+      projectName: params.projectName,
+      instanceId: params.instanceId,
+      channelId: params.channelId,
+    });
+
     this.progressHookInFlightByInstance.add(params.key);
     void hookClient.emitCodexProgress({
         projectName: params.projectName,
@@ -664,10 +991,10 @@ export class BridgeCapturePoller {
         turnId,
         channelId: params.channelId,
         text: params.text,
-        progressMode: this.codexEventProgressMode,
-        progressBlockStreaming: this.codexEventProgressBlockStreaming,
-        progressBlockWindowMs: this.codexEventProgressBlockWindowMs,
-        progressBlockMaxChars: this.codexEventProgressBlockMaxChars,
+        progressMode: progressConfig.mode,
+        progressBlockStreaming: progressConfig.blockStreamingEnabled,
+        progressBlockWindowMs: progressConfig.blockWindowMs,
+        progressBlockMaxChars: progressConfig.blockMaxChars,
       })
       .then((ok) => {
         if (ok) {
@@ -690,6 +1017,7 @@ export class BridgeCapturePoller {
     agentType: string;
     projectName: string;
     instanceId: string;
+    outputVisibility?: ProgressOutputVisibility;
   }): Promise<boolean> {
     const { key, channelId, agentType, projectName, instanceId } = params;
     const codexEventOnlyActive = this.isCodexEventOnlyActive(agentType);
@@ -697,6 +1025,7 @@ export class BridgeCapturePoller {
     if (!buffered || buffered.trim().length === 0) {
       this.bufferedOutputByInstance.delete(key);
       this.bufferedOutputChannelByInstance.delete(key);
+      this.supervisorFinalFormatRetryStateByInstance.delete(key);
       this.progressHookHeartbeatByInstance.delete(key);
       this.progressHookInFlightByInstance.delete(key);
       return false;
@@ -711,11 +1040,55 @@ export class BridgeCapturePoller {
     if (this.codexFinalOnlyModeEnabled && agentType === 'codex' && prepared.trim().length === 0) {
       this.bufferedOutputByInstance.delete(key);
       this.bufferedOutputChannelByInstance.delete(key);
+      this.supervisorFinalFormatRetryStateByInstance.delete(key);
       this.progressHookHeartbeatByInstance.delete(key);
       this.progressHookInFlightByInstance.delete(key);
       return true;
     }
     const output = prepared.trim().length > 0 ? prepared : buffered.trim();
+    if (agentType === 'codex') {
+      const policy = this.resolveSupervisorFinalFormatPolicy({
+        projectName,
+        instanceId,
+        agentType,
+      });
+      if (policy) {
+        const currentTurnId = this.lastPendingTurnIdByInstance.get(key);
+        const state = this.supervisorFinalFormatRetryStateByInstance.get(key);
+        const retryCount =
+          state && currentTurnId && state.lastTurnId && currentTurnId === state.lastTurnId ? state.count : 0;
+        const compliant = this.isSupervisorFinalFormatCompliant(output);
+
+        if (!compliant && retryCount < policy.maxRetries) {
+          const nextAttempt = retryCount + 1;
+          const retryTurnId = await this.requestSupervisorFinalFormatRetry({
+            key,
+            projectName,
+            instanceId,
+            channelId: targetChannelId,
+            normalizedProject: policy.normalizedProject,
+            tmuxWindow: policy.tmuxWindow,
+            nextAttempt,
+            maxRetries: policy.maxRetries,
+          });
+          if (retryTurnId) {
+            this.supervisorFinalFormatRetryStateByInstance.set(key, {
+              count: nextAttempt,
+              lastTurnId: retryTurnId,
+            });
+            this.bufferedOutputByInstance.delete(key);
+            this.finalOnlyQuietFlushPollsByInstance.delete(key);
+            return false;
+          }
+        }
+        if (!compliant && retryCount >= policy.maxRetries) {
+          await this.deps.messaging.sendToChannel(
+            targetChannelId,
+            `⚠️ Supervisor final-format retries exhausted (${policy.maxRetries}); sending latest output as-is.`,
+          );
+        }
+      }
+    }
     if (agentType === 'codex') {
       const emitted = await this.safeEmitCodexFinalEvent({
         projectName,
@@ -728,6 +1101,7 @@ export class BridgeCapturePoller {
         this.bufferedOutputByInstance.delete(key);
         this.bufferedOutputChannelByInstance.delete(key);
         this.lastPendingTurnIdByInstance.delete(key);
+        this.supervisorFinalFormatRetryStateByInstance.delete(key);
         this.progressHookHeartbeatByInstance.delete(key);
         this.progressHookInFlightByInstance.delete(key);
         return true;
@@ -736,12 +1110,22 @@ export class BridgeCapturePoller {
         return false;
       }
     }
-    const sent = await this.sendOutput(targetChannelId, output, 'final');
+    if (params.outputVisibility === 'off') {
+      this.bufferedOutputByInstance.delete(key);
+      this.bufferedOutputChannelByInstance.delete(key);
+      this.lastPendingTurnIdByInstance.delete(key);
+      this.supervisorFinalFormatRetryStateByInstance.delete(key);
+      this.progressHookHeartbeatByInstance.delete(key);
+      this.progressHookInFlightByInstance.delete(key);
+      return true;
+    }
+    const sent = await this.sendOutput(targetChannelId, output, 'final', params.outputVisibility);
     if (!sent) return false;
 
     this.bufferedOutputByInstance.delete(key);
     this.bufferedOutputChannelByInstance.delete(key);
     this.lastPendingTurnIdByInstance.delete(key);
+    this.supervisorFinalFormatRetryStateByInstance.delete(key);
     this.progressHookHeartbeatByInstance.delete(key);
     this.progressHookInFlightByInstance.delete(key);
     return sent;
@@ -762,24 +1146,50 @@ export class BridgeCapturePoller {
     key: string,
     pendingActive: boolean,
   ): boolean {
-    if (typeof this.deps.eventLifecycleStaleChecker !== 'function') {
+    if (
+      agentType === 'codex' &&
+      this.codexEventOnlyModeEnabled &&
+      !this.codexEventOnlyCaptureFallbackEnabled
+    ) {
       this.eventHookFallbackActiveByInstance.delete(key);
+      this.eventHookStaleSinceByInstance.delete(key);
       return false;
     }
+    if (typeof this.deps.eventLifecycleStaleChecker !== 'function') {
+      this.eventHookFallbackActiveByInstance.delete(key);
+      this.eventHookStaleSinceByInstance.delete(key);
+      return false;
+    }
+    const now = Date.now();
     const stale = this.deps.eventLifecycleStaleChecker(projectName, instanceId, agentType);
     const wasActive = this.eventHookFallbackActiveByInstance.has(key);
     if (!pendingActive && !wasActive) {
       return false;
     }
+    if (stale) {
+      if (!this.eventHookStaleSinceByInstance.has(key)) {
+        this.eventHookStaleSinceByInstance.set(key, now);
+      }
+    } else {
+      this.eventHookStaleSinceByInstance.delete(key);
+    }
+
+    const staleSince = this.eventHookStaleSinceByInstance.get(key) ?? now;
+    const staleAgeMs = Math.max(0, now - staleSince);
+    const staleMatured = staleAgeMs >= this.eventHookCaptureFallbackStaleGraceMs;
     if (stale && !wasActive) {
+      if (!staleMatured) {
+        return false;
+      }
       this.eventHookFallbackActiveByInstance.add(key);
       console.warn(
-        `⚠️ Event-hook lifecycle stale; temporarily enabling capture fallback for ${projectName}/${instanceId}`,
+        `⚠️ Event-hook lifecycle stale; enabling capture fallback for ${projectName}/${instanceId} after ${this.formatDuration(staleAgeMs)} grace`,
       );
       return true;
     }
     if (!stale && wasActive) {
       this.eventHookFallbackActiveByInstance.delete(key);
+      this.eventHookStaleSinceByInstance.delete(key);
       console.log(`✅ Event-hook lifecycle recovered; disabling capture fallback for ${projectName}/${instanceId}`);
       return false;
     }
@@ -794,6 +1204,7 @@ export class BridgeCapturePoller {
     pendingDepth: number;
     codexWorkingHint?: boolean;
     channelId?: string;
+    outputVisibility?: ProgressOutputVisibility;
     deltaText: string;
   }): Promise<DeltaDeliveryResult> {
     const trimmed = params.deltaText.trim();
@@ -844,7 +1255,7 @@ export class BridgeCapturePoller {
     }
 
     if (!params.channelId) return { observedOutput: true, emittedOutput: false };
-    const sent = await this.sendOutput(params.channelId, trimmed, 'progress');
+    const sent = await this.sendOutput(params.channelId, trimmed, 'progress', params.outputVisibility);
     return { observedOutput: true, emittedOutput: sent };
   }
 
@@ -861,6 +1272,11 @@ export class BridgeCapturePoller {
         for (const instance of instances) {
           const key = this.captureKey(project.projectName, instance.instanceId);
           if (!instance.channelId) continue;
+          const workerOutputVisibility = this.resolveWorkerOutputVisibility({
+            project,
+            agentType: instance.agentType,
+            instanceId: instance.instanceId,
+          });
 
           const routeInfo = this.resolveOutputRoute(
             instance.channelId,
@@ -878,6 +1294,10 @@ export class BridgeCapturePoller {
             this.lastPendingTurnIdByInstance.set(key, pendingTurnId);
             if (previousPendingTurnId && previousPendingTurnId !== pendingTurnId) {
               this.progressHookInFlightByInstance.delete(key);
+              const retryState = this.supervisorFinalFormatRetryStateByInstance.get(key);
+              if (!retryState || retryState.lastTurnId !== pendingTurnId) {
+                this.supervisorFinalFormatRetryStateByInstance.delete(key);
+              }
             }
           }
           const pendingActive = routeInfo.pendingDepth > 0 || typeof pendingTurnId === 'string';
@@ -893,6 +1313,7 @@ export class BridgeCapturePoller {
             if (!fallback) continue;
           } else {
             this.eventHookFallbackActiveByInstance.delete(key);
+            this.eventHookStaleSinceByInstance.delete(key);
           }
 
           const now = Date.now();
@@ -923,6 +1344,7 @@ export class BridgeCapturePoller {
               instance.instanceId,
               routeInfo.channelId || instance.channelId,
               current,
+              workerOutputVisibility,
             );
             await this.maybeSendStalePendingAlert({
               key,
@@ -951,6 +1373,7 @@ export class BridgeCapturePoller {
               instance.instanceId,
               routeInfo.channelId || instance.channelId,
               current,
+              workerOutputVisibility,
             );
             await this.maybeSendStalePendingAlert({
               key,
@@ -974,6 +1397,7 @@ export class BridgeCapturePoller {
               instance.instanceId,
               routeInfo.channelId || instance.channelId,
               current,
+              workerOutputVisibility,
             );
             await this.maybeSendStalePendingAlert({
               key,
@@ -1023,6 +1447,32 @@ export class BridgeCapturePoller {
               // Failsafe: after repeated suppressions, stop swallowing deltas.
               // This avoids "typing forever" when filtering is too aggressive.
               this.promptEchoSuppressedPollsByInstance.delete(key);
+              const allowRawDeltaFallback = this.shouldDeliverPromptEchoFallbackRawDelta(
+                instance.agentType,
+                instance.eventHook === true,
+              );
+              if (!allowRawDeltaFallback) {
+                await this.handleQuietPending(
+                  key,
+                  routeInfo.pendingDepth,
+                  project.projectName,
+                  instance.agentType,
+                  instance.instanceId,
+                  routeInfo.channelId || instance.channelId,
+                  current,
+                  workerOutputVisibility,
+                );
+                await this.maybeSendStalePendingAlert({
+                  key,
+                  pendingDepth: routeInfo.pendingDepth,
+                  channelId: routeInfo.channelId || instance.channelId,
+                  projectName: project.projectName,
+                  agentType: instance.agentType,
+                  instanceId: instance.instanceId,
+                  now,
+                });
+                continue;
+              }
               const outputChannelId = routeInfo.channelId;
               if (
                 !outputChannelId &&
@@ -1036,6 +1486,7 @@ export class BridgeCapturePoller {
                   instance.instanceId,
                   routeInfo.channelId || instance.channelId,
                   current,
+                  workerOutputVisibility,
                 );
                 await this.maybeSendStalePendingAlert({
                   key,
@@ -1057,6 +1508,7 @@ export class BridgeCapturePoller {
                 pendingDepth: routeInfo.pendingDepth,
                 codexWorkingHint,
                 channelId: outputChannelId,
+                outputVisibility: workerOutputVisibility,
                 deltaText: delta,
               });
               if (fallbackDelivery.observedOutput) {
@@ -1088,6 +1540,7 @@ export class BridgeCapturePoller {
                   instance.instanceId,
                   routeInfo.channelId || instance.channelId,
                   current,
+                  workerOutputVisibility,
                 );
                 await this.maybeSendStalePendingAlert({
                   key,
@@ -1110,6 +1563,7 @@ export class BridgeCapturePoller {
               instance.instanceId,
               routeInfo.channelId || instance.channelId,
               current,
+              workerOutputVisibility,
             );
             continue;
           }
@@ -1128,6 +1582,7 @@ export class BridgeCapturePoller {
             pendingDepth: routeInfo.pendingDepth,
             codexWorkingHint,
             channelId: outputChannelId,
+            outputVisibility: workerOutputVisibility,
             deltaText: trimmedDelta,
           });
 
@@ -1161,6 +1616,7 @@ export class BridgeCapturePoller {
               instance.instanceId,
               routeInfo.channelId || instance.channelId,
               current,
+              workerOutputVisibility,
             );
             await this.maybeSendStalePendingAlert({
               key,
@@ -1189,6 +1645,7 @@ export class BridgeCapturePoller {
     instanceId: string,
     channelId?: string,
     captureSnapshot?: string,
+    outputVisibility?: ProgressOutputVisibility,
   ): Promise<void> {
     if (pendingDepth <= 0) {
       this.quietPendingPollsByInstance.delete(key);
@@ -1216,6 +1673,7 @@ export class BridgeCapturePoller {
         if (!hasBufferedOutput) {
           this.finalOnlyQuietFlushPollsByInstance.delete(key);
           this.lastPendingTurnIdByInstance.delete(key);
+          this.supervisorFinalFormatRetryStateByInstance.delete(key);
           this.progressHookHeartbeatByInstance.delete(key);
           this.progressHookInFlightByInstance.delete(key);
           return;
@@ -1234,6 +1692,7 @@ export class BridgeCapturePoller {
           agentType,
           projectName,
           instanceId,
+          outputVisibility,
         });
         this.finalOnlyQuietFlushPollsByInstance.delete(key);
         return;
@@ -1256,6 +1715,7 @@ export class BridgeCapturePoller {
       this.progressHookHeartbeatByInstance.delete(key);
       this.progressHookInFlightByInstance.delete(key);
       this.lastPendingTurnIdByInstance.delete(key);
+      this.supervisorFinalFormatRetryStateByInstance.delete(key);
       return;
     }
 
@@ -1341,6 +1801,22 @@ export class BridgeCapturePoller {
 
   private captureKey(projectName: string, instanceId: string): string {
     return `${projectName}::${instanceId}`;
+  }
+
+  private resolveWorkerOutputVisibility(params: {
+    project: ReturnType<typeof normalizeProjectState>;
+    agentType: string;
+    instanceId: string;
+  }): ProgressOutputVisibility | undefined {
+    const visibility = resolveOrchestratorWorkerVisibility({
+      project: params.project,
+      agentType: params.agentType,
+      instanceId: params.instanceId,
+    });
+    if (!visibility) return undefined;
+    if (visibility === 'hidden') return 'off';
+    if (visibility === 'thread') return 'thread';
+    return 'channel';
   }
 
   private resolveOutputRoute(
