@@ -88,6 +88,7 @@ describe('BridgeMessageRouter (codex)', () => {
     delete process.env.AGENT_DISCORD_CODEX_AUTO_SUBAGENT_MIN_LINES;
     delete process.env.AGENT_DISCORD_CODEX_AUTO_SUBAGENT_MIN_BULLETS;
     delete process.env.AGENT_DISCORD_CODEX_AUTO_LONGTASK_REPORT_MODE;
+    delete process.env.AGENT_DISCORD_CODEX_AUTO_LANGUAGE_POLICY_MODE;
     delete process.env.MUDCODE_CODEX_AUTO_SKILL_LINK;
     delete process.env.AGENT_DISCORD_SNAPSHOT_LONG_OUTPUT_THREAD_THRESHOLD;
     delete process.env.AGENT_DISCORD_SNAPSHOT_CAPTURE_HISTORY_LINES;
@@ -575,6 +576,98 @@ describe('BridgeMessageRouter (codex)', () => {
     const sentPrompt = String(tmux.typeKeysToWindow.mock.calls[0]?.[2] ?? '');
     expect(sentPrompt).toBe('continue');
     expect(sentPrompt).not.toContain('[mudcode longtask-report]');
+  });
+
+  it('auto-injects language policy hint for korean codex prompts', async () => {
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_AUTO_LANGUAGE_POLICY_MODE = 'korean';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', '이 코드 구조를 점검하고 개선해줘', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    const sentPrompt = String(tmux.typeKeysToWindow.mock.calls[0]?.[2] ?? '');
+    expect(sentPrompt).toContain('[mudcode language-policy]');
+    expect(sentPrompt).toContain('Reason and plan internally in English');
+    expect(sentPrompt).toContain('final user-facing response in the user\'s language');
+  });
+
+  it('does not inject language policy hint for english prompt in korean mode', async () => {
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_AUTO_LONGTASK_REPORT_MODE = 'off';
+    process.env.AGENT_DISCORD_CODEX_AUTO_LANGUAGE_POLICY_MODE = 'korean';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', 'refactor this module', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    const sentPrompt = String(tmux.typeKeysToWindow.mock.calls[0]?.[2] ?? '');
+    expect(sentPrompt).toBe('refactor this module');
+    expect(sentPrompt).not.toContain('[mudcode language-policy]');
   });
 
   it('re-sends Enter when codex submit verification still sees prompt tail', async () => {

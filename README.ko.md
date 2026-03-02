@@ -213,6 +213,7 @@ Self-check:
 - `AGENT_DISCORD_CODEX_IO_V2_DIR=/path` : transcript 저장 루트 경로 변경
 - `MUDCODE_CODEX_AUTO_SKILL_LINK=0` : 자동 skill 힌트 비활성화
 - `AGENT_DISCORD_CODEX_AUTO_LONGTASK_REPORT_MODE=continue|auto|always|off` : 긴 작업 실행/보고 스타일 힌트 자동 주입 (`continue` 기본값)
+- `AGENT_DISCORD_CODEX_AUTO_LANGUAGE_POLICY_MODE=off|korean|always` : 기본값 `korean`, 한글 입력 감지 시 영어 내부 추론 정책 힌트 자동 주입
 - `AGENT_DISCORD_CODEX_EVENT_ONLY=1|0` : 기본값 `1`, `0`이면 기존 direct capture 출력 경로 유지
 - `AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK=0|1` : 기본값 `0`, `1`이면 tmux stale fallback capture 재활성화
 - `AGENT_DISCORD_EVENT_LIFECYCLE_STRICT_MODE=off|warn|reject` : 기본값 `warn`

@@ -103,6 +103,7 @@ type MaintenanceCommand =
   | { kind: 'orchestrator-disable' }
   | { kind: 'orchestrator-help'; message: string };
 type CodexLongTaskReportMode = 'off' | 'continue' | 'auto' | 'always';
+type CodexLanguagePolicyMode = 'off' | 'korean' | 'always';
 
 interface OrchestratorQueuedTask {
   taskId: string;
@@ -2118,6 +2119,18 @@ export class BridgeMessageRouter {
     return 'continue';
   }
 
+  private resolveCodexLanguagePolicyMode(): CodexLanguagePolicyMode {
+    const raw = (process.env.AGENT_DISCORD_CODEX_AUTO_LANGUAGE_POLICY_MODE || '').trim().toLowerCase();
+    if (raw === 'off' || raw === 'korean' || raw === 'always') return raw;
+    if (['1', 'true', 'yes', 'on'].includes(raw)) return 'korean';
+    if (['0', 'false', 'no'].includes(raw)) return 'off';
+    return 'korean';
+  }
+
+  private hasKoreanCharacters(text: string): boolean {
+    return /[\u3131-\u318E\uAC00-\uD7A3]/.test(text);
+  }
+
   private isCodexContinuationPrompt(prompt: string): boolean {
     const normalized = prompt.trim().toLowerCase();
     if (normalized.length === 0) return false;
@@ -2157,6 +2170,29 @@ export class BridgeMessageRouter {
       '  2) Changes (file/behavior deltas only)',
       '  3) Verification (commands run + pass/fail)',
       '[/mudcode longtask-report]',
+    ].join('\n');
+
+    const augmented = `${prompt.trimEnd()}\n\n${hint}`;
+    return { prompt: augmented, applied: true };
+  }
+
+  private maybeAugmentCodexPromptForLanguagePolicy(prompt: string): { prompt: string; applied: boolean } {
+    if (prompt.trim().length === 0) return { prompt, applied: false };
+    if (/\[mudcode language-policy\]/i.test(prompt)) return { prompt, applied: false };
+
+    const mode = this.resolveCodexLanguagePolicyMode();
+    if (mode === 'off') return { prompt, applied: false };
+    if (mode === 'korean' && !this.hasKoreanCharacters(prompt)) {
+      return { prompt, applied: false };
+    }
+
+    const hint = [
+      '[mudcode language-policy]',
+      'Language execution policy:',
+      '- Reason and plan internally in English for coding/tool operations.',
+      '- Keep code, commands, and technical identifiers in their natural language form.',
+      '- Write the final user-facing response in the user\'s language unless explicitly requested otherwise.',
+      '[/mudcode language-policy]',
     ].join('\n');
 
     const augmented = `${prompt.trimEnd()}\n\n${hint}`;
@@ -3553,7 +3589,13 @@ export class BridgeMessageRouter {
                 `🧭 [${projectName}/${resolvedAgentType}] long-task report hint injected`,
               );
             }
-            promptToSend = longTaskHinted.prompt;
+            const languagePolicyHinted = this.maybeAugmentCodexPromptForLanguagePolicy(longTaskHinted.prompt);
+            if (languagePolicyHinted.applied) {
+              console.log(
+                `🌐 [${projectName}/${resolvedAgentType}] language-policy hint injected`,
+              );
+            }
+            promptToSend = languagePolicyHinted.prompt;
           } else {
             promptToSend = sanitized;
           }

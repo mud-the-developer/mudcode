@@ -213,6 +213,7 @@ Environment toggles:
 - `AGENT_DISCORD_CODEX_IO_V2_DIR=/path` to change transcript root directory
 - `MUDCODE_CODEX_AUTO_SKILL_LINK=0` to disable automatic skill-link hints
 - `AGENT_DISCORD_CODEX_AUTO_LONGTASK_REPORT_MODE=continue|auto|always|off` to auto-append long-task execution/reporting policy hints (`continue` default)
+- `AGENT_DISCORD_CODEX_AUTO_LANGUAGE_POLICY_MODE=off|korean|always` (default `korean`; inject an English-internal-reasoning policy when Korean is detected)
 - `AGENT_DISCORD_CODEX_EVENT_ONLY=1|0` (default `1`, set `0` to keep legacy direct capture output path)
 - `AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK=0|1` (default `0`, set `1` to re-enable tmux stale fallback capture)
 - `AGENT_DISCORD_EVENT_LIFECYCLE_STRICT_MODE=off|warn|reject` (default `warn`)
