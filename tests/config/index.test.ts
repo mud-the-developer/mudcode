@@ -115,6 +115,7 @@ describe('ConfigManager', () => {
         captureHistoryLines: 1800,
         captureRedrawTailLines: 120,
         longOutputThreadThreshold: 2500,
+        captureFinalBufferMaxChars: 180000,
         captureProgressOutput: 'thread',
       };
       storage.setFile(configFile, JSON.stringify(storedConfig));
@@ -146,6 +147,7 @@ describe('ConfigManager', () => {
       expect(config.capture?.historyLines).toBe(1800);
       expect(config.capture?.redrawTailLines).toBe(120);
       expect(config.capture?.longOutputThreadThreshold).toBe(2500);
+      expect(config.capture?.finalBufferMaxChars).toBe(180000);
       expect(config.capture?.progressOutput).toBe('thread');
     });
 
@@ -173,6 +175,7 @@ describe('ConfigManager', () => {
       env.set('AGENT_DISCORD_CAPTURE_HISTORY_LINES', '2000');
       env.set('AGENT_DISCORD_CAPTURE_REDRAW_TAIL_LINES', '140');
       env.set('AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD', '3000');
+      env.set('AGENT_DISCORD_CAPTURE_FINAL_BUFFER_MAX_CHARS', '140000');
       env.set('AGENT_DISCORD_CAPTURE_PROGRESS_OUTPUT', 'off');
 
       const manager = new ConfigManager(storage, env, configDir);
@@ -199,6 +202,7 @@ describe('ConfigManager', () => {
       expect(config.capture?.historyLines).toBe(2000);
       expect(config.capture?.redrawTailLines).toBe(140);
       expect(config.capture?.longOutputThreadThreshold).toBe(3000);
+      expect(config.capture?.finalBufferMaxChars).toBe(140000);
       expect(config.capture?.progressOutput).toBe('off');
     });
 
@@ -428,6 +432,28 @@ describe('ConfigManager', () => {
       const manager = new ConfigManager(storage, env, configDir);
 
       expect(() => manager.validateConfig()).toThrow(/AGENT_DISCORD_CAPTURE_PROGRESS_OUTPUT/);
+    });
+
+    it('validateConfig throws for invalid AGENT_DISCORD_CAPTURE_FINAL_BUFFER_MAX_CHARS value', () => {
+      const storage = new MockStorage();
+      const env = new MockEnvironment();
+      env.set('DISCORD_BOT_TOKEN', 'valid-token');
+      env.set('AGENT_DISCORD_CAPTURE_FINAL_BUFFER_MAX_CHARS', '3000');
+
+      const manager = new ConfigManager(storage, env, configDir);
+
+      expect(() => manager.validateConfig()).toThrow(/AGENT_DISCORD_CAPTURE_FINAL_BUFFER_MAX_CHARS/);
+    });
+
+    it('validateConfig throws for invalid stored captureFinalBufferMaxChars', () => {
+      const storage = new MockStorage();
+      const env = new MockEnvironment();
+      env.set('DISCORD_BOT_TOKEN', 'valid-token');
+      storage.setFile(configFile, JSON.stringify({ captureFinalBufferMaxChars: 700000 }));
+
+      const manager = new ConfigManager(storage, env, configDir);
+
+      expect(() => manager.validateConfig()).toThrow(/captureFinalBufferMaxChars/);
     });
 
     it('validateConfig auto-clamps legacy AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD from env', () => {

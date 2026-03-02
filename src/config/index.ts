@@ -35,6 +35,7 @@ export interface StoredConfig {
   captureHistoryLines?: number;
   captureRedrawTailLines?: number;
   longOutputThreadThreshold?: number;
+  captureFinalBufferMaxChars?: number;
   captureProgressOutput?: 'off' | 'thread' | 'channel';
   keepChannelOnStop?: boolean;
   slackBotToken?: string;
@@ -45,6 +46,8 @@ export interface StoredConfig {
 const LONG_OUTPUT_THREAD_THRESHOLD_MIN = 1200;
 const LONG_OUTPUT_THREAD_THRESHOLD_MAX = 20000;
 const LEGACY_LONG_OUTPUT_THREAD_THRESHOLD_MAX = 100000;
+const CAPTURE_FINAL_BUFFER_MAX_CHARS_MIN = 4000;
+const CAPTURE_FINAL_BUFFER_MAX_CHARS_MAX = 500000;
 
 export class ConfigManager {
   private storage: IStorage;
@@ -162,6 +165,12 @@ export class ConfigManager {
         storedConfig.longOutputThreadThreshold,
         this.env.get('AGENT_DISCORD_LONG_OUTPUT_THREAD_THRESHOLD'),
       );
+      const captureFinalBufferMaxChars = this.resolveCaptureLineCount(
+        storedConfig.captureFinalBufferMaxChars,
+        this.env.get('AGENT_DISCORD_CAPTURE_FINAL_BUFFER_MAX_CHARS'),
+        CAPTURE_FINAL_BUFFER_MAX_CHARS_MIN,
+        CAPTURE_FINAL_BUFFER_MAX_CHARS_MAX,
+      );
       const captureProgressOutput = this.resolveCaptureProgressOutput(
         storedConfig.captureProgressOutput,
         this.env.get('AGENT_DISCORD_CAPTURE_PROGRESS_OUTPUT'),
@@ -177,6 +186,7 @@ export class ConfigManager {
         captureHistoryLines !== undefined ||
         captureRedrawTailLines !== undefined ||
         longOutputThreadThreshold !== undefined ||
+        captureFinalBufferMaxChars !== undefined ||
         captureProgressOutput !== undefined
           ? {
               ...(capturePollMs !== undefined ? { pollMs: capturePollMs } : {}),
@@ -191,6 +201,7 @@ export class ConfigManager {
               ...(captureHistoryLines !== undefined ? { historyLines: captureHistoryLines } : {}),
               ...(captureRedrawTailLines !== undefined ? { redrawTailLines: captureRedrawTailLines } : {}),
               ...(longOutputThreadThreshold !== undefined ? { longOutputThreadThreshold } : {}),
+              ...(captureFinalBufferMaxChars !== undefined ? { finalBufferMaxChars: captureFinalBufferMaxChars } : {}),
               ...(captureProgressOutput !== undefined ? { progressOutput: captureProgressOutput } : {}),
             }
           : undefined;
@@ -798,6 +809,20 @@ export class ConfigManager {
       );
     }
 
+    const rawStoredCaptureFinalBufferMaxChars = storedConfig.captureFinalBufferMaxChars;
+    if (
+      rawStoredCaptureFinalBufferMaxChars !== undefined &&
+      this.parseCaptureLineCountCandidate(
+        rawStoredCaptureFinalBufferMaxChars,
+        CAPTURE_FINAL_BUFFER_MAX_CHARS_MIN,
+        CAPTURE_FINAL_BUFFER_MAX_CHARS_MAX,
+      ) === undefined
+    ) {
+      errors.push(
+        `Stored captureFinalBufferMaxChars must be an integer between ${CAPTURE_FINAL_BUFFER_MAX_CHARS_MIN} and ${CAPTURE_FINAL_BUFFER_MAX_CHARS_MAX} (received: ${String(rawStoredCaptureFinalBufferMaxChars)})`,
+      );
+    }
+
     const rawEnvCaptureHistoryLines = this.env.get('AGENT_DISCORD_CAPTURE_HISTORY_LINES');
     if (rawEnvCaptureHistoryLines !== undefined && this.parseCaptureLineCountCandidate(rawEnvCaptureHistoryLines, 300, 4000) === undefined) {
       errors.push(
@@ -894,6 +919,20 @@ export class ConfigManager {
     ) {
       errors.push(
         `AGENT_DISCORD_CAPTURE_PROGRESS_OUTPUT must be "off", "thread", or "channel" (received: ${rawEnvCaptureProgressOutput})`,
+      );
+    }
+
+    const rawEnvCaptureFinalBufferMaxChars = this.env.get('AGENT_DISCORD_CAPTURE_FINAL_BUFFER_MAX_CHARS');
+    if (
+      rawEnvCaptureFinalBufferMaxChars !== undefined &&
+      this.parseCaptureLineCountCandidate(
+        rawEnvCaptureFinalBufferMaxChars,
+        CAPTURE_FINAL_BUFFER_MAX_CHARS_MIN,
+        CAPTURE_FINAL_BUFFER_MAX_CHARS_MAX,
+      ) === undefined
+    ) {
+      errors.push(
+        `AGENT_DISCORD_CAPTURE_FINAL_BUFFER_MAX_CHARS must be an integer between ${CAPTURE_FINAL_BUFFER_MAX_CHARS_MIN} and ${CAPTURE_FINAL_BUFFER_MAX_CHARS_MAX} (received: ${rawEnvCaptureFinalBufferMaxChars})`,
       );
     }
 

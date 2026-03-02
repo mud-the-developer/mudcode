@@ -81,6 +81,31 @@ describe('AgentRegistry', () => {
     expect(result?.agent).toBe(adapter);
   });
 
+  it('should parse channel names with trailing random instance suffix', () => {
+    const registry = new AgentRegistry();
+    const adapter = new TestAdapter('claude', 'claude');
+
+    registry.register(adapter);
+
+    const result = registry.parseChannelName('myproject-claude-2-ab12cd');
+    expect(result).not.toBeNull();
+    expect(result?.projectName).toBe('myproject');
+    expect(result?.agent).toBe(adapter);
+  });
+
+  it('should prefer the suffix closest to the end of the channel name', () => {
+    const registry = new AgentRegistry();
+    const claude = new TestAdapter('claude', 'claude');
+    const opencode = new TestAdapter('opencode', 'opencode');
+    registry.register(claude);
+    registry.register(opencode);
+
+    const result = registry.parseChannelName('proj-claude-lab-opencode-k9a1bc');
+    expect(result).not.toBeNull();
+    expect(result?.projectName).toBe('proj-claude-lab');
+    expect(result?.agent).toBe(opencode);
+  });
+
   it('should return null for unmatched channel name', () => {
     const registry = new AgentRegistry();
     const adapter = new TestAdapter('claude', 'claude');

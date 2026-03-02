@@ -24,6 +24,7 @@ export class StateManager implements IStateManager {
   private storage: IStorage;
   private stateDir: string;
   private stateFile: string;
+  private pendingLastActiveSaveTimer?: ReturnType<typeof setTimeout>;
 
   constructor(storage?: IStorage, stateDir?: string, stateFile?: string) {
     this.storage = storage || new FileStorage();
@@ -60,7 +61,33 @@ export class StateManager implements IStateManager {
     this.storage.writeFile(this.stateFile, JSON.stringify(this.state, null, 2));
   }
 
+  private resolveLastActiveSaveDebounceMs(): number {
+    const raw = process.env.MUDCODE_STATE_LAST_ACTIVE_SAVE_DEBOUNCE_MS;
+    if (!raw) return 1500;
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed)) return 1500;
+    return Math.min(60_000, Math.max(100, Math.trunc(parsed)));
+  }
+
+  private clearPendingLastActiveSave(): void {
+    if (!this.pendingLastActiveSaveTimer) return;
+    clearTimeout(this.pendingLastActiveSaveTimer);
+    this.pendingLastActiveSaveTimer = undefined;
+  }
+
+  private scheduleLastActiveSave(): void {
+    if (this.pendingLastActiveSaveTimer) return;
+    const delayMs = this.resolveLastActiveSaveDebounceMs();
+    const timer = setTimeout(() => {
+      this.pendingLastActiveSaveTimer = undefined;
+      this.saveState();
+    }, delayMs);
+    timer.unref?.();
+    this.pendingLastActiveSaveTimer = timer;
+  }
+
   reload(): void {
+    this.clearPendingLastActiveSave();
     this.state = this.loadState();
   }
 
@@ -70,11 +97,13 @@ export class StateManager implements IStateManager {
 
   setProject(project: ProjectState): void {
     this.state.projects[project.projectName] = normalizeProjectState(project);
+    this.clearPendingLastActiveSave();
     this.saveState();
   }
 
   removeProject(projectName: string): void {
     delete this.state.projects[projectName];
+    this.clearPendingLastActiveSave();
     this.saveState();
   }
 
@@ -88,6 +117,7 @@ export class StateManager implements IStateManager {
 
   setGuildId(guildId: string): void {
     this.state.guildId = guildId;
+    this.clearPendingLastActiveSave();
     this.saveState();
   }
 
@@ -97,13 +127,14 @@ export class StateManager implements IStateManager {
 
   setWorkspaceId(id: string): void {
     this.state.slackWorkspaceId = id;
+    this.clearPendingLastActiveSave();
     this.saveState();
   }
 
   updateLastActive(projectName: string): void {
     if (this.state.projects[projectName]) {
       this.state.projects[projectName].lastActive = new Date();
-      this.saveState();
+      this.scheduleLastActiveSave();
     }
   }
 

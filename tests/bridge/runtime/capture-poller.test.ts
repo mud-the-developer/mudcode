@@ -43,6 +43,7 @@ describe('BridgeCapturePoller', () => {
     delete process.env.AGENT_DISCORD_CAPTURE_FILTER_PROMPT_ECHO;
     delete process.env.AGENT_DISCORD_CAPTURE_PROMPT_ECHO_MAX_POLLS;
     delete process.env.AGENT_DISCORD_CAPTURE_REDRAW_TAIL_LINES;
+    delete process.env.AGENT_DISCORD_CAPTURE_FINAL_BUFFER_MAX_CHARS;
     delete process.env.AGENT_DISCORD_CAPTURE_PROMPT_ECHO_FALLBACK_EVENT_HOOK;
     delete process.env.AGENT_DISCORD_EVENT_HOOK_CAPTURE_FALLBACK_STALE_GRACE_MS;
     delete process.env.AGENT_DISCORD_CODEX_EVENT_PROGRESS_MODE;
@@ -66,6 +67,7 @@ describe('BridgeCapturePoller', () => {
     delete process.env.AGENT_DISCORD_CAPTURE_FILTER_PROMPT_ECHO;
     delete process.env.AGENT_DISCORD_CAPTURE_PROMPT_ECHO_MAX_POLLS;
     delete process.env.AGENT_DISCORD_CAPTURE_REDRAW_TAIL_LINES;
+    delete process.env.AGENT_DISCORD_CAPTURE_FINAL_BUFFER_MAX_CHARS;
     delete process.env.AGENT_DISCORD_CAPTURE_PROMPT_ECHO_FALLBACK_EVENT_HOOK;
     delete process.env.AGENT_DISCORD_EVENT_HOOK_CAPTURE_FALLBACK_STALE_GRACE_MS;
     delete process.env.AGENT_DISCORD_CODEX_EVENT_PROGRESS_MODE;
@@ -515,6 +517,78 @@ describe('BridgeCapturePoller', () => {
 
     expect(messaging.sendToChannel).toHaveBeenCalledTimes(1);
     expect(messaging.sendToChannel).toHaveBeenCalledWith('thread-ch', 'step one\nstep two\nstep three');
+
+    poller.stop();
+  });
+
+  it('applies char-budget truncation for final-only buffered output', async () => {
+    delete process.env.AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY;
+    process.env.AGENT_DISCORD_CAPTURE_FINAL_BUFFER_MAX_CHARS = '4000';
+
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'parent-ch',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const lineOne = `line-1 ${'A'.repeat(1900)}`;
+    const lineTwo = `line-2 ${'B'.repeat(1900)}`;
+    const lineThree = `line-3 ${'C'.repeat(1900)}`;
+    const tmux = createTmux([
+      'boot line',
+      `boot line\n${lineOne}`,
+      `boot line\n${lineOne}\n${lineTwo}`,
+      `boot line\n${lineOne}\n${lineTwo}`,
+      `boot line\n${lineOne}\n${lineTwo}`,
+      `boot line\n${lineOne}\n${lineTwo}\n${lineThree}`,
+      `boot line\n${lineOne}\n${lineTwo}\n${lineThree}`,
+    ]);
+
+    let pendingDepth = 1;
+    const pendingTracker = {
+      getPendingChannel: vi.fn().mockImplementation(() => (pendingDepth > 0 ? 'thread-ch' : undefined)),
+      getPendingDepth: vi.fn().mockImplementation(() => pendingDepth),
+      getPendingMessageId: vi.fn().mockImplementation(() => (pendingDepth > 0 ? 'msg-1' : undefined)),
+      markCompleted: vi.fn().mockImplementation(async () => {
+        pendingDepth = 0;
+      }),
+    } as any;
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      intervalMs: 300,
+    });
+
+    poller.start();
+    await Promise.resolve();
+
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(messaging.sendLongOutput).toHaveBeenCalledTimes(1);
+    const delivered = String(messaging.sendLongOutput.mock.calls[0]?.[1] ?? '');
+    expect(delivered).toContain('[truncated by final-output buffer gate]');
+    expect(delivered).toContain('line-3');
+    expect(delivered).not.toContain('line-1');
 
     poller.stop();
   });

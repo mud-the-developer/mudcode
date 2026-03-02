@@ -22,6 +22,40 @@ export function toProjectScopedName(projectName: string, base: string, instanceI
   return toSharedWindowName(projectName, `${base}-${instanceId}`);
 }
 
+export function buildRandomChannelInstanceName(length: number = 6): string {
+  const safeLength = Math.max(4, Math.min(12, Math.trunc(length) || 6));
+  let token = '';
+  while (token.length < safeLength) {
+    token += Math.random().toString(36).slice(2);
+  }
+  return token.slice(0, safeLength);
+}
+
+export function toProjectScopedChannelName(
+  projectName: string,
+  base: string,
+  instanceId: string,
+  channelInstanceName: string = buildRandomChannelInstanceName(),
+  maxLength: number = 80,
+): string {
+  const scoped = toProjectScopedName(projectName, base, instanceId);
+  const normalizedInstanceName = channelInstanceName
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '')
+    .slice(0, 12);
+  const instanceToken = normalizedInstanceName.length > 0
+    ? normalizedInstanceName
+    : buildRandomChannelInstanceName();
+  const suffix = `-${instanceToken}`;
+  const resolvedMaxLength = Number.isFinite(maxLength)
+    ? Math.max(suffix.length + 1, Math.trunc(maxLength))
+    : 80;
+  const scopedMaxLength = Math.max(1, resolvedMaxLength - suffix.length);
+  const clippedScoped = scoped.slice(0, scopedMaxLength).replace(/[-_]+$/g, '');
+  const prefix = clippedScoped.length > 0 ? clippedScoped : (scoped.slice(0, scopedMaxLength) || 'channel');
+  return `${prefix}${suffix}`;
+}
+
 export function resolveProjectWindowName(
   project: ProjectState,
   agentName: string,

@@ -105,6 +105,10 @@ describe('BridgeMessageRouter (codex)', () => {
     delete process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_PLANNER;
     delete process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_SPAWN;
     delete process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_SPAWN_WORKERS;
+    delete process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_CLEANUP_UNUSED_WORKERS;
+    delete process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_CLEANUP_INTERVAL_MS;
+    delete process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_CLEANUP_IDLE_MS;
+    delete process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_CLEANUP_MAX_REMOVALS;
     delete process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_PLANNER_PROMPT_MAX_CHARS;
     delete process.env.AGENT_DISCORD_ORCHESTRATOR_CONTEXT_BUDGET_CHARS;
     delete process.env.AGENT_DISCORD_ORCHESTRATOR_ROLLING_SUMMARY_MAX_ITEMS;
@@ -438,6 +442,55 @@ describe('BridgeMessageRouter (codex)', () => {
     const sentPrompt = String(tmux.typeKeysToWindow.mock.calls[0]?.[2] ?? '');
     expect(sentPrompt).toContain('[mudcode auto-subagent]');
     expect(sentPrompt).toContain('sub-agent Codex workers');
+    expect(sentPrompt).toContain('spawn_agent workers <= 6');
+    expect(sentPrompt).toContain('If thread limit is reached, do not stop');
+  });
+
+  it('uses configured sub-agent thread cap value in auto-subagent hint', async () => {
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_AUTO_SUBAGENT = '1';
+    process.env.AGENT_DISCORD_CODEX_AUTO_SUBAGENT_MIN_CHARS = '2400';
+    process.env.AGENT_DISCORD_CODEX_AUTO_SUBAGENT_THREAD_CAP = '9';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    const longPrompt = `Refactor this module:\n\n${'A'.repeat(2600)}`;
+    await callback('codex', longPrompt, 'demo', 'ch-1', 'msg-1', 'codex');
+
+    const sentPrompt = String(tmux.typeKeysToWindow.mock.calls[0]?.[2] ?? '');
+    expect(sentPrompt).toContain('spawn_agent workers <= 9');
   });
 
   it('does not inject sub-agent hint when prompt already requests sub-agent split', async () => {
@@ -639,6 +692,7 @@ describe('BridgeMessageRouter (codex)', () => {
     expect(sentPrompt).toContain('continue');
     expect(sentPrompt).toContain('[mudcode supervisor-orchestrator-guard]');
     expect(sentPrompt).toContain('Do not directly implement code before delegating');
+    expect(sentPrompt).toContain('thread capacity is unavailable');
   });
 
   it('auto-injects language policy hint for korean codex prompts', async () => {
@@ -1262,6 +1316,113 @@ describe('BridgeMessageRouter (codex)', () => {
     expect(tmux.typeKeysToWindow).not.toHaveBeenCalled();
   });
 
+  it('runs /repair with doctor auto-fix and schedules daemon restart', async () => {
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+    const doctorRunner = vi.fn().mockResolvedValue({
+      ok: true,
+      fixed: true,
+      issues: [],
+      fixes: [{ code: 'save-config-threshold', message: 'saved 20000' }],
+      summary: {
+        configPath: '/tmp/config.json',
+        storedThreshold: 20000,
+        envThresholdRaw: undefined,
+        effectiveThreshold: 20000,
+      },
+    });
+    const backgroundCliRunner = vi.fn();
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      doctorRunner,
+      backgroundCliRunner,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', '/repair', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    expect(doctorRunner).toHaveBeenCalledWith({ fix: true });
+    expect(backgroundCliRunner).toHaveBeenCalledWith(['daemon', 'restart'], 500);
+    const sentMessages = messaging.sendToChannel.mock.calls.map((call: unknown[]) => String(call[1] || ''));
+    expect(sentMessages.some((line) => line.includes('Running doctor auto-fix'))).toBe(true);
+    expect(sentMessages.some((line) => line.includes('Scheduling daemon restart after repair'))).toBe(true);
+    expect(tmux.typeKeysToWindow).not.toHaveBeenCalled();
+  });
+
+  it('does not restart daemon when /repair doctor step fails', async () => {
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+    const doctorRunner = vi.fn().mockRejectedValue(new Error('boom'));
+    const backgroundCliRunner = vi.fn();
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      doctorRunner,
+      backgroundCliRunner,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', '/repair', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    expect(doctorRunner).toHaveBeenCalledWith({ fix: true });
+    expect(backgroundCliRunner).not.toHaveBeenCalled();
+    expect(messaging.sendToChannel).toHaveBeenCalledWith(
+      'ch-1',
+      expect.stringContaining('Repair step failed during doctor run'),
+    );
+  });
+
   it('schedules /update command in background', async () => {
     const { messaging, getCallback } = createMessagingMock();
     const tmux = {
@@ -1730,6 +1891,175 @@ describe('BridgeMessageRouter (codex)', () => {
       'ch-1',
       expect.stringContaining('Removed worker `codex-3`'),
     );
+  });
+
+  it('auto-cleans idle orchestrator workers before dispatch', async () => {
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_ENABLE = '1';
+    process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_DISPATCH_MODE = 'off';
+    process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_CLEANUP_UNUSED_WORKERS = '1';
+    process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_CLEANUP_INTERVAL_MS = '5000';
+    process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_CLEANUP_IDLE_MS = '60000';
+    process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_CLEANUP_MAX_REMOVALS = '2';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      capturePaneFromWindow: vi.fn().mockReturnValue('Esc to interrupt'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    let projectState = {
+      ...createMultiInstanceProjectState(),
+      orchestrator: {
+        enabled: true,
+        supervisorInstanceId: 'codex',
+        workerInstanceIds: ['codex-2'],
+        workerFinalVisibility: 'hidden',
+      },
+    };
+    const stateManager = {
+      getProject: vi.fn().mockImplementation(() => projectState),
+      setProject: vi.fn().mockImplementation((next) => {
+        projectState = next;
+      }),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      getRuntimeSnapshot: vi.fn().mockImplementation((_projectName: string, _agentType: string, instanceId?: string) => {
+        if (instanceId === 'codex-2') {
+          return {
+            pendingDepth: 0,
+            lastTerminalStage: 'completed',
+            lastTerminalAgeMs: 12 * 60 * 1000,
+          };
+        }
+        return { pendingDepth: 0 };
+      }),
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+    const orchestratorWorkerProvisioner = {
+      spawnCodexWorkers: vi.fn(),
+      teardownWorker: vi.fn().mockImplementation(async () => {
+        const removed = projectState.instances?.['codex-2'];
+        const nextInstances = { ...(projectState.instances || {}) };
+        delete nextInstances['codex-2'];
+        projectState = {
+          ...projectState,
+          instances: nextInstances,
+        };
+        return {
+          removed: true,
+          removedInstance: removed,
+        };
+      }),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      orchestratorWorkerProvisioner,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', 'ship it', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    expect(orchestratorWorkerProvisioner.teardownWorker).toHaveBeenCalledWith({
+      projectName: 'demo',
+      workerInstanceId: 'codex-2',
+    });
+    expect(projectState.instances?.['codex-2']).toBeUndefined();
+    expect(projectState.orchestrator?.workerInstanceIds || []).not.toContain('codex-2');
+    expect(messaging.sendToChannel).toHaveBeenCalledWith(
+      'ch-1',
+      expect.stringContaining('Auto worker cleanup removed'),
+    );
+  });
+
+  it('does not auto-clean active orchestrator workers', async () => {
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_ENABLE = '1';
+    process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_DISPATCH_MODE = 'off';
+    process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_CLEANUP_UNUSED_WORKERS = '1';
+    process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_CLEANUP_INTERVAL_MS = '5000';
+    process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_CLEANUP_IDLE_MS = '60000';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      capturePaneFromWindow: vi.fn().mockReturnValue('Esc to interrupt'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const projectState = {
+      ...createMultiInstanceProjectState(),
+      orchestrator: {
+        enabled: true,
+        supervisorInstanceId: 'codex',
+        workerInstanceIds: ['codex-2'],
+        workerFinalVisibility: 'hidden',
+      },
+    };
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(projectState),
+      setProject: vi.fn(),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      getRuntimeSnapshot: vi.fn().mockImplementation((_projectName: string, _agentType: string, instanceId?: string) => {
+        if (instanceId === 'codex-2') {
+          return { pendingDepth: 1 };
+        }
+        return { pendingDepth: 0 };
+      }),
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+    const orchestratorWorkerProvisioner = {
+      spawnCodexWorkers: vi.fn(),
+      teardownWorker: vi.fn().mockResolvedValue({ removed: false, warning: 'busy' }),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      orchestratorWorkerProvisioner,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', 'ship it', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    expect(orchestratorWorkerProvisioner.teardownWorker).not.toHaveBeenCalled();
+    expect(projectState.instances?.['codex-2']).toBeTruthy();
+    const sentMessages = messaging.sendToChannel.mock.calls.map((call: unknown[]) => String(call[1] || ''));
+    expect(sentMessages.some((line) => line.includes('Auto worker cleanup removed'))).toBe(false);
   });
 
   it('returns orchestrator status summary via runtime command', async () => {

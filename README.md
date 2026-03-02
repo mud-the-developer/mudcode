@@ -68,10 +68,13 @@ mudcode attach my-app --instance codex
 - `mudcode status`: show config + runtime status
 - `mudcode health [--json]`: run diagnostics
 - `mudcode daemon <start|stop|status|restart>`: manage daemon
+- `mudcode doctor [--fix]`: detect config/env/runtime drift and optionally auto-fix
+- `mudcode update [--git]`: update to latest (auto git mode supported)
 - `mudcode stop [project] --instance <id>`: stop one instance
 - `mudcode skill list [--all]`: list skills from `AGENTS.md` and `.agents/skills`
 - `mudcode skill install [name]`: install local/no-api skills into Codex skills dir
 - `mudcode config --show`: print current config
+- `mudcode config --capture-final-buffer-max-chars <n>`: tune final-only buffer budget
 - `mudcode uninstall`: remove mudcode from machine
 
 ## Prompt Refiner (Shadow Mode)
@@ -160,6 +163,7 @@ Use these inside mapped channels/threads:
 - `/health`
 - `/snapshot`
 - `/io` (show Codex I/O tracker status + latest transcript path)
+- `/repair` (run `doctor --fix` + schedule daemon restart)
 - `/orchestrator status|run|spawn|remove|enable|disable` (manual supervisor/worker orchestration controls; disabled by default)
   - run usage: `/orchestrator run <workerInstanceId> [--priority high|normal|low] <task>` (or `p2|p1|p0 <task>`)
   - spawn usage: `/orchestrator spawn [count]` (default `1`, max `15`)
@@ -188,6 +192,10 @@ Orchestrator automation:
 - `AGENT_DISCORD_ORCHESTRATOR_AUTO_DISPATCH_MAX_WORKERS=<n>` (default `1`, max workers for auto fanout dispatch; max `15`)
 - `AGENT_DISCORD_ORCHESTRATOR_AUTO_SPAWN=1|0` (default `1`, auto-provision codex workers when auto-dispatch has no workers)
 - `AGENT_DISCORD_ORCHESTRATOR_AUTO_SPAWN_WORKERS=<n>` (default `2`, worker count to auto-provision; max `15`)
+- `AGENT_DISCORD_ORCHESTRATOR_AUTO_CLEANUP_UNUSED_WORKERS=1|0` (default `1`, auto-remove idle dynamic workers)
+- `AGENT_DISCORD_ORCHESTRATOR_AUTO_CLEANUP_INTERVAL_MS=<n>` (default `60000`, cleanup scan interval; min `5000`)
+- `AGENT_DISCORD_ORCHESTRATOR_AUTO_CLEANUP_IDLE_MS=<n>` (default `300000`, idle age threshold before worker teardown)
+- `AGENT_DISCORD_ORCHESTRATOR_AUTO_CLEANUP_MAX_REMOVALS=<n>` (default `2`, max workers removed per cleanup run; max `15`)
 - `AGENT_DISCORD_ORCHESTRATOR_AUTO_PLANNER=1|0` (default `1`, split auto fanout into planner task assignments)
 - `AGENT_DISCORD_ORCHESTRATOR_AUTO_PLANNER_PROMPT_MAX_CHARS=<n>` (default `1600`, truncate original request in planner payload)
 - `AGENT_DISCORD_ORCHESTRATOR_CONTEXT_BUDGET_CHARS=<n>` (default `2600`, task-packet context budget gate)
@@ -199,6 +207,8 @@ Orchestrator automation:
 
 Self-check:
 - `bun run orchestrator:auto:check` (auto enable/spawn/planner dispatch regression check)
+- `bun run ops:self-heal` (build + doctor fix + daemon restart one-shot repair)
+- `bun run ops:verify:fast` (quick regression set for config/capture/router/index)
 
 ## Codex I/O v2
 
@@ -212,8 +222,12 @@ Environment toggles:
 - `AGENT_DISCORD_CODEX_IO_V2_ANNOUNCE=0` to keep transcript logging but disable channel command event posts
 - `AGENT_DISCORD_CODEX_IO_V2_DIR=/path` to change transcript root directory
 - `MUDCODE_CODEX_AUTO_SKILL_LINK=0` to disable automatic skill-link hints
+- `MUDCODE_STATE_LAST_ACTIVE_SAVE_DEBOUNCE_MS=<n>` (default `1500`, range `100..60000`; debounce interval for persisting `lastActive` updates)
+- `AGENT_DISCORD_CODEX_AUTO_SUBAGENT_THREAD_CAP=<n>` (default `6`, cap hint injected to Codex for `spawn_agent`-style sub-agent concurrency)
 - `AGENT_DISCORD_CODEX_AUTO_LONGTASK_REPORT_MODE=continue|auto|always|off` to auto-append long-task execution/reporting policy hints (`continue` default)
 - `AGENT_DISCORD_CODEX_AUTO_LANGUAGE_POLICY_MODE=off|korean|always` (default `off`; set `korean`/`always` only when you explicitly want this extra policy hint)
+- `AGENT_DISCORD_CAPTURE_FINAL_BUFFER_MAX_CHARS=<n>` (default `120000`, range `4000..500000`; final-only capture buffer budget before truncation)
+- `AGENT_DISCORD_EVENT_PROGRESS_TRANSCRIPT_MAX_CHARS=<n>` (default `100000`, range `500..500000`; transcript budget used for empty `session.final` fallback)
 - `AGENT_DISCORD_CODEX_EVENT_ONLY=1|0` (default `1`, set `0` to keep legacy direct capture output path)
 - `AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK=0|1` (default `0`, set `1` to re-enable tmux stale fallback capture)
 - `AGENT_DISCORD_EVENT_LIFECYCLE_STRICT_MODE=off|warn|reject` (default `warn`)

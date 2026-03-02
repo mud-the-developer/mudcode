@@ -73,15 +73,36 @@ export class AgentRegistry {
   }
 
   parseChannelName(channelName: string): { projectName: string; agent: BaseAgentAdapter } | null {
+    let bestMatch: { projectName: string; agent: BaseAgentAdapter; index: number } | null = null;
+
     for (const adapter of this.getAll()) {
-      const suffix = `-${adapter.config.channelSuffix}`;
-      if (channelName.endsWith(suffix)) {
-        return {
-          projectName: channelName.slice(0, -suffix.length),
+      const marker = `-${adapter.config.channelSuffix}`;
+      const index = channelName.lastIndexOf(marker);
+      if (index <= 0) continue;
+
+      const tailIndex = index + marker.length;
+      const nextChar = channelName[tailIndex];
+      if (tailIndex !== channelName.length && nextChar !== '-') continue;
+
+      const projectName = channelName.slice(0, index);
+      if (projectName.length === 0) continue;
+
+      if (!bestMatch || index > bestMatch.index) {
+        bestMatch = {
+          projectName,
           agent: adapter,
+          index,
         };
       }
     }
+
+    if (bestMatch) {
+      return {
+        projectName: bestMatch.projectName,
+        agent: bestMatch.agent,
+      };
+    }
+
     return null;
   }
 }

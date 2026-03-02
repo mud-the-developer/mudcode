@@ -68,10 +68,13 @@ mudcode attach my-app --instance codex
 - `mudcode status`: 설정 + 런타임 상태
 - `mudcode health [--json]`: 진단 실행
 - `mudcode daemon <start|stop|status|restart>`: 데몬 관리
+- `mudcode doctor [--fix]`: 설정/환경/런타임 드리프트 점검 및 자동 수정
+- `mudcode update [--git]`: 최신 버전 업데이트 (git 자동 감지 지원)
 - `mudcode stop [project] --instance <id>`: 특정 인스턴스 중지
 - `mudcode skill list [--all]`: `AGENTS.md`와 `.agents/skills` 기반 스킬 목록/상태 확인
 - `mudcode skill install [name]`: 로컬/no-api 스킬을 Codex 스킬 디렉토리에 설치
 - `mudcode config --show`: 현재 설정 출력
+- `mudcode config --capture-final-buffer-max-chars <n>`: final-only 버퍼 예산 조정
 - `mudcode uninstall`: mudcode 제거
 
 ## 프롬프트 정제기 (Shadow 모드)
@@ -160,6 +163,7 @@ Doctor 안전 점검:
 - `/health`
 - `/snapshot`
 - `/io` (Codex I/O 추적 상태 + 최신 transcript 경로 확인)
+- `/repair` (`doctor --fix` 실행 후 데몬 재시작 예약)
 - `/orchestrator status|run|spawn|remove|enable|disable` (수동 supervisor/worker 오케스트레이션 제어, 기본 비활성화)
   - run 사용법: `/orchestrator run <workerInstanceId> [--priority high|normal|low] <task>` (또는 `p2|p1|p0 <task>`)
   - spawn 사용법: `/orchestrator spawn [count]` (기본 `1`, 최대 `15`)
@@ -188,6 +192,10 @@ Orchestrator 자동화:
 - `AGENT_DISCORD_ORCHESTRATOR_AUTO_DISPATCH_MAX_WORKERS=<n>` (기본값 `1`, auto fanout 발주 시 최대 worker 수; 최대 `15`)
 - `AGENT_DISCORD_ORCHESTRATOR_AUTO_SPAWN=1|0` (기본값 `1`, auto-dispatch에 worker가 없으면 codex worker 자동 프로비저닝)
 - `AGENT_DISCORD_ORCHESTRATOR_AUTO_SPAWN_WORKERS=<n>` (기본값 `2`, 자동 생성 worker 수; 최대 `15`)
+- `AGENT_DISCORD_ORCHESTRATOR_AUTO_CLEANUP_UNUSED_WORKERS=1|0` (기본값 `1`, 유휴 동적 worker 자동 정리)
+- `AGENT_DISCORD_ORCHESTRATOR_AUTO_CLEANUP_INTERVAL_MS=<n>` (기본값 `60000`, 정리 스캔 주기; 최소 `5000`)
+- `AGENT_DISCORD_ORCHESTRATOR_AUTO_CLEANUP_IDLE_MS=<n>` (기본값 `300000`, worker teardown 전 유휴 시간 임계값)
+- `AGENT_DISCORD_ORCHESTRATOR_AUTO_CLEANUP_MAX_REMOVALS=<n>` (기본값 `2`, 정리 1회당 제거 최대 worker 수; 최대 `15`)
 - `AGENT_DISCORD_ORCHESTRATOR_AUTO_PLANNER=1|0` (기본값 `1`, auto fanout 시 planner task 분할 활성화)
 - `AGENT_DISCORD_ORCHESTRATOR_AUTO_PLANNER_PROMPT_MAX_CHARS=<n>` (기본값 `1600`, planner payload에 포함되는 원문 최대 길이)
 - `AGENT_DISCORD_ORCHESTRATOR_CONTEXT_BUDGET_CHARS=<n>` (기본값 `2600`, task-packet 컨텍스트 예산 게이트)
@@ -199,6 +207,8 @@ Orchestrator 자동화:
 
 Self-check:
 - `bun run orchestrator:auto:check` (auto enable/spawn/planner dispatch 회귀 점검)
+- `bun run ops:self-heal` (build + doctor fix + daemon restart 원샷 복구)
+- `bun run ops:verify:fast` (config/capture/router/index 빠른 회귀 점검)
 
 ## Codex I/O v2
 
@@ -212,8 +222,12 @@ Self-check:
 - `AGENT_DISCORD_CODEX_IO_V2_ANNOUNCE=0` : transcript는 저장하고 채널 이벤트 메시지만 비활성화
 - `AGENT_DISCORD_CODEX_IO_V2_DIR=/path` : transcript 저장 루트 경로 변경
 - `MUDCODE_CODEX_AUTO_SKILL_LINK=0` : 자동 skill 힌트 비활성화
+- `MUDCODE_STATE_LAST_ACTIVE_SAVE_DEBOUNCE_MS=<n>` : 기본값 `1500`, 범위 `100..60000`, `lastActive` 상태 저장 디바운스 간격
+- `AGENT_DISCORD_CODEX_AUTO_SUBAGENT_THREAD_CAP=<n>` : 기본값 `6`, Codex 프롬프트에 주입되는 `spawn_agent` 병렬 상한 힌트 값
 - `AGENT_DISCORD_CODEX_AUTO_LONGTASK_REPORT_MODE=continue|auto|always|off` : 긴 작업 실행/보고 스타일 힌트 자동 주입 (`continue` 기본값)
 - `AGENT_DISCORD_CODEX_AUTO_LANGUAGE_POLICY_MODE=off|korean|always` : 기본값 `off`, 필요한 경우에만 `korean`/`always`로 명시 설정
+- `AGENT_DISCORD_CAPTURE_FINAL_BUFFER_MAX_CHARS=<n>` : 기본값 `120000`, 범위 `4000..500000`, final-only capture 버퍼 잘림 기준
+- `AGENT_DISCORD_EVENT_PROGRESS_TRANSCRIPT_MAX_CHARS=<n>` : 기본값 `100000`, 범위 `500..500000`, 빈 `session.final` 보완용 transcript 예산
 - `AGENT_DISCORD_CODEX_EVENT_ONLY=1|0` : 기본값 `1`, `0`이면 기존 direct capture 출력 경로 유지
 - `AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK=0|1` : 기본값 `0`, `1`이면 tmux stale fallback capture 재활성화
 - `AGENT_DISCORD_EVENT_LIFECYCLE_STRICT_MODE=off|warn|reject` : 기본값 `warn`

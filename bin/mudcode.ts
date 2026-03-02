@@ -1022,6 +1022,10 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
           type: 'number',
           describe: 'Set thread-based long output threshold (1200-20000)',
         })
+        .option('capture-final-buffer-max-chars', {
+          type: 'number',
+          describe: 'Set final-only capture buffer max chars (4000-500000)',
+        })
         .option('capture-progress-output', {
           type: 'string',
           choices: ['off', 'thread', 'channel'],
@@ -1057,6 +1061,7 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
           captureHistoryLines: argv.captureHistoryLines,
           captureRedrawTailLines: argv.captureRedrawTailLines,
           longOutputThreadThreshold: argv.longOutputThreadThreshold,
+          captureFinalBufferMaxChars: argv.captureFinalBufferMaxChars,
           captureProgressOutput: argv.captureProgressOutput,
           freeze: argv.freeze,
           platform: argv.platform,

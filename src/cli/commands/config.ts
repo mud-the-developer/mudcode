@@ -33,6 +33,7 @@ export async function configCommand(options: {
   captureHistoryLines?: string | number;
   captureRedrawTailLines?: string | number;
   longOutputThreadThreshold?: string | number;
+  captureFinalBufferMaxChars?: string | number;
   captureProgressOutput?: 'off' | 'thread' | 'channel';
   freeze?: boolean;
 }) {
@@ -78,6 +79,7 @@ export async function configCommand(options: {
       captureHistoryLines: config.capture?.historyLines,
       captureRedrawTailLines: config.capture?.redrawTailLines,
       longOutputThreadThreshold: config.capture?.longOutputThreadThreshold,
+      captureFinalBufferMaxChars: config.capture?.finalBufferMaxChars,
       captureProgressOutput: config.capture?.progressOutput,
       keepChannelOnStop: getConfigValue('keepChannelOnStop'),
       messagingPlatform: config.messagingPlatform,
@@ -117,6 +119,7 @@ export async function configCommand(options: {
     console.log(chalk.gray(`   Capture History Lines: ${config.capture?.historyLines || '(auto)'}`));
     console.log(chalk.gray(`   Capture Redraw Tail Lines: ${config.capture?.redrawTailLines || '(auto)'}`));
     console.log(chalk.gray(`   Long Output Thread Threshold: ${config.capture?.longOutputThreadThreshold || '(default)'}`));
+    console.log(chalk.gray(`   Capture Final Buffer Max Chars: ${config.capture?.finalBufferMaxChars || '(default/120000)'}`));
     console.log(chalk.gray(`   Capture Progress Output: ${config.capture?.progressOutput || '(default/channel)'}`));
     console.log(chalk.gray(`   Keep Channel On Stop: ${getConfigValue('keepChannelOnStop') ? 'on' : 'off'}`));
     console.log(chalk.cyan('\n🤖 Registered Agents:\n'));
@@ -279,6 +282,7 @@ export async function configCommand(options: {
         captureHistoryLines: undefined,
         captureRedrawTailLines: undefined,
         longOutputThreadThreshold: undefined,
+        captureFinalBufferMaxChars: undefined,
         captureProgressOutput: undefined,
       });
       console.log(chalk.green('✅ Capture preset applied: default'));
@@ -370,6 +374,13 @@ export async function configCommand(options: {
     updated = true;
   }
 
+  if (options.captureFinalBufferMaxChars !== undefined) {
+    const value = parseBoundedInt(options.captureFinalBufferMaxChars, 'capture final buffer max chars', 4000, 500000);
+    saveConfig({ captureFinalBufferMaxChars: value });
+    console.log(chalk.green(`✅ Capture final buffer max chars saved: ${value}`));
+    updated = true;
+  }
+
   if (options.captureProgressOutput !== undefined) {
     saveConfig({ captureProgressOutput: options.captureProgressOutput });
     console.log(chalk.green(`✅ Capture progress output saved: ${options.captureProgressOutput}`));
@@ -394,6 +405,7 @@ export async function configCommand(options: {
     console.log(chalk.gray('  mudcode config --prompt-refiner-policy-path ~/.mudcode/prompt-refiner-active-policy.txt'));
     console.log(chalk.gray('  mudcode config --capture-preset codex-final'));
     console.log(chalk.gray('  mudcode config --capture-codex-final-only on'));
+    console.log(chalk.gray('  mudcode config --capture-final-buffer-max-chars 180000'));
     console.log(chalk.gray('  mudcode config --capture-progress-output thread'));
     console.log(chalk.gray('  mudcode config --capture-filter-prompt-echo on'));
     console.log(chalk.gray('  mudcode config --show'));

@@ -1,6 +1,6 @@
 import { cleanCapture, splitForDiscord, splitForSlack } from '../../capture/parser.js';
 import type { MessagingClient } from '../../messaging/interface.js';
-import { listProjectInstances, normalizeProjectState } from '../../state/instances.js';
+import { getProjectInstance, listProjectInstances, normalizeProjectState } from '../../state/instances.js';
 import { TmuxManager } from '../../tmux/manager.js';
 import type { IStateManager } from '../../types/interfaces.js';
 import type { ProjectState } from '../../types/index.js';
@@ -21,6 +21,9 @@ type DeltaDeliveryResult = { observedOutput: boolean; emittedOutput: boolean };
 const LONG_OUTPUT_THREAD_THRESHOLD_MIN = 1200;
 const LONG_OUTPUT_THREAD_THRESHOLD_MAX = 20000;
 const LEGACY_LONG_OUTPUT_THREAD_THRESHOLD_MAX = 100000;
+const FINAL_ONLY_BUFFER_MAX_CHARS_MIN = 4000;
+const FINAL_ONLY_BUFFER_MAX_CHARS_MAX = 500000;
+const DEFAULT_FINAL_ONLY_BUFFER_MAX_CHARS = 120000;
 
 export interface BridgeCapturePollerDeps {
   messaging: MessagingClient;
@@ -41,6 +44,7 @@ export interface BridgeCapturePollerDeps {
   redrawFallbackTailLines?: number;
   progressOutputVisibility?: ProgressOutputVisibility;
   codexProgressHookMinIntervalMs?: number;
+  finalOnlyBufferMaxChars?: number;
 }
 
 export class BridgeCapturePoller {
@@ -58,6 +62,7 @@ export class BridgeCapturePoller {
   private readonly redrawFallbackTailLines: number;
   private readonly progressOutputVisibility: ProgressOutputVisibility;
   private readonly codexProgressHookMinIntervalMs: number;
+  private readonly finalOnlyBufferMaxChars: number;
   private readonly eventHookCaptureFallbackStaleGraceMs: number;
   private readonly codexEventProgressMode?: EventProgressMode;
   private readonly codexEventProgressBlockStreaming?: boolean;
@@ -107,6 +112,7 @@ export class BridgeCapturePoller {
     this.codexProgressHookMinIntervalMs = this.resolveCodexProgressHookMinIntervalMs(
       deps.codexProgressHookMinIntervalMs,
     );
+    this.finalOnlyBufferMaxChars = this.resolveFinalOnlyBufferMaxChars(deps.finalOnlyBufferMaxChars);
     this.eventHookCaptureFallbackStaleGraceMs = this.resolveEventHookCaptureFallbackStaleGraceMs();
     this.codexEventProgressMode = this.resolveCodexEventProgressMode();
     this.codexEventProgressBlockStreaming = this.resolveCodexEventProgressBlockStreaming();
@@ -312,6 +318,25 @@ export class BridgeCapturePoller {
       return Math.trunc(fromEnv);
     }
     return 5000;
+  }
+
+  private resolveFinalOnlyBufferMaxChars(configured?: number): number {
+    if (typeof configured === 'number' && Number.isFinite(configured)) {
+      const normalized = Math.trunc(configured);
+      if (normalized >= FINAL_ONLY_BUFFER_MAX_CHARS_MIN && normalized <= FINAL_ONLY_BUFFER_MAX_CHARS_MAX) {
+        return normalized;
+      }
+    }
+
+    const fromEnv = Number(process.env.AGENT_DISCORD_CAPTURE_FINAL_BUFFER_MAX_CHARS || '');
+    if (Number.isFinite(fromEnv)) {
+      const normalized = Math.trunc(fromEnv);
+      if (normalized >= FINAL_ONLY_BUFFER_MAX_CHARS_MIN && normalized <= FINAL_ONLY_BUFFER_MAX_CHARS_MAX) {
+        return normalized;
+      }
+    }
+
+    return DEFAULT_FINAL_ONLY_BUFFER_MAX_CHARS;
   }
 
   private resolveEventHookCaptureFallbackStaleGraceMs(): number {
@@ -552,7 +577,7 @@ export class BridgeCapturePoller {
           ? this.prepareCodexFinalOnlyOutput(trimmed)
           : trimmed;
       if (initial.trim().length === 0) return;
-      this.bufferedOutputByInstance.set(key, this.trimTailLines(initial, 320));
+      this.bufferedOutputByInstance.set(key, this.trimBufferedOutput(initial));
       return;
     }
     const merged = this.mergeBufferedOutput(previous, trimmed, agentType);
@@ -567,13 +592,15 @@ export class BridgeCapturePoller {
       this.codexFinalOnlyModeEnabled && agentType === 'codex'
         ? this.prepareCodexFinalOnlyOutput(merged)
         : merged;
-    return this.trimTailLines(normalized, 320);
+    return this.trimBufferedOutput(normalized);
   }
 
-  private trimTailLines(text: string, maxLines: number): string {
-    const lines = text.split('\n');
-    if (lines.length <= maxLines) return text;
-    return lines.slice(lines.length - maxLines).join('\n');
+  private trimBufferedOutput(text: string): string {
+    const marker = '...[truncated by final-output buffer gate]\n';
+    const raw = text.startsWith(marker) ? text.slice(marker.length) : text;
+    if (raw.length <= this.finalOnlyBufferMaxChars) return raw;
+    const tail = raw.slice(raw.length - this.finalOnlyBufferMaxChars).trimStart();
+    return `${marker}${tail}`;
   }
 
   private prepareCodexFinalOnlyOutput(text: string): string {
@@ -704,7 +731,7 @@ export class BridgeCapturePoller {
     projectName: string;
     instanceId: string;
     agentType: string;
-  }):
+  }): 
     | {
         normalizedProject: ReturnType<typeof normalizeProjectState>;
         tmuxWindow: string;
@@ -712,9 +739,19 @@ export class BridgeCapturePoller {
       }
     | undefined {
     if (params.agentType !== 'codex') return undefined;
-    const rawProject = this.deps.stateManager
-      .listProjects()
-      .find((project) => project.projectName === params.projectName);
+    const stateManager = this.deps.stateManager as unknown as {
+      getProject?: (projectName: string) => ProjectState | undefined;
+      listProjects?: () => ProjectState[];
+    };
+    const rawProject =
+      (typeof stateManager.getProject === 'function'
+        ? stateManager.getProject(params.projectName)
+        : undefined) ||
+      (typeof stateManager.listProjects === 'function'
+        ? stateManager
+            .listProjects()
+            .find((entry) => (entry as { projectName?: string })?.projectName === params.projectName)
+        : undefined);
     if (!rawProject) return undefined;
 
     const project = normalizeProjectState(rawProject);
@@ -730,7 +767,7 @@ export class BridgeCapturePoller {
       typeof maxRetriesRaw === 'number' && Number.isFinite(maxRetriesRaw) && maxRetriesRaw >= 0
         ? Math.min(10, Math.max(0, Math.trunc(maxRetriesRaw)))
         : 2;
-    const instance = listProjectInstances(project).find((entry) => entry.instanceId === params.instanceId);
+    const instance = getProjectInstance(project, params.instanceId);
     if (!instance) return undefined;
     const tmuxWindow = instance.tmuxWindow || instance.instanceId;
     if (!tmuxWindow) return undefined;
@@ -979,8 +1016,15 @@ export class BridgeCapturePoller {
         blockMaxChars,
       };
     }
-
-    const project = normalizeProjectState(rawProject);
+    if (!rawProject.orchestrator?.progressPolicy) {
+      return {
+        mode,
+        blockStreamingEnabled,
+        blockWindowMs,
+        blockMaxChars,
+      };
+    }
+    const project = rawProject as ReturnType<typeof normalizeProjectState>;
     const directive = resolveProgressPolicyDirective({
       project,
       agentType: 'codex',
@@ -1314,8 +1358,8 @@ export class BridgeCapturePoller {
     try {
       const projects = this.deps.stateManager.listProjects();
       for (const rawProject of projects) {
-        const project = normalizeProjectState(rawProject);
-        const instances = listProjectInstances(project);
+        const project = rawProject as ReturnType<typeof normalizeProjectState>;
+        const instances = listProjectInstances(rawProject);
 
         for (const instance of instances) {
           const key = this.captureKey(project.projectName, instance.instanceId);

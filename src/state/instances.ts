@@ -4,6 +4,32 @@ function sortInstances(a: ProjectInstanceState, b: ProjectInstanceState): number
   return a.instanceId.localeCompare(b.instanceId);
 }
 
+function asInstanceMapForRead(project: ProjectState): Record<string, ProjectInstanceState> | undefined {
+  const instances = project.instances;
+  if (!instances || typeof instances !== 'object') return undefined;
+  const values = Object.values(instances);
+  if (values.length === 0) return {};
+  for (const value of values) {
+    if (!value || typeof value !== 'object') return undefined;
+    const candidate = value as ProjectInstanceState & {
+      discordChannelId?: unknown;
+      channelId?: unknown;
+      tmuxWindow?: unknown;
+      eventHook?: unknown;
+    };
+    const instanceId = typeof candidate.instanceId === 'string' ? candidate.instanceId.trim() : '';
+    const agentType = typeof candidate.agentType === 'string' ? candidate.agentType.trim() : '';
+    if (!instanceId || !agentType) return undefined;
+    if (typeof candidate.channelId === 'undefined' && typeof candidate.discordChannelId === 'string') {
+      return undefined;
+    }
+    if (typeof candidate.channelId !== 'undefined' && typeof candidate.channelId !== 'string') return undefined;
+    if (typeof candidate.tmuxWindow !== 'undefined' && typeof candidate.tmuxWindow !== 'string') return undefined;
+    if (typeof candidate.eventHook !== 'undefined' && typeof candidate.eventHook !== 'boolean') return undefined;
+  }
+  return instances as Record<string, ProjectInstanceState>;
+}
+
 function normalizeLegacyInstances(project: ProjectState): Record<string, ProjectInstanceState> {
   const keys = new Set<string>();
 
@@ -315,7 +341,8 @@ export function normalizeProjectState(project: ProjectState): ProjectState {
 }
 
 export function listProjectInstances(project: ProjectState): ProjectInstanceState[] {
-  return Object.values(normalizeProjectState(project).instances || {})
+  const instances = asInstanceMapForRead(project) || normalizeProjectState(project).instances || {};
+  return Object.values(instances)
     .filter((instance): instance is ProjectInstanceState => !!instance)
     .sort(sortInstances);
 }
@@ -326,6 +353,8 @@ export function listProjectAgentTypes(project: ProjectState): string[] {
 
 export function getProjectInstance(project: ProjectState, instanceId: string): ProjectInstanceState | undefined {
   if (!instanceId) return undefined;
+  const direct = asInstanceMapForRead(project)?.[instanceId];
+  if (direct) return direct;
   return normalizeProjectState(project).instances?.[instanceId];
 }
 
@@ -335,9 +364,14 @@ export function getPrimaryInstanceForAgent(project: ProjectState, agentType: str
 
 export function findProjectInstanceByChannel(project: ProjectState, channelId: string): ProjectInstanceState | undefined {
   if (!channelId) return undefined;
-  return listProjectInstances(project).find(
-    (instance) => instance.channelId === channelId,
-  );
+  const instances = asInstanceMapForRead(project);
+  if (instances) {
+    for (const instance of Object.values(instances)) {
+      if (instance?.channelId === channelId) return instance;
+    }
+    return undefined;
+  }
+  return listProjectInstances(project).find((instance) => instance.channelId === channelId);
 }
 
 export function buildNextInstanceId(project: ProjectState | undefined, agentType: string): string {

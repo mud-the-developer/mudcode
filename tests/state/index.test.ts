@@ -4,6 +4,7 @@
 
 import { StateManager, type ProjectState, type BridgeState } from '../../src/state/index.js';
 import type { IStorage } from '../../src/types/interfaces.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // Mock storage implementation for testing
 class MockStorage implements IStorage {
@@ -60,6 +61,11 @@ function makeProject(name: string, channelId?: string): ProjectState {
 describe('StateManager', () => {
   const stateDir = '/test/dir';
   const stateFile = '/test/dir/state.json';
+
+  afterEach(() => {
+    delete process.env.MUDCODE_STATE_LAST_ACTIVE_SAVE_DEBOUNCE_MS;
+    vi.useRealTimers();
+  });
 
   describe('initialization', () => {
     it('creates with empty state when no file exists', () => {
@@ -231,6 +237,28 @@ describe('StateManager', () => {
       const updated = manager.getProject('active-project');
       expect(updated).toBeDefined();
       expect(new Date(updated!.lastActive).getTime()).toBeGreaterThanOrEqual(beforeUpdate);
+    });
+
+    it('updateLastActive batches persistence writes with debounce', () => {
+      process.env.MUDCODE_STATE_LAST_ACTIVE_SAVE_DEBOUNCE_MS = '200';
+      vi.useFakeTimers();
+      const storage = new MockStorage();
+      const writeSpy = vi.spyOn(storage, 'writeFile');
+      const manager = new StateManager(storage, stateDir, stateFile);
+      const project = makeProject('active-project');
+
+      manager.setProject(project);
+      writeSpy.mockClear();
+
+      manager.updateLastActive('active-project');
+      manager.updateLastActive('active-project');
+      manager.updateLastActive('active-project');
+
+      expect(writeSpy).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(199);
+      expect(writeSpy).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(writeSpy).toHaveBeenCalledTimes(1);
     });
   });
 

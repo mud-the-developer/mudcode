@@ -22,7 +22,7 @@ import { installFileInstruction } from './infra/file-instruction.js';
 import { installMudcodeSendScript } from './infra/send-script.js';
 import { buildAgentLaunchEnv, buildExportPrefix, withClaudePluginDir } from './policy/agent-launch.js';
 import { installAgentIntegration } from './policy/agent-integration.js';
-import { toProjectScopedName } from './policy/window-naming.js';
+import { toProjectScopedName, toProjectScopedChannelName } from './policy/window-naming.js';
 import { PendingMessageTracker } from './bridge/runtime/pending-message-tracker.js';
 import { BridgeProjectBootstrap } from './bridge/bootstrap/project-bootstrap.js';
 import { BridgeMessageRouter } from './bridge/runtime/message-router.js';
@@ -110,6 +110,7 @@ export class AgentBridge {
       promptEchoFilterEnabled: this.bridgeConfig.capture?.filterPromptEcho,
       promptEchoSuppressionMaxPolls: this.bridgeConfig.capture?.promptEchoMaxPolls,
       redrawFallbackTailLines: this.bridgeConfig.capture?.redrawTailLines,
+      finalOnlyBufferMaxChars: this.bridgeConfig.capture?.finalBufferMaxChars,
       progressOutputVisibility: this.bridgeConfig.capture?.progressOutput,
       ioTracker: this.codexIoTracker,
       eventHookClient: this.eventHookClient,
@@ -382,7 +383,7 @@ export class AgentBridge {
     const tmuxSession = this.tmux.getOrCreateSession(sharedSessionName, windowName);
 
     // Create Discord channel with custom name or default
-    const channelName = channelDisplayName || toProjectScopedName(projectName, adapter.config.channelSuffix, instanceId);
+    const channelName = channelDisplayName || toProjectScopedChannelName(projectName, adapter.config.channelSuffix, instanceId);
     const channels = await this.messaging.createAgentChannels(
       guildId,
       projectName,

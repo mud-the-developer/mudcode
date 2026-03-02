@@ -676,13 +676,14 @@ describe('AgentBridge', () => {
         '/test/path',
         { claude: true }
       );
+      const generatedChannelName = mockMessaging.createAgentChannels.mock.calls[0]?.[3];
 
       expect(mockTmux.getOrCreateSession).toHaveBeenCalledWith('bridge', 'test-project-claude');
       expect(mockMessaging.createAgentChannels).toHaveBeenCalledWith(
         'guild-123',
         'test-project',
         [mockRegistry._mockAdapter.config],
-        'test-project-claude',
+        expect.stringMatching(/^test-project-claude-[a-z0-9]{6}$/),
         { claude: 'claude' },
       );
       expect(mockStateManager.setProject).toHaveBeenCalledWith(
@@ -698,12 +699,11 @@ describe('AgentBridge', () => {
         'test-project-claude',
         expect.stringContaining(`--plugin-dir '/mock/claude/plugin'`)
       );
-      expect(result).toEqual({
-        channelName: 'test-project-claude',
-        channelId: 'ch-123',
-        agentName: 'Claude Code',
-        tmuxSession: 'agent-test',
-      });
+      expect(generatedChannelName).toMatch(/^test-project-claude-[a-z0-9]{6}$/);
+      expect(result.channelName).toBe(generatedChannelName);
+      expect(result.channelId).toBe('ch-123');
+      expect(result.agentName).toBe('Claude Code');
+      expect(result.tmuxSession).toBe('agent-test');
     });
 
     it('sets OPENCODE_PERMISSION env when configured to allow', async () => {

@@ -77,6 +77,7 @@ type MaintenanceCommand =
   | { kind: 'doctor'; fix: boolean }
   | { kind: 'update'; git: boolean }
   | { kind: 'daemon-restart' }
+  | { kind: 'repair' }
   | { kind: 'orchestrator-status' }
   | {
       kind: 'orchestrator-enable';
@@ -158,6 +159,8 @@ export class BridgeMessageRouter {
   private routeByConversationKey: Map<string, RouteMemory> = new Map();
   private lastPromptByInstance: Map<string, string> = new Map();
   private lastOrchestratorActivityByWorker: Map<string, OrchestratorWorkerActivity> = new Map();
+  private firstSeenOrchestratorWorkerAtMs: Map<string, number> = new Map();
+  private lastOrchestratorAutoCleanupAtMsByProject: Map<string, number> = new Map();
   private orchestratorQueueByWorker: Map<string, OrchestratorQueuedTask[]> = new Map();
   private orchestratorQueueDrainInFlight = new Set<string>();
   private orchestratorQueueDrainTimerByWorker = new Map<string, ReturnType<typeof setTimeout>>();
@@ -250,6 +253,7 @@ export class BridgeMessageRouter {
     queueDepth?: number;
   }): void {
     const key = this.workerActivityKey(params.projectName, params.workerInstanceId);
+    this.rememberOrchestratorWorkerFirstSeen(params.projectName, params.workerInstanceId);
     this.lastOrchestratorActivityByWorker.set(key, {
       atMs: Date.now(),
       turnId: params.turnId,
@@ -260,6 +264,17 @@ export class BridgeMessageRouter {
         : {}),
     });
     this.pruneOldest(this.lastOrchestratorActivityByWorker, this.maxWorkerActivityMemory);
+  }
+
+  private rememberOrchestratorWorkerFirstSeen(projectName: string, workerInstanceId: string, atMs?: number): void {
+    const key = this.workerActivityKey(projectName, workerInstanceId);
+    if (this.firstSeenOrchestratorWorkerAtMs.has(key)) return;
+    this.firstSeenOrchestratorWorkerAtMs.set(key, atMs ?? Date.now());
+    this.pruneOldest(this.firstSeenOrchestratorWorkerAtMs, this.maxWorkerActivityMemory);
+  }
+
+  private getOrchestratorWorkerFirstSeenAt(projectName: string, workerInstanceId: string): number | undefined {
+    return this.firstSeenOrchestratorWorkerAtMs.get(this.workerActivityKey(projectName, workerInstanceId));
   }
 
   private getOrchestratorWorkerActivity(
@@ -472,6 +487,10 @@ export class BridgeMessageRouter {
 
     if (command === '/daemon-restart' || command === '/restart-daemon') {
       return { kind: 'daemon-restart' };
+    }
+
+    if (command === '/repair' || command === '/self-heal') {
+      return { kind: 'repair' };
     }
 
     const subagentsAlias = this.parseSubagentsAliasCommand(content);
@@ -824,24 +843,24 @@ export class BridgeMessageRouter {
     if (queue.length >= maxDepth) {
       return { ok: false, reason: 'full' };
     }
-    let inserted = false;
+    let insertedPosition = -1;
     for (let i = 0; i < queue.length; i += 1) {
       const existing = queue[i];
       if (!existing) continue;
       if (task.priority > existing.priority) {
         queue.splice(i, 0, task);
-        inserted = true;
+        insertedPosition = i + 1;
         break;
       }
     }
-    if (!inserted) {
+    if (insertedPosition < 0) {
       queue.push(task);
+      insertedPosition = queue.length;
     }
-    const position = queue.findIndex((entry) => entry.taskId === task.taskId) + 1;
     return {
       ok: true,
       queueDepth: queue.length,
-      position: position > 0 ? position : queue.length,
+      position: insertedPosition,
     };
   }
 
@@ -882,6 +901,12 @@ export class BridgeMessageRouter {
         this.lastOrchestratorActivityByWorker.delete(key);
       }
     }
+    for (const key of this.firstSeenOrchestratorWorkerAtMs.keys()) {
+      if (key.startsWith(`${projectName}:`)) {
+        this.firstSeenOrchestratorWorkerAtMs.delete(key);
+      }
+    }
+    this.lastOrchestratorAutoCleanupAtMsByProject.delete(projectName);
   }
 
   private clearOrchestratorQueueForWorker(projectName: string, workerInstanceId: string): void {
@@ -894,6 +919,7 @@ export class BridgeMessageRouter {
     }
     this.orchestratorQueueDrainInFlight.delete(key);
     this.lastOrchestratorActivityByWorker.delete(this.workerActivityKey(projectName, workerInstanceId));
+    this.firstSeenOrchestratorWorkerAtMs.delete(this.workerActivityKey(projectName, workerInstanceId));
   }
 
   private scheduleOrchestratorQueueDrain(projectName: string, workerInstanceId: string, delayMs?: number): void {
@@ -1174,6 +1200,25 @@ export class BridgeMessageRouter {
 
   private resolveOrchestratorAutoSpawnWorkers(): number {
     const value = this.getEnvInt('AGENT_DISCORD_ORCHESTRATOR_AUTO_SPAWN_WORKERS', 2);
+    return Math.min(15, Math.max(1, value));
+  }
+
+  private resolveOrchestratorAutoCleanupUnusedWorkers(): boolean {
+    return this.getEnvBool('AGENT_DISCORD_ORCHESTRATOR_AUTO_CLEANUP_UNUSED_WORKERS', true);
+  }
+
+  private resolveOrchestratorAutoCleanupIntervalMs(): number {
+    const value = this.getEnvInt('AGENT_DISCORD_ORCHESTRATOR_AUTO_CLEANUP_INTERVAL_MS', 60_000);
+    return Math.min(60 * 60 * 1000, Math.max(5_000, value));
+  }
+
+  private resolveOrchestratorAutoCleanupIdleMs(): number {
+    const value = this.getEnvInt('AGENT_DISCORD_ORCHESTRATOR_AUTO_CLEANUP_IDLE_MS', 5 * 60 * 1000);
+    return Math.min(7 * 24 * 60 * 60 * 1000, Math.max(60_000, value));
+  }
+
+  private resolveOrchestratorAutoCleanupMaxRemovals(): number {
+    const value = this.getEnvInt('AGENT_DISCORD_ORCHESTRATOR_AUTO_CLEANUP_MAX_REMOVALS', 2);
     return Math.min(15, Math.max(1, value));
   }
 
@@ -1575,6 +1620,167 @@ export class BridgeMessageRouter {
     return typeof manager.setProject === 'function';
   }
 
+  private async maybeAutoCleanupOrchestratorWorkers(params: {
+    projectName: string;
+    normalizedProject: ReturnType<typeof normalizeProjectState>;
+    currentInstanceId: string;
+  }): Promise<{
+    project: ReturnType<typeof normalizeProjectState>;
+    notices: string[];
+  }> {
+    const notices: string[] = [];
+    let project = params.normalizedProject;
+    if (!this.resolveOrchestratorAutoCleanupUnusedWorkers()) {
+      return { project, notices };
+    }
+    if (!this.canPersistProjectState()) {
+      return { project, notices };
+    }
+    if (!this.deps.orchestratorWorkerProvisioner) {
+      return { project, notices };
+    }
+
+    const orchestrator = project.orchestrator;
+    if (!orchestrator?.enabled) {
+      return { project, notices };
+    }
+    const supervisor = orchestrator.supervisorInstanceId;
+    if (!supervisor || params.currentInstanceId !== supervisor) {
+      return { project, notices };
+    }
+
+    const nowMs = Date.now();
+    const intervalMs = this.resolveOrchestratorAutoCleanupIntervalMs();
+    const lastRunMs = this.lastOrchestratorAutoCleanupAtMsByProject.get(params.projectName) || 0;
+    if (nowMs - lastRunMs < intervalMs) {
+      return { project, notices };
+    }
+    this.lastOrchestratorAutoCleanupAtMsByProject.set(params.projectName, nowMs);
+    this.pruneOldest(this.lastOrchestratorAutoCleanupAtMsByProject, 256);
+
+    const workerIds = this.resolveOrchestratorWorkerIds(project).filter((workerId) => workerId !== supervisor);
+    if (workerIds.length === 0) {
+      return { project, notices };
+    }
+
+    for (const workerId of workerIds) {
+      this.rememberOrchestratorWorkerFirstSeen(params.projectName, workerId, nowMs);
+    }
+
+    const idleThresholdMs = this.resolveOrchestratorAutoCleanupIdleMs();
+    const maxRemovals = this.resolveOrchestratorAutoCleanupMaxRemovals();
+    const removableWorkers: Array<{
+      worker: ProjectInstanceState;
+      idleAgeMs: number;
+      reason: 'idle' | 'never-used';
+    }> = [];
+
+    for (const workerId of workerIds) {
+      const worker = getProjectInstance(project, workerId);
+      if (!worker) continue;
+      if (worker.instanceId === worker.agentType) continue;
+
+      const runtime = this.getPendingRuntimeSnapshot(params.projectName, worker.agentType, worker.instanceId);
+      if (runtime.pendingDepth > 0) continue;
+
+      const queue = this.getOrchestratorQueueSnapshot(params.projectName, worker.instanceId);
+      if (queue.depth > 0) continue;
+
+      const activity = this.getOrchestratorWorkerActivity(params.projectName, worker.instanceId);
+      const firstSeenAt = this.getOrchestratorWorkerFirstSeenAt(params.projectName, worker.instanceId);
+      const touchTimestamps: number[] = [];
+      if (activity) touchTimestamps.push(activity.atMs);
+      const terminalAgeMs = runtime.lastTerminalAgeMs;
+      const hasTerminalSnapshot =
+        typeof terminalAgeMs === 'number' &&
+        Number.isFinite(terminalAgeMs) &&
+        terminalAgeMs >= 0;
+      if (hasTerminalSnapshot) {
+        touchTimestamps.push(nowMs - terminalAgeMs);
+      }
+      if (
+        touchTimestamps.length === 0 &&
+        typeof firstSeenAt === 'number' &&
+        Number.isFinite(firstSeenAt) &&
+        firstSeenAt > 0
+      ) {
+        touchTimestamps.push(firstSeenAt);
+      }
+      if (touchTimestamps.length === 0) continue;
+
+      const latestTouchAt = Math.max(...touchTimestamps);
+      const idleAgeMs = Math.max(0, nowMs - latestTouchAt);
+      if (idleAgeMs < idleThresholdMs) continue;
+
+      removableWorkers.push({
+        worker,
+        idleAgeMs,
+        reason: activity || hasTerminalSnapshot ? 'idle' : 'never-used',
+      });
+    }
+
+    if (removableWorkers.length === 0) {
+      return { project, notices };
+    }
+
+    removableWorkers.sort((a, b) => b.idleAgeMs - a.idleAgeMs);
+    const selected = removableWorkers.slice(0, maxRemovals);
+    const removedIds: string[] = [];
+    const removalDetails: string[] = [];
+    const warnings: string[] = [];
+
+    for (const item of selected) {
+      const worker = item.worker;
+      const workerId = worker.instanceId;
+      this.clearOrchestratorQueueForWorker(params.projectName, workerId);
+      this.deps.pendingTracker.clearPendingForInstance(
+        params.projectName,
+        worker.agentType,
+        worker.instanceId,
+      );
+
+      const removed = await this.deps.orchestratorWorkerProvisioner.teardownWorker({
+        projectName: params.projectName,
+        workerInstanceId: workerId,
+      });
+      if (removed.removed) {
+        removedIds.push(workerId);
+        removalDetails.push(`\`${workerId}\` (${item.reason}, ${this.formatAge(item.idleAgeMs)})`);
+      } else {
+        warnings.push(`${workerId}: ${removed.warning || 'remove skipped'}`);
+      }
+    }
+
+    if (removedIds.length > 0) {
+      const latest = this.deps.stateManager.getProject(params.projectName);
+      const latestNormalized = normalizeProjectState(latest || project);
+      const latestOrchestrator = latestNormalized.orchestrator;
+      if (latestOrchestrator?.enabled) {
+        project = normalizeProjectState({
+          ...latestNormalized,
+          orchestrator: {
+            ...latestOrchestrator,
+            enabled: true,
+            supervisorInstanceId: latestOrchestrator.supervisorInstanceId || supervisor,
+            workerInstanceIds: (latestOrchestrator.workerInstanceIds || []).filter(
+              (instanceId) => !removedIds.includes(instanceId),
+            ),
+          },
+          lastActive: new Date(),
+        });
+        this.deps.stateManager.setProject(project);
+      }
+      notices.push(`🧹 Auto worker cleanup removed: ${removalDetails.join(', ')}`);
+      console.log(
+        `🧹 [${params.projectName}/${supervisor}] auto worker cleanup removed ${removedIds.length} idle worker(s): ${removedIds.join(', ')}`,
+      );
+    }
+    if (warnings.length > 0) {
+      notices.push(`⚠️ Auto worker cleanup warnings: ${warnings.join(' | ')}`);
+    }
+    return { project, notices };
+  }
+
   private maybeAutoEnableOrchestrator(params: {
     projectName: string;
     normalizedProject: ReturnType<typeof normalizeProjectState>;
@@ -1626,6 +1832,15 @@ export class BridgeMessageRouter {
     let project = params.normalizedProject;
     if (params.resolvedAgentType !== 'codex') {
       return { project, notices };
+    }
+    const cleanup = await this.maybeAutoCleanupOrchestratorWorkers({
+      projectName: params.projectName,
+      normalizedProject: project,
+      currentInstanceId: params.currentInstanceId,
+    });
+    project = cleanup.project;
+    if (cleanup.notices.length > 0) {
+      notices.push(...cleanup.notices);
     }
     if (!this.resolveOrchestratorAutoEnable()) {
       return { project, notices };
@@ -2169,6 +2384,11 @@ export class BridgeMessageRouter {
     return false;
   }
 
+  private resolveCodexAutoSubagentThreadCap(): number {
+    const value = this.getEnvInt('AGENT_DISCORD_CODEX_AUTO_SUBAGENT_THREAD_CAP', 6);
+    return Math.min(32, Math.max(1, value));
+  }
+
   private maybeAugmentCodexPromptForSubAgent(prompt: string): { prompt: string; applied: boolean } {
     if (!this.getEnvBool('AGENT_DISCORD_CODEX_AUTO_SUBAGENT', true)) {
       return { prompt, applied: false };
@@ -2177,11 +2397,14 @@ export class BridgeMessageRouter {
     if (this.hasExplicitSubAgentRequest(prompt)) return { prompt, applied: false };
     if (!this.isLargeContextPrompt(prompt)) return { prompt, applied: false };
 
+    const threadCap = this.resolveCodexAutoSubagentThreadCap();
     const hint = [
       '[mudcode auto-subagent]',
       'This request looks context-heavy. Split work and run focused sub-agent Codex workers.',
       '- Create 2-4 sub-agents with explicit ownership (files/responsibility).',
+      `- Respect runtime sub-agent thread cap: keep active spawn_agent workers <= ${threadCap}.`,
       '- Run independent chunks in parallel, then merge and verify once.',
+      '- If thread limit is reached, do not stop. Reuse existing workers or continue sequentially.',
       '- Keep each sub-agent context narrow; avoid full-repo rereads unless needed.',
       '- Return one integrated summary with changed files and verification results.',
       '[/mudcode auto-subagent]',
@@ -2309,6 +2532,7 @@ export class BridgeMessageRouter {
       'You are the supervisor in orchestrator mode.',
       '- Do not directly implement code before delegating focused tasks to workers.',
       '- Assign scoped work to worker instances first, then integrate their results.',
+      '- If sub-agent thread capacity is unavailable, keep going with existing workers or sequential delegation.',
       '- Keep final response concise: Need your check / Changes / Verification.',
       '[/mudcode supervisor-orchestrator-guard]',
     ].join('\n');
@@ -3159,6 +3383,37 @@ export class BridgeMessageRouter {
         await this.deps.messaging.sendToChannel(
           params.channelId,
           `⚠️ Doctor command failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      return;
+    }
+
+    if (params.command.kind === 'repair') {
+      await this.deps.messaging.sendToChannel(
+        params.channelId,
+        '🛠️ Running doctor auto-fix, then scheduling daemon restart...',
+      );
+      try {
+        const runner = this.deps.doctorRunner || runDoctor;
+        const result = await runner({ fix: true });
+        await this.sendSplitMessage(params.channelId, this.formatDoctorSummary(result));
+      } catch (error) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          `⚠️ Repair step failed during doctor run: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return;
+      }
+      await this.deps.messaging.sendToChannel(
+        params.channelId,
+        '♻️ Scheduling daemon restart after repair...',
+      );
+      try {
+        this.scheduleBackgroundCli(['daemon', 'restart'], 500);
+      } catch (error) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          `⚠️ Failed to schedule daemon restart: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
       return;

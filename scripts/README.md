@@ -35,6 +35,14 @@ Scripts are grouped by intent.
 
 - `ci-local.mjs`
 
+## `package.json` Ops Scripts
+
+- `ops:doctor`: run doctor report.
+- `ops:doctor:fix`: run doctor with safe auto-fixes.
+- `ops:daemon:restart`: restart daemon via CLI.
+- `ops:self-heal`: build + doctor fix + daemon restart (one-shot repair).
+- `ops:verify:fast`: quick regression set for config/capture/router/index hot paths.
+
 ## `scripts/migration/`
 
 - `migrate-discode-cleanup.mjs`

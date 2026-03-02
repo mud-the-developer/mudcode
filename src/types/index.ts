@@ -138,6 +138,12 @@ export interface BridgeConfig {
      */
     longOutputThreadThreshold?: number;
     /**
+     * Character budget for final-only capture buffer retention.
+     * Older content is truncated when this limit is exceeded.
+     * Equivalent to AGENT_DISCORD_CAPTURE_FINAL_BUFFER_MAX_CHARS.
+     */
+    finalBufferMaxChars?: number;
+    /**
      * Visibility gate for capture-poller progress deltas.
      * - off: do not emit progress deltas
      * - thread: emit progress deltas in a thread-like sub-channel

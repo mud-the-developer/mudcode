@@ -671,10 +671,10 @@ export class BridgeHookServer {
 
   private resolveEventProgressTranscriptMaxChars(): number {
     const fromEnv = Number(process.env.AGENT_DISCORD_EVENT_PROGRESS_TRANSCRIPT_MAX_CHARS || '');
-    if (Number.isFinite(fromEnv) && fromEnv >= 500 && fromEnv <= 100_000) {
+    if (Number.isFinite(fromEnv) && fromEnv >= 500 && fromEnv <= 500_000) {
       return Math.trunc(fromEnv);
     }
-    return 24_000;
+    return 100_000;
   }
 
   private resolveEventFinalFallbackFromProgressEnabled(): boolean {
@@ -1072,12 +1072,13 @@ export class BridgeHookServer {
     generatedAt: string;
     instances: RuntimeStatusInstanceSnapshot[];
   } {
-    const projects = this.deps.stateManager.listProjects().map((project) => normalizeProjectState(project));
+    const projects = this.deps.stateManager.listProjects();
     const activeInstanceKeys = new Set<string>();
     const instances: RuntimeStatusInstanceSnapshot[] = [];
 
-    for (const project of projects) {
-      for (const instance of listProjectInstances(project)) {
+    for (const rawProject of projects) {
+      const project = rawProject as ReturnType<typeof normalizeProjectState>;
+      for (const instance of listProjectInstances(rawProject)) {
         activeInstanceKeys.add(this.runtimeKey(project.projectName, instance.instanceId));
         const ignored = this.getIgnoredEventSnapshot(project.projectName, instance.instanceId);
         const lifecycleRejected = this.getLifecycleRejectedEventSnapshot(project.projectName, instance.instanceId);
@@ -1300,7 +1301,7 @@ export class BridgeHookServer {
     const project = this.deps.stateManager.getProject(projectName);
     if (!project) return { status: 404, message: 'Project not found' };
 
-    const normalizedProject = normalizeProjectState(project);
+    const normalizedProject = project as ReturnType<typeof normalizeProjectState>;
     const instance =
       (instanceId ? getProjectInstance(normalizedProject, instanceId) : undefined) ||
       getPrimaryInstanceForAgent(normalizedProject, agentType);
@@ -1369,7 +1370,7 @@ export class BridgeHookServer {
     const project = this.deps.stateManager.getProject(projectName);
     if (!project) return false;
 
-    const normalizedProject = normalizeProjectState(project);
+    const normalizedProject = project as ReturnType<typeof normalizeProjectState>;
     const instance =
       (instanceId ? getProjectInstance(normalizedProject, instanceId) : undefined) ||
       getPrimaryInstanceForAgent(normalizedProject, agentType);
