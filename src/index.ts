@@ -201,7 +201,7 @@ export class AgentBridge {
     const warnings: string[] = [];
     const created: ProjectInstanceState[] = [];
     const port = this.resolveBridgePort();
-    const targetCount = Math.min(8, Math.max(1, Math.trunc(params.count || 1)));
+    const targetCount = Math.min(15, Math.max(1, Math.trunc(params.count || 1)));
     let normalizedProject = normalizeProjectState(project);
 
     try {

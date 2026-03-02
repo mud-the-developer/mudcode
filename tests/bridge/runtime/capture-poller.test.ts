@@ -53,6 +53,7 @@ describe('BridgeCapturePoller', () => {
     delete process.env.AGENT_DISCORD_EVENT_PROGRESS_BLOCK_STREAMING;
     delete process.env.AGENT_DISCORD_EVENT_PROGRESS_BLOCK_WINDOW_MS;
     delete process.env.AGENT_DISCORD_EVENT_PROGRESS_BLOCK_MAX_CHARS;
+    delete process.env.AGENT_DISCORD_SUPERVISOR_FINAL_REQUIRE_EVIDENCE;
   });
 
   afterEach(() => {
@@ -75,6 +76,7 @@ describe('BridgeCapturePoller', () => {
     delete process.env.AGENT_DISCORD_EVENT_PROGRESS_BLOCK_STREAMING;
     delete process.env.AGENT_DISCORD_EVENT_PROGRESS_BLOCK_WINDOW_MS;
     delete process.env.AGENT_DISCORD_EVENT_PROGRESS_BLOCK_MAX_CHARS;
+    delete process.env.AGENT_DISCORD_SUPERVISOR_FINAL_REQUIRE_EVIDENCE;
   });
 
   it('sends delta output for non-hook instances', async () => {
@@ -678,6 +680,182 @@ describe('BridgeCapturePoller', () => {
       'thread-ch',
       expect.stringContaining('Supervisor final-format retry 1/1 requested'),
     );
+
+    poller.stop();
+  });
+
+  it('requests supervisor final-format retry when headings exist but evidence is missing', async () => {
+    delete process.env.AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY;
+
+    const structuredButNoEvidence = [
+      '1) Need your check',
+      'none',
+      '2) Changes',
+      'updated internals',
+      '3) Verification',
+      'looks good',
+    ].join('\n');
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        orchestrator: {
+          enabled: true,
+          supervisorInstanceId: 'codex',
+          workerFinalVisibility: 'hidden',
+          supervisorFinalFormat: {
+            enforce: true,
+            maxRetries: 1,
+          },
+        },
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'parent-ch',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const tmux = createTmux([
+      'boot line',
+      `boot line\n${structuredButNoEvidence}`,
+      `boot line\n${structuredButNoEvidence}`,
+      `boot line\n${structuredButNoEvidence}`,
+      `boot line\n${structuredButNoEvidence}`,
+      `boot line\n${structuredButNoEvidence}`,
+    ]);
+
+    let pendingDepth = 1;
+    const pendingTracker = {
+      getPendingChannel: vi.fn().mockImplementation(() => (pendingDepth > 0 ? 'thread-ch' : undefined)),
+      getPendingDepth: vi.fn().mockImplementation(() => pendingDepth),
+      getPendingMessageId: vi.fn().mockImplementation(() => (pendingDepth > 0 ? 'msg-super-format-evidence-1' : undefined)),
+      markCompleted: vi.fn().mockImplementation(async () => {
+        pendingDepth = 0;
+      }),
+      markPending: vi.fn().mockImplementation(async () => {
+        pendingDepth = 1;
+      }),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      intervalMs: 300,
+    });
+
+    poller.start();
+    await Promise.resolve();
+
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(pendingTracker.markPending).toHaveBeenCalledTimes(1);
+    expect(tmux.typeKeysToWindow).toHaveBeenCalledWith(
+      'agent-demo',
+      'demo-codex',
+      expect.stringContaining('[mudcode supervisor-final-format]'),
+      'codex',
+    );
+    expect(messaging.sendToChannel).toHaveBeenCalledWith(
+      'thread-ch',
+      expect.stringContaining('Supervisor final-format retry 1/1 requested'),
+    );
+
+    poller.stop();
+  });
+
+  it('accepts supervisor final-format output when file and verification evidence exist', async () => {
+    delete process.env.AGENT_DISCORD_CAPTURE_CODEX_FINAL_ONLY;
+
+    const compliantWithEvidence = [
+      '1) Need your check',
+      'none',
+      '2) Changes',
+      '- src/bridge/runtime/message-router.ts: delegation-contract gate',
+      '3) Verification',
+      '- `bun run test tests/bridge/runtime/message-router.test.ts` pass',
+    ].join('\n');
+    const stateManager = createStateManager([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'agent-demo',
+        orchestrator: {
+          enabled: true,
+          supervisorInstanceId: 'codex',
+          workerFinalVisibility: 'hidden',
+          supervisorFinalFormat: {
+            enforce: true,
+            maxRetries: 1,
+          },
+        },
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'parent-ch',
+            eventHook: false,
+          },
+        },
+      },
+    ]);
+    const messaging = createMessaging('discord');
+    const tmux = createTmux([
+      'boot line',
+      `boot line\n${compliantWithEvidence}`,
+      `boot line\n${compliantWithEvidence}`,
+      `boot line\n${compliantWithEvidence}`,
+      `boot line\n${compliantWithEvidence}`,
+      `boot line\n${compliantWithEvidence}`,
+    ]);
+
+    let pendingDepth = 1;
+    const pendingTracker = {
+      getPendingChannel: vi.fn().mockImplementation(() => (pendingDepth > 0 ? 'thread-ch' : undefined)),
+      getPendingDepth: vi.fn().mockImplementation(() => pendingDepth),
+      getPendingMessageId: vi.fn().mockImplementation(() => (pendingDepth > 0 ? 'msg-super-format-evidence-2' : undefined)),
+      markCompleted: vi.fn().mockImplementation(async () => {
+        pendingDepth = 0;
+      }),
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const poller = new BridgeCapturePoller({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      intervalMs: 300,
+    });
+
+    poller.start();
+    await Promise.resolve();
+
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(pendingTracker.markPending).not.toHaveBeenCalled();
+    expect(tmux.typeKeysToWindow).not.toHaveBeenCalled();
+    expect(messaging.sendToChannel).toHaveBeenCalledWith('thread-ch', compliantWithEvidence);
 
     poller.stop();
   });

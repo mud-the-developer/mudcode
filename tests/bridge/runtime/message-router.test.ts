@@ -112,6 +112,8 @@ describe('BridgeMessageRouter (codex)', () => {
     delete process.env.AGENT_DISCORD_ORCHESTRATOR_PACKET_INLINE_MAX_CHARS;
     delete process.env.AGENT_DISCORD_ORCHESTRATOR_PACKET_ARTIFACT_ENABLED;
     delete process.env.AGENT_DISCORD_ORCHESTRATOR_MANUAL_COMMANDS;
+    delete process.env.AGENT_DISCORD_ORCHESTRATOR_DELEGATION_CONTRACT_MODE;
+    delete process.env.AGENT_DISCORD_ORCHESTRATOR_SUPERVISOR_GUARD;
     for (const dir of tempDirs.splice(0)) {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -576,6 +578,67 @@ describe('BridgeMessageRouter (codex)', () => {
     const sentPrompt = String(tmux.typeKeysToWindow.mock.calls[0]?.[2] ?? '');
     expect(sentPrompt).toBe('continue');
     expect(sentPrompt).not.toContain('[mudcode longtask-report]');
+  });
+
+  it('injects supervisor orchestration guard for supervisor prompts when orchestrator is enabled', async () => {
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_AUTO_LONGTASK_REPORT_MODE = 'off';
+    process.env.AGENT_DISCORD_ORCHESTRATOR_SUPERVISOR_GUARD = '1';
+    process.env.AGENT_DISCORD_ORCHESTRATOR_AUTO_DISPATCH_MODE = 'off';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      capturePaneFromWindow: vi.fn().mockReturnValue('Esc to interrupt'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue({
+        ...createMultiInstanceProjectState(),
+        orchestrator: {
+          enabled: true,
+          supervisorInstanceId: 'codex',
+          workerInstanceIds: ['codex-2'],
+          workerFinalVisibility: 'hidden',
+        },
+      }),
+      setProject: vi.fn(),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      getRuntimeSnapshot: vi.fn().mockReturnValue({ pendingDepth: 0 }),
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', 'continue', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    const sentPrompt = String(
+      tmux.typeKeysToWindow.mock.calls.find((call: unknown[]) => call[1] === 'demo-codex')?.[2] ?? '',
+    );
+    expect(sentPrompt).toContain('continue');
+    expect(sentPrompt).toContain('[mudcode supervisor-orchestrator-guard]');
+    expect(sentPrompt).toContain('Do not directly implement code before delegating');
   });
 
   it('auto-injects language policy hint for korean codex prompts', async () => {
@@ -1520,6 +1583,66 @@ describe('BridgeMessageRouter (codex)', () => {
     );
   });
 
+  it('caps /orchestrator spawn count at 15', async () => {
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue({
+        ...createMultiInstanceProjectState(),
+        orchestrator: {
+          enabled: true,
+          supervisorInstanceId: 'codex',
+          workerInstanceIds: ['codex-2'],
+          workerFinalVisibility: 'hidden',
+        },
+      }),
+      setProject: vi.fn(),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+    const orchestratorWorkerProvisioner = {
+      spawnCodexWorkers: vi.fn().mockResolvedValue({
+        created: [],
+        warnings: ['no capacity'],
+      }),
+      teardownWorker: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      orchestratorWorkerProvisioner,
+    });
+    router.register();
+
+    const callback = getCallback();
+    process.env.AGENT_DISCORD_ORCHESTRATOR_MANUAL_COMMANDS = '1';
+    await callback('codex', '/orchestrator spawn 99', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    expect(orchestratorWorkerProvisioner.spawnCodexWorkers).toHaveBeenCalledWith({
+      projectName: 'demo',
+      count: 15,
+    });
+  });
+
   it('removes dynamic orchestrator worker and updates orchestrator registry', async () => {
     const { messaging, getCallback } = createMessagingMock();
     const tmux = {
@@ -1727,7 +1850,12 @@ describe('BridgeMessageRouter (codex)', () => {
       supervisorInstanceId: 'codex',
     });
     expect(projectState.orchestrator?.workerInstanceIds).toContain('codex-2');
-    expect(tmux.typeKeysToWindow).toHaveBeenCalledWith('agent-demo', 'demo-codex', 'implement queue worker', 'codex');
+    expect(tmux.typeKeysToWindow).toHaveBeenCalledWith(
+      'agent-demo',
+      'demo-codex',
+      expect.stringContaining('implement queue worker'),
+      'codex',
+    );
   });
 
   it('auto-dispatches supporting worker task on continuation prompt', async () => {
@@ -1779,7 +1907,12 @@ describe('BridgeMessageRouter (codex)', () => {
     const callback = getCallback();
     await callback('codex', 'continue', 'demo', 'ch-1', 'msg-1', 'codex');
 
-    expect(tmux.typeKeysToWindow).toHaveBeenCalledWith('agent-demo', 'demo-codex', 'continue', 'codex');
+    expect(tmux.typeKeysToWindow).toHaveBeenCalledWith(
+      'agent-demo',
+      'demo-codex',
+      expect.stringContaining('continue'),
+      'codex',
+    );
     expect(tmux.typeKeysToWindow).toHaveBeenCalledWith('agent-demo', 'demo-codex-2', 'continue', 'codex');
     expect(messaging.sendToChannel).toHaveBeenCalledWith(
       'ch-1',
@@ -1857,7 +1990,12 @@ describe('BridgeMessageRouter (codex)', () => {
     const callback = getCallback();
     await callback('codex', 'continue', 'demo', 'ch-1', 'msg-1', 'codex');
 
-    expect(tmux.typeKeysToWindow).toHaveBeenCalledWith('agent-demo', 'demo-codex', 'continue', 'codex');
+    expect(tmux.typeKeysToWindow).toHaveBeenCalledWith(
+      'agent-demo',
+      'demo-codex',
+      expect.stringContaining('continue'),
+      'codex',
+    );
     expect(tmux.typeKeysToWindow).toHaveBeenCalledWith('agent-demo', 'demo-codex-2', 'continue', 'codex');
     expect(tmux.typeKeysToWindow).toHaveBeenCalledWith('agent-demo', 'demo-codex-3', 'continue', 'codex');
     expect(messaging.sendToChannel).toHaveBeenCalledWith(
@@ -2329,6 +2467,76 @@ describe('BridgeMessageRouter (codex)', () => {
     expect(messaging.sendToChannel).toHaveBeenCalledWith(
       'ch-1',
       expect.stringContaining('task: implement event queue'),
+    );
+  });
+
+  it('enforces delegation contract wrapper for /orchestrator run when mode=enforce', async () => {
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_ORCHESTRATOR_DELEGATION_CONTRACT_MODE = 'enforce';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      capturePaneFromWindow: vi.fn().mockReturnValue('Esc to interrupt'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue({
+        ...createMultiInstanceProjectState(),
+        orchestrator: {
+          enabled: true,
+          supervisorInstanceId: 'codex',
+          workerInstanceIds: ['codex-2'],
+          workerFinalVisibility: 'hidden',
+        },
+      }),
+      setProject: vi.fn(),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      getRuntimeSnapshot: vi.fn().mockReturnValue({ pendingDepth: 0 }),
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    process.env.AGENT_DISCORD_ORCHESTRATOR_MANUAL_COMMANDS = '1';
+    await callback('codex', '/orchestrator run codex-2 implement event queue', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    const workerPrompt = String(
+      tmux.typeKeysToWindow.mock.calls.find((call: unknown[]) => call[1] === 'demo-codex-2')?.[2] || '',
+    );
+    expect(workerPrompt).toContain('[mudcode delegation-contract]');
+    expect(workerPrompt).toContain('project=demo');
+    expect(workerPrompt).toContain('supervisor=codex');
+    expect(workerPrompt).toContain('worker=codex-2');
+    expect(workerPrompt).toContain('implement event queue');
+    expect(pendingTracker.markPending).toHaveBeenCalledWith(
+      'demo',
+      'codex',
+      'ch-2',
+      expect.stringMatching(/^orch-demo-codex-codex-2-/),
+      'codex-2',
+      expect.stringContaining('[mudcode delegation-contract]'),
     );
   });
 

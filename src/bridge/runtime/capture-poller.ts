@@ -746,6 +746,8 @@ export class BridgeCapturePoller {
     if (trimmed.length === 0) return false;
     const strictRaw = (process.env.AGENT_DISCORD_SUPERVISOR_FINAL_FORMAT_STRICT || '').trim().toLowerCase();
     const strict = strictRaw.length === 0 ? true : !['0', 'false', 'no', 'off'].includes(strictRaw);
+    const evidenceRaw = (process.env.AGENT_DISCORD_SUPERVISOR_FINAL_REQUIRE_EVIDENCE || '').trim().toLowerCase();
+    const requireEvidence = evidenceRaw.length === 0 ? true : !['0', 'false', 'no', 'off'].includes(evidenceRaw);
 
     const numberedNeed =
       /^\s*1[\.\)]\s*(need your check|manual check|확인 필요|체크 필요|need check|체크|확인)\b/im.test(trimmed);
@@ -753,7 +755,9 @@ export class BridgeCapturePoller {
       /^\s*2[\.\)]\s*(changes?|deltas?|변경|수정)\b/im.test(trimmed);
     const numberedVerification =
       /^\s*3[\.\)]\s*(verification|tests?|검증|테스트)\b/im.test(trimmed);
-    if (numberedNeed && numberedChanges && numberedVerification) return true;
+    if (numberedNeed && numberedChanges && numberedVerification) {
+      return requireEvidence ? this.hasSupervisorFinalEvidence(trimmed) : true;
+    }
 
     const headingNeed =
       /(?:^|\n)\s*(?:\*\*)?(need your check|manual check|확인 필요|체크 필요)(?:\*\*)?\s*:?/im.test(trimmed);
@@ -761,16 +765,60 @@ export class BridgeCapturePoller {
       /(?:^|\n)\s*(?:\*\*)?(changes?|deltas?|변경|수정)(?:\*\*)?\s*:?/im.test(trimmed);
     const headingVerification =
       /(?:^|\n)\s*(?:\*\*)?(verification|tests?|검증|테스트)(?:\*\*)?\s*:?/im.test(trimmed);
-    if (headingNeed && headingChanges && headingVerification) return true;
+    if (headingNeed && headingChanges && headingVerification) {
+      return requireEvidence ? this.hasSupervisorFinalEvidence(trimmed) : true;
+    }
 
     if (!strict) {
       if (trimmed.length <= 320) return true;
       const hasNeedKeyword = /\bneed your check\b/i.test(trimmed) || /(체크|확인)\b/.test(trimmed);
       const hasChangeKeyword = /\bchanges?\b/i.test(trimmed) || /(변경|수정)\b/.test(trimmed);
       const hasVerificationKeyword = /\bverification\b/i.test(trimmed) || /(검증|테스트)\b/.test(trimmed);
-      return hasNeedKeyword && hasChangeKeyword && hasVerificationKeyword;
+      const basic = hasNeedKeyword && hasChangeKeyword && hasVerificationKeyword;
+      if (!basic) return false;
+      return requireEvidence ? this.hasSupervisorFinalEvidence(trimmed) : true;
     }
     return false;
+  }
+
+  private hasSupervisorFinalEvidence(text: string): boolean {
+    return this.hasSupervisorChangeEvidence(text) && this.hasSupervisorVerificationEvidence(text);
+  }
+
+  private hasSupervisorChangeEvidence(text: string): boolean {
+    const normalized = text.trim();
+    if (normalized.length === 0) return false;
+    const noChange =
+      /\bno\s+changes?\b/i.test(normalized) ||
+      /\bchanges?\s*:\s*none\b/i.test(normalized) ||
+      /\bnone\b/i.test(normalized) ||
+      /(변경|수정)\s*없음/.test(normalized) ||
+      /\b없음\b/.test(normalized);
+    if (noChange) return true;
+
+    const filePathEvidence =
+      /(?:^|\n)\s*(?:[-*]|\d+[\.\)])?\s*`?(\/[A-Za-z0-9._\-/]+|(?:[A-Za-z0-9._-]+\/)+[A-Za-z0-9._-]+(?:\.[A-Za-z0-9._-]+)?)`?(?::\d+(?::\d+)?)?\s*$/m
+        .test(normalized);
+    return filePathEvidence;
+  }
+
+  private hasSupervisorVerificationEvidence(text: string): boolean {
+    const normalized = text.trim();
+    if (normalized.length === 0) return false;
+
+    const commandEvidence =
+      /`(?:bun|npm|pnpm|yarn|vitest|jest|cargo|go|python|pytest|tsc|node|git|rg|sed|bash|sh)\b[^`\n]*`/i.test(
+        normalized,
+      ) ||
+      /(?:^|\n)\s*(?:[-*]|\d+[\.\)])\s*(?:bun|npm|pnpm|yarn|vitest|jest|cargo|go|python|pytest|tsc|node|git|rg|sed|bash|sh)\b[^\n]*/im.test(
+        normalized,
+      );
+    if (!commandEvidence) return false;
+
+    const resultEvidence =
+      /\b(pass|passed|fail|failed|success|succeeded|error|errored|skipped|not run)\b/i.test(normalized) ||
+      /(성공|실패|통과|오류|미실행|건너뜀)/.test(normalized);
+    return resultEvidence;
   }
 
   private buildSupervisorFinalFormatRetryPrompt(): string {
@@ -778,8 +826,8 @@ export class BridgeCapturePoller {
       '[mudcode supervisor-final-format]',
       'Rewrite the previous final response in this exact concise format:',
       '1) Need your check (manual actions only, or "none")',
-      '2) Changes (file/behavior deltas only)',
-      '3) Verification (commands run + pass/fail)',
+      '2) Changes (file/behavior deltas only; include at least one file path or "none")',
+      '3) Verification (commands run + pass/fail; include command text and result)',
       'Do not include process logs or internal analysis.',
       '[/mudcode supervisor-final-format]',
     ].join('\n');

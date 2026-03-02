@@ -162,7 +162,7 @@ Doctor 안전 점검:
 - `/io` (Codex I/O 추적 상태 + 최신 transcript 경로 확인)
 - `/orchestrator status|run|spawn|remove|enable|disable` (수동 supervisor/worker 오케스트레이션 제어, 기본 비활성화)
   - run 사용법: `/orchestrator run <workerInstanceId> [--priority high|normal|low] <task>` (또는 `p2|p1|p0 <task>`)
-  - spawn 사용법: `/orchestrator spawn [count]` (기본 `1`, 최대 `8`)
+  - spawn 사용법: `/orchestrator spawn [count]` (기본 `1`, 최대 `15`)
   - remove 사용법: `/orchestrator remove <workerInstanceId>`
 - `/subagents list|send|steer|spawn|info|log|kill` (OpenClaw 스타일 수동 alias, 기본 비활성화)
   - send 사용법: `/subagents send <workerInstanceId> [--priority high|normal|low] <task>`
@@ -185,9 +185,9 @@ Orchestrator 자동화:
 - `AGENT_DISCORD_ORCHESTRATOR_AUTO_ENABLE=1|0` (기본값 `1`, multi-codex worker가 있으면 자동 활성화)
 - `AGENT_DISCORD_ORCHESTRATOR_AUTO_VISIBILITY=hidden|thread|channel` (기본값 `hidden`)
 - `AGENT_DISCORD_ORCHESTRATOR_AUTO_DISPATCH_MODE=off|continue|auto|always` (기본값 `auto`)
-- `AGENT_DISCORD_ORCHESTRATOR_AUTO_DISPATCH_MAX_WORKERS=<n>` (기본값 `1`, auto fanout 발주 시 최대 worker 수)
+- `AGENT_DISCORD_ORCHESTRATOR_AUTO_DISPATCH_MAX_WORKERS=<n>` (기본값 `1`, auto fanout 발주 시 최대 worker 수; 최대 `15`)
 - `AGENT_DISCORD_ORCHESTRATOR_AUTO_SPAWN=1|0` (기본값 `1`, auto-dispatch에 worker가 없으면 codex worker 자동 프로비저닝)
-- `AGENT_DISCORD_ORCHESTRATOR_AUTO_SPAWN_WORKERS=<n>` (기본값 `2`, 자동 생성 worker 수; 최대 `4`)
+- `AGENT_DISCORD_ORCHESTRATOR_AUTO_SPAWN_WORKERS=<n>` (기본값 `2`, 자동 생성 worker 수; 최대 `15`)
 - `AGENT_DISCORD_ORCHESTRATOR_AUTO_PLANNER=1|0` (기본값 `1`, auto fanout 시 planner task 분할 활성화)
 - `AGENT_DISCORD_ORCHESTRATOR_AUTO_PLANNER_PROMPT_MAX_CHARS=<n>` (기본값 `1600`, planner payload에 포함되는 원문 최대 길이)
 - `AGENT_DISCORD_ORCHESTRATOR_CONTEXT_BUDGET_CHARS=<n>` (기본값 `2600`, task-packet 컨텍스트 예산 게이트)
@@ -213,7 +213,7 @@ Self-check:
 - `AGENT_DISCORD_CODEX_IO_V2_DIR=/path` : transcript 저장 루트 경로 변경
 - `MUDCODE_CODEX_AUTO_SKILL_LINK=0` : 자동 skill 힌트 비활성화
 - `AGENT_DISCORD_CODEX_AUTO_LONGTASK_REPORT_MODE=continue|auto|always|off` : 긴 작업 실행/보고 스타일 힌트 자동 주입 (`continue` 기본값)
-- `AGENT_DISCORD_CODEX_AUTO_LANGUAGE_POLICY_MODE=off|korean|always` : 기본값 `korean`, 한글 입력 감지 시 영어 내부 추론 정책 힌트 자동 주입
+- `AGENT_DISCORD_CODEX_AUTO_LANGUAGE_POLICY_MODE=off|korean|always` : 기본값 `off`, 필요한 경우에만 `korean`/`always`로 명시 설정
 - `AGENT_DISCORD_CODEX_EVENT_ONLY=1|0` : 기본값 `1`, `0`이면 기존 direct capture 출력 경로 유지
 - `AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK=0|1` : 기본값 `0`, `1`이면 tmux stale fallback capture 재활성화
 - `AGENT_DISCORD_EVENT_LIFECYCLE_STRICT_MODE=off|warn|reject` : 기본값 `warn`

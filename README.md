@@ -162,7 +162,7 @@ Use these inside mapped channels/threads:
 - `/io` (show Codex I/O tracker status + latest transcript path)
 - `/orchestrator status|run|spawn|remove|enable|disable` (manual supervisor/worker orchestration controls; disabled by default)
   - run usage: `/orchestrator run <workerInstanceId> [--priority high|normal|low] <task>` (or `p2|p1|p0 <task>`)
-  - spawn usage: `/orchestrator spawn [count]` (default `1`, max `8`)
+  - spawn usage: `/orchestrator spawn [count]` (default `1`, max `15`)
   - remove usage: `/orchestrator remove <workerInstanceId>`
 - `/subagents list|send|steer|spawn|info|log|kill` (OpenClaw-style alias for manual orchestrator controls; disabled by default)
   - send usage: `/subagents send <workerInstanceId> [--priority high|normal|low] <task>`
@@ -185,9 +185,9 @@ Orchestrator automation:
 - `AGENT_DISCORD_ORCHESTRATOR_AUTO_ENABLE=1|0` (default `1`, auto-enable when multi-codex workers are available)
 - `AGENT_DISCORD_ORCHESTRATOR_AUTO_VISIBILITY=hidden|thread|channel` (default `hidden`)
 - `AGENT_DISCORD_ORCHESTRATOR_AUTO_DISPATCH_MODE=off|continue|auto|always` (default `auto`)
-- `AGENT_DISCORD_ORCHESTRATOR_AUTO_DISPATCH_MAX_WORKERS=<n>` (default `1`, max workers for auto fanout dispatch)
+- `AGENT_DISCORD_ORCHESTRATOR_AUTO_DISPATCH_MAX_WORKERS=<n>` (default `1`, max workers for auto fanout dispatch; max `15`)
 - `AGENT_DISCORD_ORCHESTRATOR_AUTO_SPAWN=1|0` (default `1`, auto-provision codex workers when auto-dispatch has no workers)
-- `AGENT_DISCORD_ORCHESTRATOR_AUTO_SPAWN_WORKERS=<n>` (default `2`, worker count to auto-provision; max `4`)
+- `AGENT_DISCORD_ORCHESTRATOR_AUTO_SPAWN_WORKERS=<n>` (default `2`, worker count to auto-provision; max `15`)
 - `AGENT_DISCORD_ORCHESTRATOR_AUTO_PLANNER=1|0` (default `1`, split auto fanout into planner task assignments)
 - `AGENT_DISCORD_ORCHESTRATOR_AUTO_PLANNER_PROMPT_MAX_CHARS=<n>` (default `1600`, truncate original request in planner payload)
 - `AGENT_DISCORD_ORCHESTRATOR_CONTEXT_BUDGET_CHARS=<n>` (default `2600`, task-packet context budget gate)
@@ -213,7 +213,7 @@ Environment toggles:
 - `AGENT_DISCORD_CODEX_IO_V2_DIR=/path` to change transcript root directory
 - `MUDCODE_CODEX_AUTO_SKILL_LINK=0` to disable automatic skill-link hints
 - `AGENT_DISCORD_CODEX_AUTO_LONGTASK_REPORT_MODE=continue|auto|always|off` to auto-append long-task execution/reporting policy hints (`continue` default)
-- `AGENT_DISCORD_CODEX_AUTO_LANGUAGE_POLICY_MODE=off|korean|always` (default `korean`; inject an English-internal-reasoning policy when Korean is detected)
+- `AGENT_DISCORD_CODEX_AUTO_LANGUAGE_POLICY_MODE=off|korean|always` (default `off`; set `korean`/`always` only when you explicitly want this extra policy hint)
 - `AGENT_DISCORD_CODEX_EVENT_ONLY=1|0` (default `1`, set `0` to keep legacy direct capture output path)
 - `AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK=0|1` (default `0`, set `1` to re-enable tmux stale fallback capture)
 - `AGENT_DISCORD_EVENT_LIFECYCLE_STRICT_MODE=off|warn|reject` (default `warn`)

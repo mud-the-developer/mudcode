@@ -11,7 +11,7 @@
     "dev": "tsx src/daemon-entry.ts",
     "build": "tsup",
     "build:watch": "tsup --watch",
-    "prepare": "npm run build",
+    "prepare": "node scripts/setup/prepare.mjs",
     "start": "node dist/src/daemon-entry.js",
     "pages:dev": "vite",
     "pages:build": "vite build",

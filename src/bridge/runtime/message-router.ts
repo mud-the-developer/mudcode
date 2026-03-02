@@ -104,6 +104,7 @@ type MaintenanceCommand =
   | { kind: 'orchestrator-help'; message: string };
 type CodexLongTaskReportMode = 'off' | 'continue' | 'auto' | 'always';
 type CodexLanguagePolicyMode = 'off' | 'korean' | 'always';
+type OrchestratorDelegationContractMode = 'off' | 'warn' | 'enforce';
 
 interface OrchestratorQueuedTask {
   taskId: string;
@@ -342,7 +343,7 @@ export class BridgeMessageRouter {
       }
       return {
         kind: 'orchestrator-spawn',
-        count: Math.min(8, Math.trunc(parsed)),
+        count: Math.min(15, Math.trunc(parsed)),
       };
     }
     if (sub === 'send' || sub === 'run' || sub === 'steer') {
@@ -534,7 +535,7 @@ export class BridgeMessageRouter {
         }
         return {
           kind: 'orchestrator-spawn',
-          count: Math.min(8, Math.trunc(parsed)),
+          count: Math.min(15, Math.trunc(parsed)),
         };
       }
       if (sub === 'remove' || sub === 'rm' || sub === 'teardown') {
@@ -1160,7 +1161,7 @@ export class BridgeMessageRouter {
 
   private resolveOrchestratorAutoDispatchMaxWorkers(): number {
     const value = this.getEnvInt('AGENT_DISCORD_ORCHESTRATOR_AUTO_DISPATCH_MAX_WORKERS', 1);
-    return Math.min(8, Math.max(1, value));
+    return Math.min(15, Math.max(1, value));
   }
 
   private resolveOrchestratorAutoPlannerEnabled(): boolean {
@@ -1173,7 +1174,7 @@ export class BridgeMessageRouter {
 
   private resolveOrchestratorAutoSpawnWorkers(): number {
     const value = this.getEnvInt('AGENT_DISCORD_ORCHESTRATOR_AUTO_SPAWN_WORKERS', 2);
-    return Math.min(4, Math.max(1, value));
+    return Math.min(15, Math.max(1, value));
   }
 
   private resolveOrchestratorPlannerPromptMaxChars(): number {
@@ -1203,6 +1204,18 @@ export class BridgeMessageRouter {
 
   private resolveOrchestratorPacketArtifactEnabled(): boolean {
     return this.getEnvBool('AGENT_DISCORD_ORCHESTRATOR_PACKET_ARTIFACT_ENABLED', true);
+  }
+
+  private resolveOrchestratorDelegationContractMode(): OrchestratorDelegationContractMode {
+    const raw = (process.env.AGENT_DISCORD_ORCHESTRATOR_DELEGATION_CONTRACT_MODE || '').trim().toLowerCase();
+    if (raw === 'off' || raw === 'warn' || raw === 'enforce') return raw;
+    if (['0', 'false', 'no'].includes(raw)) return 'off';
+    if (['1', 'true', 'yes', 'on'].includes(raw)) return 'enforce';
+    return 'warn';
+  }
+
+  private isOrchestratorDelegationContractPrompt(prompt: string): boolean {
+    return /\[mudcode orchestrator-plan\]/i.test(prompt) || /\[mudcode delegation-contract\]/i.test(prompt);
   }
 
   private stripMudcodeControlBlocks(prompt: string): string {
@@ -1409,6 +1422,61 @@ export class BridgeMessageRouter {
       '[/mudcode orchestrator-plan]',
     ].join('\n');
     return { prompt: wrapper, packetArtifactPath };
+  }
+
+  private buildOrchestratorDelegationContractPrompt(params: {
+    projectName: string;
+    supervisorInstanceId: string;
+    workerInstanceId: string;
+    prompt: string;
+  }): string {
+    const workerTask = this.stripMudcodeControlBlocks(params.prompt);
+    return [
+      '[mudcode delegation-contract]',
+      `contract=v1`,
+      `project=${params.projectName}`,
+      `supervisor=${params.supervisorInstanceId}`,
+      `worker=${params.workerInstanceId}`,
+      '',
+      '[worker-task]',
+      workerTask,
+      '[/worker-task]',
+      '',
+      'Execution contract:',
+      '- Execute only worker-task scope.',
+      '- Return concise final format only:',
+      '  1) Need your check (manual actions only, or "none")',
+      '  2) Changes (file/behavior deltas only)',
+      '  3) Verification (commands run + pass/fail)',
+      '- Do not include full process logs or hidden chain-of-thought.',
+      '[/mudcode delegation-contract]',
+    ].join('\n');
+  }
+
+  private applyOrchestratorDelegationContract(params: {
+    projectName: string;
+    supervisorInstanceId: string;
+    workerInstanceId: string;
+    prompt: string;
+  }): { prompt: string; enforced: boolean; warned: boolean } {
+    if (params.prompt.trim().length === 0) {
+      return { prompt: params.prompt, enforced: false, warned: false };
+    }
+    if (this.isOrchestratorDelegationContractPrompt(params.prompt)) {
+      return { prompt: params.prompt, enforced: false, warned: false };
+    }
+    const mode = this.resolveOrchestratorDelegationContractMode();
+    if (mode === 'off') {
+      return { prompt: params.prompt, enforced: false, warned: false };
+    }
+    if (mode === 'warn') {
+      return { prompt: params.prompt, enforced: false, warned: true };
+    }
+    return {
+      prompt: this.buildOrchestratorDelegationContractPrompt(params),
+      enforced: true,
+      warned: false,
+    };
   }
 
   private extractPlannerTaskCandidates(prompt: string): string[] {
@@ -1713,6 +1781,20 @@ export class BridgeMessageRouter {
       supervisorInstanceId: params.supervisorInstanceId,
       workerInstanceId: params.worker.instanceId,
     });
+    const contracted = this.applyOrchestratorDelegationContract({
+      projectName: params.projectName,
+      supervisorInstanceId: params.supervisorInstanceId,
+      workerInstanceId: params.worker.instanceId,
+      prompt: params.prompt,
+    });
+    const workerPrompt = contracted.prompt;
+    if (contracted.warned) {
+      console.warn(
+        `Orchestrator delegation-contract warning: ${params.projectName}/${params.worker.instanceId} dispatched without contract wrapper (mode=warn).`,
+      );
+    } else if (contracted.enforced) {
+      console.log(`🧱 [${params.projectName}] delegation-contract enforced for worker ${params.worker.instanceId}`);
+    }
 
     const maxConcurrency = this.resolveOrchestratorQosMaxConcurrency(params.normalizedProject);
     const knownWorkers = this.resolveOrchestratorWorkerIds(params.normalizedProject);
@@ -1741,19 +1823,19 @@ export class BridgeMessageRouter {
         projectName: params.projectName,
         normalizedProject: params.normalizedProject,
         instance: params.worker,
-        prompt: params.prompt,
+        prompt: workerPrompt,
         turnId,
         routeHint: params.routeHint,
         sourceChannelId: params.sourceChannelId,
       });
       if (dispatched.ok) {
-        this.rememberPrompt(params.projectName, params.worker.instanceId, params.prompt);
+        this.rememberPrompt(params.projectName, params.worker.instanceId, workerPrompt);
         this.rememberOrchestratorWorkerActivity({
           projectName: params.projectName,
           workerInstanceId: params.worker.instanceId,
           turnId,
           stage: 'dispatched',
-          prompt: params.prompt,
+          prompt: workerPrompt,
           queueDepth: this.getOrchestratorQueueSnapshot(params.projectName, params.worker.instanceId).depth,
         });
         return {
@@ -1775,7 +1857,7 @@ export class BridgeMessageRouter {
         projectName: params.projectName,
         supervisorInstanceId: params.supervisorInstanceId,
         workerInstanceId: params.worker.instanceId,
-        prompt: params.prompt,
+        prompt: workerPrompt,
         sourceChannelId: params.sourceChannelId,
         routeHint: params.routeHint,
         turnId,
@@ -1796,13 +1878,13 @@ export class BridgeMessageRouter {
         };
       }
       this.scheduleOrchestratorQueueDrain(params.projectName, params.worker.instanceId);
-      this.rememberPrompt(params.projectName, params.worker.instanceId, params.prompt);
+      this.rememberPrompt(params.projectName, params.worker.instanceId, workerPrompt);
       this.rememberOrchestratorWorkerActivity({
         projectName: params.projectName,
         workerInstanceId: params.worker.instanceId,
         turnId,
         stage: 'retry-queued',
-        prompt: params.prompt,
+        prompt: workerPrompt,
         queueDepth: enqueued.queueDepth,
       });
       return {
@@ -1819,7 +1901,7 @@ export class BridgeMessageRouter {
       projectName: params.projectName,
       supervisorInstanceId: params.supervisorInstanceId,
       workerInstanceId: params.worker.instanceId,
-      prompt: params.prompt,
+      prompt: workerPrompt,
       sourceChannelId: params.sourceChannelId,
       routeHint: params.routeHint,
       turnId,
@@ -1838,13 +1920,13 @@ export class BridgeMessageRouter {
       };
     }
     this.scheduleOrchestratorQueueDrain(params.projectName, params.worker.instanceId);
-    this.rememberPrompt(params.projectName, params.worker.instanceId, params.prompt);
+    this.rememberPrompt(params.projectName, params.worker.instanceId, workerPrompt);
     this.rememberOrchestratorWorkerActivity({
       projectName: params.projectName,
       workerInstanceId: params.worker.instanceId,
       turnId,
       stage: 'queued',
-      prompt: params.prompt,
+      prompt: workerPrompt,
       queueDepth: enqueued.queueDepth,
     });
     return {
@@ -2124,7 +2206,7 @@ export class BridgeMessageRouter {
     if (raw === 'off' || raw === 'korean' || raw === 'always') return raw;
     if (['1', 'true', 'yes', 'on'].includes(raw)) return 'korean';
     if (['0', 'false', 'no'].includes(raw)) return 'off';
-    return 'korean';
+    return 'off';
   }
 
   private hasKoreanCharacters(text: string): boolean {
@@ -2197,6 +2279,43 @@ export class BridgeMessageRouter {
 
     const augmented = `${prompt.trimEnd()}\n\n${hint}`;
     return { prompt: augmented, applied: true };
+  }
+
+  private maybeAugmentCodexPromptForSupervisorOrchestrationGuard(params: {
+    prompt: string;
+    normalizedProject: ReturnType<typeof normalizeProjectState>;
+    supervisorInstanceId: string;
+  }): { prompt: string; applied: boolean } {
+    if (!this.getEnvBool('AGENT_DISCORD_ORCHESTRATOR_SUPERVISOR_GUARD', true)) {
+      return { prompt: params.prompt, applied: false };
+    }
+    if (params.prompt.trim().length === 0) return { prompt: params.prompt, applied: false };
+    if (/\[mudcode supervisor-orchestrator-guard\]/i.test(params.prompt)) {
+      return { prompt: params.prompt, applied: false };
+    }
+
+    const orchestrator = params.normalizedProject.orchestrator;
+    if (!orchestrator?.enabled) return { prompt: params.prompt, applied: false };
+    if (!orchestrator.supervisorInstanceId || orchestrator.supervisorInstanceId !== params.supervisorInstanceId) {
+      return { prompt: params.prompt, applied: false };
+    }
+    const workers = this.resolveOrchestratorWorkerIds(params.normalizedProject).filter(
+      (instanceId) => instanceId !== params.supervisorInstanceId,
+    );
+    if (workers.length === 0) return { prompt: params.prompt, applied: false };
+
+    const hint = [
+      '[mudcode supervisor-orchestrator-guard]',
+      'You are the supervisor in orchestrator mode.',
+      '- Do not directly implement code before delegating focused tasks to workers.',
+      '- Assign scoped work to worker instances first, then integrate their results.',
+      '- Keep final response concise: Need your check / Changes / Verification.',
+      '[/mudcode supervisor-orchestrator-guard]',
+    ].join('\n');
+    return {
+      prompt: `${params.prompt.trimEnd()}\n\n${hint}`,
+      applied: true,
+    };
   }
 
   private shouldRetryCodexSubmit(sessionName: string, windowName: string, prompt: string): boolean {
@@ -3618,12 +3737,13 @@ export class BridgeMessageRouter {
         });
         normalizedProject = prepared.project;
         autoOrchestratorNotices = [...autoOrchestratorNotices, ...prepared.notices];
+        const promptForWorkerDispatch = promptToSend;
 
         const orchestrator = normalizedProject.orchestrator;
         if (
           orchestrator?.enabled &&
           orchestrator.supervisorInstanceId === instanceKey &&
-          this.shouldAutoDispatchToWorker(promptToSend)
+          this.shouldAutoDispatchToWorker(promptForWorkerDispatch)
         ) {
           const workers = this.selectOrchestratorWorkersForDispatch(
             projectName,
@@ -3634,7 +3754,7 @@ export class BridgeMessageRouter {
             projectName,
             projectPath: normalizedProject.projectPath,
             supervisorInstanceId: instanceKey,
-            prompt: promptToSend,
+            prompt: promptForWorkerDispatch,
             workers,
           });
           autoPlannerUsed = plannerAssignments.length > 0;
@@ -3643,7 +3763,7 @@ export class BridgeMessageRouter {
             const worker = workers[index];
             if (!worker) continue;
             const assignment = plannerAssignments[index];
-            const workerPrompt = assignment?.prompt || promptToSend;
+            const workerPrompt = assignment?.prompt || promptForWorkerDispatch;
             const outcome = await this.dispatchOrQueueOrchestratorWorkerTask({
               projectName,
               normalizedProject,
@@ -3663,6 +3783,16 @@ export class BridgeMessageRouter {
                 : {}),
             });
           }
+        }
+
+        const supervisorGuarded = this.maybeAugmentCodexPromptForSupervisorOrchestrationGuard({
+          prompt: promptToSend,
+          normalizedProject,
+          supervisorInstanceId: instanceKey,
+        });
+        if (supervisorGuarded.applied) {
+          promptToSend = supervisorGuarded.prompt;
+          console.log(`🛡️ [${projectName}/${resolvedAgentType}] supervisor orchestration guard injected`);
         }
       }
 
