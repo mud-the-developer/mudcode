@@ -280,6 +280,13 @@ GitHub Actions로 릴리즈 자동화가 구성되어 있습니다.
 - `ARCHITECTURE.md`
 - `DEVELOPMENT.md`
 
+## 출처 / Provenance
+
+- 확인된 출처 저장소(히스토리 근거): README 커밋 `795008e`(2026-02-11, `docs: add derived-from attribution in readme`)에서 본 프로젝트가 [`DoBuDevel/discord-agent-bridge`](https://github.com/DoBuDevel/discord-agent-bridge)에서 파생되었다고 명시합니다. `ada85e5`(2026-02-09)도 clone/support 링크를 동일 저장소로 가리킵니다.
+- 유입/적응된 기준 영역(히스토리 근거): 이 저장소의 최초 커밋 `fd8b9da`(2026-02-05)부터 `src/discord/**`, `src/tmux/**`, `src/state/**`, `src/config/**`, `src/agents/**`, `src/index.ts`, `src/daemon.ts`가 존재하며 현재 트리에서도 유지됩니다.
+- 로컬 재작성: 이후 커밋에서 `agent-messenger-bridge` -> `discode` -> `mudcode` 리브랜딩, Slack 지원, Codex 런타임/오케스트레이션, 릴리즈 패키징이 크게 확장/재구성되었습니다.
+- 라이선스/크레딧(로컬 근거 기준): 현재 저장소 라이선스는 MIT(`LICENSE`, `package.json`)입니다. 히스토리에 원 저작자 표기 문구가 존재하지만, 정확한 파일 단위 import 경계는 로컬 메타데이터만으로 확정할 수 없습니다.
+
 ## 라이선스
 
 MIT

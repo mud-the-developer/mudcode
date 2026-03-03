@@ -280,6 +280,13 @@ Workflow files:
 - `ARCHITECTURE.md`
 - `DEVELOPMENT.md`
 
+## Attribution / Provenance
+
+- Confirmed source repo (history evidence): README commit `795008e` (2026-02-11, `docs: add derived-from attribution in readme`) explicitly states this project is derived from [`DoBuDevel/discord-agent-bridge`](https://github.com/DoBuDevel/discord-agent-bridge). Commit `ada85e5` (2026-02-09) also points clone/support links to that repo.
+- Imported/adapted baseline areas (history evidence): the first commit in this repository (`fd8b9da`, 2026-02-05) already contains the Discord bridge core at `src/discord/**`, `src/tmux/**`, `src/state/**`, `src/config/**`, `src/agents/**`, `src/index.ts`, and `src/daemon.ts`; these paths remain in this tree.
+- Rewritten locally: later commits substantially reworked behavior and scope (renames to `agent-messenger-bridge` -> `discode` -> `mudcode`, Slack support, Codex runtime/orchestrator flows, and release packaging).
+- License/credit note from local evidence: this repository is MIT-licensed (`LICENSE`, `package.json`). Local history includes explicit original-authorship attribution text; exact file-by-file import boundaries are not provable from local metadata alone.
+
 ## License
 
 MIT
