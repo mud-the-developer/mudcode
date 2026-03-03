@@ -215,6 +215,7 @@ Self-check:
 - `bun run orchestrator:auto:check` (auto enable/spawn/planner dispatch regression check)
 - `bun run ops:self-heal` (build + `repair deep` one-shot self-heal: doctor fix + restart + verify)
 - `bun run ops:verify:fast` (quick regression set for config/capture/router/index)
+- `bun run ops:verify:gepa` (GEPA/prompt-refiner regression set: typecheck + TS/Python/Rust checks + help smokes)
 
 ## Codex I/O v2
 

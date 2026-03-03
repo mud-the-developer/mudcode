@@ -49,6 +49,7 @@
     "ops:daemon:restart": "bun dist/bin/mudcode.js daemon restart",
     "ops:self-heal": "bun run build && bun dist/bin/mudcode.js repair deep",
     "ops:verify:fast": "bun run typecheck && bun run test -- tests/config/index.test.ts tests/bridge/runtime/message-router.test.ts tests/bridge/runtime/capture-poller.test.ts tests/index.test.ts",
+    "ops:verify:gepa": "bun run typecheck && bun run test -- tests/prompt-refiner-shadow-to-gepa.test.ts tests/prompt-refiner-policy.test.ts && python -m unittest tests/prompt_refiner_gepa_optimize_test.py && cargo test --manifest-path mudcode-rs/Cargo.toml --bin prompt_refiner_shadow_to_gepa && cargo run --manifest-path mudcode-rs/Cargo.toml --bin prompt_refiner_shadow_to_gepa -- --help && python scripts/prompt/prompt-refiner-gepa-optimize.py --help",
     "prompt-refiner:report": "node scripts/prompt/prompt-refiner-shadow-report.mjs",
     "prompt-refiner:export-gepa": "cargo run --manifest-path mudcode-rs/Cargo.toml --bin prompt_refiner_shadow_to_gepa --release --",
     "prompt-refiner:export-gepa:js": "node scripts/prompt/prompt-refiner-shadow-to-gepa.mjs",

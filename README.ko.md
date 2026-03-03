@@ -215,6 +215,7 @@ Self-check:
 - `bun run orchestrator:auto:check` (auto enable/spawn/planner dispatch 회귀 점검)
 - `bun run ops:self-heal` (build + `repair deep` 원샷 셀프힐: doctor fix + restart + verify)
 - `bun run ops:verify:fast` (config/capture/router/index 빠른 회귀 점검)
+- `bun run ops:verify:gepa` (GEPA/prompt-refiner 회귀 세트: typecheck + TS/Python/Rust 점검 + help smoke)
 
 ## Codex I/O v2
 
