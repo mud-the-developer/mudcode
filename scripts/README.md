@@ -29,7 +29,9 @@ Scripts are grouped by intent.
 - `prompt-refiner-shadow-to-gepa.mjs` (JS fallback)
 - `prompt-refiner-codex-optimize.mjs` (Codex-only optimization runner; primary path)
 - Rust primary path: `mudcode-rs/src/bin/prompt_refiner_shadow_to_gepa.rs`
+- Rust/JS GEPA exporters both support `--dedupe-key baseline|baseline-candidate`, `--split-key sample|baseline`.
 - `prompt-refiner-gepa-optimize.py` (GEPA optimization runner; supports `--smoke`, `--activate`)
+- GEPA npm scripts use `uvx --from gepa==0.1.0` for reproducible invocation.
 
 ## `scripts/ci/`
 
@@ -40,7 +42,7 @@ Scripts are grouped by intent.
 - `ops:doctor`: run doctor report.
 - `ops:doctor:fix`: run doctor with safe auto-fixes.
 - `ops:daemon:restart`: restart daemon via CLI.
-- `ops:self-heal`: build + doctor fix + daemon restart (one-shot repair).
+- `ops:self-heal`: build + `repair deep` (doctor fix + daemon restart + health verify).
 - `ops:verify:fast`: quick regression set for config/capture/router/index hot paths.
 
 ## `scripts/migration/`

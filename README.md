@@ -66,9 +66,10 @@ mudcode attach my-app --instance codex
 - `mudcode new [agent]`: create/resume an instance quickly
 - `mudcode list`: list projects and instances
 - `mudcode status`: show config + runtime status
-- `mudcode health [--json]`: run diagnostics
+- `mudcode health [--project <name>] [--json]`: run diagnostics (optionally scoped to one project)
 - `mudcode daemon <start|stop|status|restart>`: manage daemon
 - `mudcode doctor [--fix]`: detect config/env/runtime drift and optionally auto-fix
+- `mudcode repair [mode] [--project <name>]`: run self-heal flow (`default|doctor-only|restart-only|verify|deep`)
 - `mudcode update [--git]`: update to latest (auto git mode supported)
 - `mudcode stop [project] --instance <id>`: stop one instance
 - `mudcode skill list [--all]`: list skills from `AGENTS.md` and `.agents/skills`
@@ -104,9 +105,9 @@ bun run prompt-refiner:report
 ```bash
 bun run prompt-refiner:export-gepa
 # optional:
-# bun run prompt-refiner:export-gepa -- --val-ratio 0.2 --all
+# bun run prompt-refiner:export-gepa -- --val-ratio 0.2 --all --dedupe-key baseline-candidate --split-key baseline
 # JS fallback:
-# bun run prompt-refiner:export-gepa:js -- --val-ratio 0.2 --all
+# bun run prompt-refiner:export-gepa:js -- --val-ratio 0.2 --all --dedupe-key baseline-candidate --split-key baseline
 ```
 
 5. Run Codex-only optimization:
@@ -135,9 +136,14 @@ bun run prompt-refiner:gepa
 Optional env vars:
 - `MUDCODE_CODEX_OPT_MODEL` (optional `codex exec --model <name>` override)
 - `MUDCODE_GEPA_ACTIVATE_MIN_IMPROVEMENT` (default `0.01`, GEPA auto-activation gate)
+- `MUDCODE_GEPA_DEDUPE_KEY` (optional dedupe strategy override: `baseline|baseline-candidate`)
+- `MUDCODE_GEPA_SPLIT_KEY` (optional split strategy override: `sample|baseline`)
 
 Notes:
 - `prompt-refiner:codex` uses `codex exec` non-interactively, so Codex login/auth must be configured.
+- `prompt-refiner:gepa*` scripts are pinned to `gepa==0.1.0` via `uvx` for reproducible runs.
+- Exporter defaults stay backward-compatible: `--dedupe-key baseline` and `--split-key sample`.
+- Pipelines now use `--dedupe-key baseline-candidate --split-key baseline` to retain changed variants while preventing baseline train/val leakage.
 - `prompt-refiner:gepa:pipeline` updates `~/.mudcode/config.json` with `promptRefinerPolicyPath` automatically when activation succeeds.
 - `prompt-refiner:gepa:pipeline` activates only when `valImprovement >= 0.01` by default.
 - You can override policy path manually with `mudcode config --prompt-refiner-policy-path <path>`.
@@ -163,7 +169,7 @@ Use these inside mapped channels/threads:
 - `/health`
 - `/snapshot`
 - `/io` (show Codex I/O tracker status + latest transcript path)
-- `/repair` (run `doctor --fix` + schedule daemon restart)
+- `/repair [doctor-only|restart-only|verify|deep]` (default: run `doctor --fix` + schedule daemon restart; `verify/deep` auto-scope to current project)
 - `/orchestrator status|run|spawn|remove|enable|disable` (manual supervisor/worker orchestration controls; disabled by default)
   - run usage: `/orchestrator run <workerInstanceId> [--priority high|normal|low] <task>` (or `p2|p1|p0 <task>`)
   - spawn usage: `/orchestrator spawn [count]` (default `1`, max `15`)
@@ -207,7 +213,7 @@ Orchestrator automation:
 
 Self-check:
 - `bun run orchestrator:auto:check` (auto enable/spawn/planner dispatch regression check)
-- `bun run ops:self-heal` (build + doctor fix + daemon restart one-shot repair)
+- `bun run ops:self-heal` (build + `repair deep` one-shot self-heal: doctor fix + restart + verify)
 - `bun run ops:verify:fast` (quick regression set for config/capture/router/index)
 
 ## Codex I/O v2

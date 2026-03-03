@@ -47,8 +47,14 @@ function normalizePolicyPath(raw: unknown): string | undefined {
 function parseExplicitPolicyOp(raw: string): PolicyOperation | undefined {
   const normalized = raw.trim().toLowerCase().replace(/_/g, '-');
   if (normalized === 'collapse-consecutive-spaces') return 'collapse_consecutive_spaces';
+  if (normalized === 'collapse-multiple-spaces') return 'collapse_consecutive_spaces';
+  if (normalized === 'normalize-spaces') return 'collapse_consecutive_spaces';
   if (normalized === 'remove-duplicate-punctuation') return 'remove_duplicate_punctuation';
+  if (normalized === 'deduplicate-punctuation') return 'remove_duplicate_punctuation';
+  if (normalized === 'collapse-repeated-punctuation') return 'remove_duplicate_punctuation';
   if (normalized === 'trim-outer-whitespace') return 'trim_outer_whitespace';
+  if (normalized === 'trim-whitespace') return 'trim_outer_whitespace';
+  if (normalized === 'strip-outer-whitespace') return 'trim_outer_whitespace';
   return undefined;
 }
 
@@ -56,8 +62,16 @@ function parsePolicyOperations(policyText: string): PolicyOperation[] {
   const operations = new Set<PolicyOperation>();
   const lower = policyText.toLowerCase();
 
-  const explicit = policyText.matchAll(/op\s*:\s*([a-z0-9_-]+)/gi);
+  const explicit = policyText.matchAll(/(?:\bop(?:eration)?\b|\bpolicy[_ -]?op\b)\s*[:=]\s*([a-z0-9_-]+)/gi);
   for (const match of explicit) {
+    const parsed = parseExplicitPolicyOp(match[1] || '');
+    if (parsed) operations.add(parsed);
+  }
+
+  const canonicalNames = lower.matchAll(
+    /\b(collapse[_ -]consecutive[_ -]spaces|remove[_ -]duplicate[_ -]punctuation|trim[_ -]outer[_ -]whitespace)\b/g,
+  );
+  for (const match of canonicalNames) {
     const parsed = parseExplicitPolicyOp(match[1] || '');
     if (parsed) operations.add(parsed);
   }
@@ -65,20 +79,32 @@ function parsePolicyOperations(policyText: string): PolicyOperation[] {
   if (
     lower.includes('collapse consecutive spaces') ||
     lower.includes('collapse multiple spaces') ||
-    lower.includes('normalize spaces')
+    lower.includes('normalize spaces') ||
+    /\b(collapse|compress|normalize|squash)\s+(?:consecutive|multiple|repeated)?\s*(?:spaces?|whitespace)\b/.test(lower) ||
+    /\breplace\s+(?:multiple|repeated)\s+(?:spaces?|whitespace)\s+with\s+(?:a\s+)?single\s+space\b/.test(lower)
   ) {
     operations.add('collapse_consecutive_spaces');
   }
   if (
     lower.includes('remove duplicate punctuation') ||
-    lower.includes('deduplicate punctuation')
+    lower.includes('deduplicate punctuation') ||
+    /\b(remove|dedupe|deduplicate|collapse|normalize)\s+(?:duplicate|repeated|consecutive)\s+punctuation(?:\s+marks?)?\b/.test(
+      lower,
+    ) ||
+    /\b(?:replace|convert)\s+(?:multiple|repeated)\s+(?:question|exclamation)\s+marks?\s+(?:with|to)\s+(?:a\s+)?single\s+mark\b/.test(
+      lower,
+    )
   ) {
     operations.add('remove_duplicate_punctuation');
   }
   if (
     lower.includes('trim leading/trailing whitespace') ||
     lower.includes('trim surrounding whitespace') ||
-    lower.includes('trim outer whitespace')
+    lower.includes('trim outer whitespace') ||
+    /\b(trim|strip|remove)\s+(?:leading\s*(?:\/|and)\s*trailing|surrounding|outer)\s+(?:spaces?|whitespace)\b/.test(
+      lower,
+    ) ||
+    /\btrim\s+(?:spaces?|whitespace)\s+at\s+(?:both|the)\s+ends\b/.test(lower)
   ) {
     operations.add('trim_outer_whitespace');
   }

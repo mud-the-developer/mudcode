@@ -9,11 +9,20 @@ import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
+from importlib import metadata as importlib_metadata
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
-import gepa
-from gepa.adapters.default_adapter.default_adapter import EvaluationResult
+try:
+    import gepa
+except Exception:
+    gepa = None
+
+
+class EvaluationResult(NamedTuple):
+    score: float
+    feedback: str
+    objective_scores: dict[str, float] | None = None
 
 
 def _default_train_path() -> Path:
@@ -100,13 +109,12 @@ def load_jsonl(path: Path, limit: int | None = None, changed_only: bool = False)
     rows: list[PromptSample] = []
     with path.open("r", encoding="utf-8") as f:
         for line in f:
-            line = line.strip()
-            if not line:
+            if not line.strip():
                 continue
             parsed = json.loads(line)
-            prompt = str(parsed.get("prompt", "")).strip()
-            target = str(parsed.get("target", "")).strip()
-            if not prompt or not target:
+            prompt = str(parsed.get("prompt", ""))
+            target = str(parsed.get("target", ""))
+            if prompt == "" or target == "":
                 continue
             changed = bool((parsed.get("meta") or {}).get("changed", False))
             if changed_only and not changed:
@@ -136,22 +144,29 @@ class PromptRefinerEvaluator:
         resp_norm = _normalize_spaces(resp)
         answer_norm = _normalize_spaces(answer)
 
-        contains_exact = answer in resp
+        exact_raw = resp == answer
         exact_norm = resp_norm == answer_norm
+        contains_exact_norm = bool(answer_norm) and answer_norm in resp_norm
         seq = SequenceMatcher(a=answer_norm, b=resp_norm).ratio() if answer_norm or resp_norm else 1.0
         f1 = _token_f1(answer_norm, resp_norm)
 
-        if contains_exact:
+        if exact_raw:
             score = 1.0
         elif exact_norm:
-            score = 0.95
+            score = 0.97
         else:
-            score = max(0.0, min(0.9, 0.6 * f1 + 0.3 * seq))
+            overlap = max(0.0, min(1.0, 0.65 * f1 + 0.35 * seq))
+            if contains_exact_norm:
+                extra_chars = max(0, len(resp_norm) - len(answer_norm))
+                extra_ratio = extra_chars / max(1, len(resp_norm))
+                score = max(0.0, min(0.9, overlap * (1.0 - 0.35 * extra_ratio)))
+            else:
+                score = max(0.0, min(0.9, overlap))
 
         feedback = (
             f"Target: {answer}\n"
             f"Generated: {resp}\n"
-            f"contains_exact={contains_exact}, exact_norm={exact_norm}, token_f1={f1:.3f}, seq={seq:.3f}\n"
+            f"exact_raw={exact_raw}, exact_norm={exact_norm}, contains_exact_norm={contains_exact_norm}, token_f1={f1:.3f}, seq={seq:.3f}\n"
             "Improve faithfulness to the target rewrite while preserving intent and language."
         )
         return EvaluationResult(score=score, feedback=feedback, objective_scores=None)
@@ -338,6 +353,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if gepa is None:
+        raise RuntimeError("gepa package is required (try: uvx --from gepa==0.1.0 python scripts/prompt/prompt-refiner-gepa-optimize.py)")
 
     train_rows = load_jsonl(args.train, args.subset_train, changed_only=args.changed_only)
     val_rows = load_jsonl(args.val, args.subset_val, changed_only=args.changed_only)
@@ -369,7 +386,12 @@ def main() -> None:
         "smoke": args.smoke,
         "taskLM": args.task_lm,
         "reflectionLM": args.reflection_lm,
+        "seed": args.seed,
     }
+    try:
+        run_meta["gepaVersion"] = importlib_metadata.version("gepa")
+    except Exception:
+        run_meta["gepaVersion"] = None
     run_meta_path.write_text(json.dumps(run_meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     seed_candidate = {"system_prompt": args.seed_prompt}

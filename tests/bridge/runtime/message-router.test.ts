@@ -1423,6 +1423,244 @@ describe('BridgeMessageRouter (codex)', () => {
     );
   });
 
+  it('runs doctor-only mode without scheduling restart', async () => {
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+    const doctorRunner = vi.fn().mockResolvedValue({
+      ok: true,
+      fixed: true,
+      issues: [],
+      fixes: [{ code: 'save-config-threshold', message: 'saved 20000' }],
+      summary: {
+        configPath: '/tmp/config.json',
+        storedThreshold: 20000,
+      },
+    });
+    const backgroundCliRunner = vi.fn();
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      doctorRunner,
+      backgroundCliRunner,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', '/repair doctor-only', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    expect(doctorRunner).toHaveBeenCalledWith({ fix: true });
+    expect(backgroundCliRunner).not.toHaveBeenCalled();
+    expect(tmux.typeKeysToWindow).not.toHaveBeenCalled();
+  });
+
+  it('supports restart-only repair mode', async () => {
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+    const doctorRunner = vi.fn();
+    const backgroundCliRunner = vi.fn();
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      doctorRunner,
+      backgroundCliRunner,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', '/repair restart-only', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    expect(doctorRunner).not.toHaveBeenCalled();
+    expect(backgroundCliRunner).toHaveBeenCalledWith(['daemon', 'restart'], 500);
+  });
+
+  it('supports verify repair mode', async () => {
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+    const doctorRunner = vi.fn();
+    const backgroundCliRunner = vi.fn();
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      doctorRunner,
+      backgroundCliRunner,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', '/repair verify', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    expect(doctorRunner).not.toHaveBeenCalled();
+    expect(backgroundCliRunner).toHaveBeenCalledWith(['repair', 'verify', '--project', 'demo'], 350);
+  });
+
+  it('supports deep repair mode', async () => {
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+    const doctorRunner = vi.fn().mockResolvedValue({
+      ok: true,
+      fixed: true,
+      issues: [],
+      fixes: [],
+      summary: {
+        configPath: '/tmp/config.json',
+      },
+    });
+    const backgroundCliRunner = vi.fn();
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      doctorRunner,
+      backgroundCliRunner,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', '/repair deep', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    expect(doctorRunner).toHaveBeenCalledWith({ fix: true });
+    expect(backgroundCliRunner).toHaveBeenNthCalledWith(1, ['daemon', 'restart'], 500);
+    expect(backgroundCliRunner).toHaveBeenNthCalledWith(2, ['repair', 'verify', '--project', 'demo'], 5000);
+  });
+
+  it('shows usage for invalid repair mode', async () => {
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', '/repair nope', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    expect(messaging.sendToChannel).toHaveBeenCalledWith(
+      'ch-1',
+      expect.stringContaining('Usage: `/repair'),
+    );
+    expect(tmux.typeKeysToWindow).not.toHaveBeenCalled();
+  });
+
   it('schedules /update command in background', async () => {
     const { messaging, getCallback } = createMessagingMock();
     const tmux = {

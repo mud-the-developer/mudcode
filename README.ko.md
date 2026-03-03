@@ -66,9 +66,10 @@ mudcode attach my-app --instance codex
 - `mudcode new [agent]`: 인스턴스 생성/재개
 - `mudcode list`: 프로젝트/인스턴스 목록
 - `mudcode status`: 설정 + 런타임 상태
-- `mudcode health [--json]`: 진단 실행
+- `mudcode health [--project <name>] [--json]`: 진단 실행 (옵션으로 단일 프로젝트 범위 지정)
 - `mudcode daemon <start|stop|status|restart>`: 데몬 관리
 - `mudcode doctor [--fix]`: 설정/환경/런타임 드리프트 점검 및 자동 수정
+- `mudcode repair [mode] [--project <name>]`: 셀프힐 실행 (`default|doctor-only|restart-only|verify|deep`)
 - `mudcode update [--git]`: 최신 버전 업데이트 (git 자동 감지 지원)
 - `mudcode stop [project] --instance <id>`: 특정 인스턴스 중지
 - `mudcode skill list [--all]`: `AGENTS.md`와 `.agents/skills` 기반 스킬 목록/상태 확인
@@ -104,9 +105,9 @@ bun run prompt-refiner:report
 ```bash
 bun run prompt-refiner:export-gepa
 # 옵션 예시:
-# bun run prompt-refiner:export-gepa -- --val-ratio 0.2 --all
+# bun run prompt-refiner:export-gepa -- --val-ratio 0.2 --all --dedupe-key baseline-candidate --split-key baseline
 # JS fallback:
-# bun run prompt-refiner:export-gepa:js -- --val-ratio 0.2 --all
+# bun run prompt-refiner:export-gepa:js -- --val-ratio 0.2 --all --dedupe-key baseline-candidate --split-key baseline
 ```
 
 5. Codex-only 최적화 실행:
@@ -135,9 +136,14 @@ bun run prompt-refiner:gepa
 선택 환경 변수:
 - `MUDCODE_CODEX_OPT_MODEL` (선택 `codex exec --model <name>` 오버라이드)
 - `MUDCODE_GEPA_ACTIVATE_MIN_IMPROVEMENT` (기본값 `0.01`, GEPA 자동 활성화 게이트)
+- `MUDCODE_GEPA_DEDUPE_KEY` (선택 dedupe 전략 오버라이드: `baseline|baseline-candidate`)
+- `MUDCODE_GEPA_SPLIT_KEY` (선택 split 전략 오버라이드: `sample|baseline`)
 
 참고:
 - `prompt-refiner:codex`는 `codex exec` 비대화식 실행을 사용하므로 Codex 로그인/인증이 먼저 되어 있어야 합니다.
+- `prompt-refiner:gepa*` 스크립트는 재현 가능한 실행을 위해 `uvx`에서 `gepa==0.1.0`으로 고정되어 있습니다.
+- Exporter 기본값은 하위 호환을 위해 `--dedupe-key baseline`, `--split-key sample`을 유지합니다.
+- 파이프라인은 `--dedupe-key baseline-candidate --split-key baseline`을 사용해 baseline 변형을 보존하면서 train/val 누수를 막습니다.
 - `prompt-refiner:gepa:pipeline`은 활성화 성공 시 `~/.mudcode/config.json`의 `promptRefinerPolicyPath`를 자동 갱신합니다.
 - `prompt-refiner:gepa:pipeline`은 기본적으로 `valImprovement >= 0.01`일 때만 자동 활성화합니다.
 - 정책 경로를 수동 지정하려면 `mudcode config --prompt-refiner-policy-path <path>`를 사용하세요.
@@ -163,7 +169,7 @@ Doctor 안전 점검:
 - `/health`
 - `/snapshot`
 - `/io` (Codex I/O 추적 상태 + 최신 transcript 경로 확인)
-- `/repair` (`doctor --fix` 실행 후 데몬 재시작 예약)
+- `/repair [doctor-only|restart-only|verify|deep]` (기본값: `doctor --fix` 실행 후 데몬 재시작 예약, `verify/deep`는 현재 프로젝트로 자동 스코프)
 - `/orchestrator status|run|spawn|remove|enable|disable` (수동 supervisor/worker 오케스트레이션 제어, 기본 비활성화)
   - run 사용법: `/orchestrator run <workerInstanceId> [--priority high|normal|low] <task>` (또는 `p2|p1|p0 <task>`)
   - spawn 사용법: `/orchestrator spawn [count]` (기본 `1`, 최대 `15`)
@@ -207,7 +213,7 @@ Orchestrator 자동화:
 
 Self-check:
 - `bun run orchestrator:auto:check` (auto enable/spawn/planner dispatch 회귀 점검)
-- `bun run ops:self-heal` (build + doctor fix + daemon restart 원샷 복구)
+- `bun run ops:self-heal` (build + `repair deep` 원샷 셀프힐: doctor fix + restart + verify)
 - `bun run ops:verify:fast` (config/capture/router/index 빠른 회귀 점검)
 
 ## Codex I/O v2

@@ -26,6 +26,7 @@ import { daemonCommand } from '../src/cli/commands/daemon.js';
 import { diagnoseCommand } from '../src/cli/commands/diagnose.js';
 import { uninstallCommand } from '../src/cli/commands/uninstall.js';
 import { doctorCommand } from '../src/cli/commands/doctor.js';
+import { repairCommand } from '../src/cli/commands/repair.js';
 import { skillsInstallCommand, skillsListCommand } from '../src/cli/commands/skills.js';
 import { getDaemonStatus, restartDaemonIfRunning } from '../src/app/daemon-service.js';
 import { main as daemonMain } from '../src/index.js';
@@ -1082,6 +1083,7 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
       'health',
       'Run one-shot diagnostics for config, daemon, tmux, and channel mappings',
       (y: Argv) => addTmuxOptions(y)
+        .option('project', { alias: 'p', type: 'string', describe: 'Only verify one project by name' })
         .option('json', { type: 'boolean', default: false, describe: 'Print machine-readable JSON output' })
         .option('capture-test', {
           type: 'boolean',
@@ -1099,6 +1101,7 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
       async (argv: any) =>
         healthCommand({
           tmuxSharedSessionName: argv.tmuxSharedSessionName,
+          project: argv.project,
           json: argv.json,
           captureTest: argv.captureTest,
           captureTestPolls: argv.captureTestPolls,
@@ -1257,6 +1260,25 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
         doctorCommand({
           fix: argv.fix,
           json: argv.json,
+        })
+    )
+    .command(
+      ['repair [mode]', 'self-heal [mode]'],
+      'Run self-heal flow (doctor fix/restart/verify)',
+      (y: Argv) => y
+        .positional('mode', {
+          type: 'string',
+          describe: 'Repair mode: default|doctor-only|restart-only|verify|deep',
+        })
+        .option('project', {
+          alias: 'p',
+          type: 'string',
+          describe: 'Project scope for verify/deep (auto-resolved from cwd when possible)',
+        }),
+      async (argv: any) =>
+        repairCommand({
+          mode: argv.mode,
+          project: argv.project,
         })
     )
     .command(

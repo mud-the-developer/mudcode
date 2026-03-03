@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
@@ -9,6 +10,56 @@ use std::path::{Path, PathBuf};
 
 const DEFAULT_PREFIX: &str = "prompt-refiner-gepa";
 const DEFAULT_VAL_RATIO: f64 = 0.1;
+const DEFAULT_DEDUPE_KEY: DedupeKey = DedupeKey::Baseline;
+const DEFAULT_SPLIT_KEY: SplitKey = SplitKey::Sample;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DedupeKey {
+    Baseline,
+    BaselineCandidate,
+}
+
+impl DedupeKey {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "baseline" => Ok(Self::Baseline),
+            "baseline-candidate" => Ok(Self::BaselineCandidate),
+            other => bail!(
+                "invalid --dedupe-key: {other} (expected: baseline|baseline-candidate)"
+            ),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Baseline => "baseline",
+            Self::BaselineCandidate => "baseline-candidate",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SplitKey {
+    Sample,
+    Baseline,
+}
+
+impl SplitKey {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "sample" => Ok(Self::Sample),
+            "baseline" => Ok(Self::Baseline),
+            other => bail!("invalid --split-key: {other} (expected: sample|baseline)"),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Sample => "sample",
+            Self::Baseline => "baseline",
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 struct CliArgs {
@@ -16,6 +67,8 @@ struct CliArgs {
     out_dir: PathBuf,
     prefix: String,
     val_ratio: f64,
+    dedupe_key: DedupeKey,
+    split_key: SplitKey,
     include_unchanged: bool,
     help: bool,
 }
@@ -67,6 +120,10 @@ struct OutputMeta {
     input_path: String,
     #[serde(rename = "includeUnchanged")]
     include_unchanged: bool,
+    #[serde(rename = "dedupeKey")]
+    dedupe_key: String,
+    #[serde(rename = "splitKey")]
+    split_key: String,
     #[serde(rename = "valRatio")]
     val_ratio: f64,
     #[serde(rename = "rawLineCount")]
@@ -95,6 +152,8 @@ Options:
   --out-dir <dir>      Output directory
   --prefix <name>      Output filename prefix
   --val-ratio <0..1>   Validation split ratio (default: 0.1)
+  --dedupe-key <key>   Dedupe strategy: baseline|baseline-candidate (default: baseline)
+  --split-key <key>    Split strategy: sample|baseline (default: sample)
   --all                Include unchanged entries (default: changed-only)
   --help               Show help
 
@@ -124,6 +183,18 @@ fn parse_args() -> Result<CliArgs> {
             .unwrap_or(default_out_dir),
         prefix: env::var("MUDCODE_GEPA_PREFIX").unwrap_or_else(|_| DEFAULT_PREFIX.to_string()),
         val_ratio: DEFAULT_VAL_RATIO,
+        dedupe_key: env::var("MUDCODE_GEPA_DEDUPE_KEY")
+            .ok()
+            .as_deref()
+            .map(DedupeKey::parse)
+            .transpose()?
+            .unwrap_or(DEFAULT_DEDUPE_KEY),
+        split_key: env::var("MUDCODE_GEPA_SPLIT_KEY")
+            .ok()
+            .as_deref()
+            .map(SplitKey::parse)
+            .transpose()?
+            .unwrap_or(DEFAULT_SPLIT_KEY),
         include_unchanged: false,
         help: false,
     };
@@ -167,6 +238,16 @@ fn parse_args() -> Result<CliArgs> {
                 args.val_ratio = parsed;
                 i += 2;
             }
+            "--dedupe-key" => {
+                let next = raw.get(i + 1).context("missing value for --dedupe-key")?;
+                args.dedupe_key = DedupeKey::parse(next)?;
+                i += 2;
+            }
+            "--split-key" => {
+                let next = raw.get(i + 1).context("missing value for --split-key")?;
+                args.split_key = SplitKey::parse(next)?;
+                i += 2;
+            }
             other => {
                 bail!("unknown argument: {other}");
             }
@@ -208,6 +289,13 @@ fn should_go_to_val(id: &str, val_ratio: f64) -> bool {
     };
     let bucket = (raw as f64) / 4_294_967_295.0;
     bucket < val_ratio
+}
+
+fn split_partition_key<'a>(sample: &'a SampleRow, split_key: SplitKey) -> &'a str {
+    match split_key {
+        SplitKey::Sample => &sample.id,
+        SplitKey::Baseline => &sample.meta.baseline_hash,
+    }
 }
 
 fn parse_shadow_line(line: &str) -> Option<ParsedEntry> {
@@ -277,6 +365,39 @@ fn parse_shadow_line(line: &str) -> Option<ParsedEntry> {
     })
 }
 
+fn compare_signal(a: &ParsedEntry, b: &ParsedEntry) -> Ordering {
+    (a.changed as u8)
+        .cmp(&(b.changed as u8))
+        .then_with(|| (a.candidate != a.baseline).cmp(&(b.candidate != b.baseline)))
+        .then_with(|| a.operations.len().cmp(&b.operations.len()))
+        .then_with(|| a.ts.as_deref().unwrap_or("").cmp(b.ts.as_deref().unwrap_or("")))
+        .then_with(|| a.candidate_hash.cmp(&b.candidate_hash))
+}
+
+fn dedupe_group_key(item: &ParsedEntry, dedupe_key: DedupeKey) -> String {
+    match dedupe_key {
+        DedupeKey::Baseline => item.baseline_hash.clone(),
+        DedupeKey::BaselineCandidate => {
+            format!("{}:{}", item.baseline_hash, item.candidate_hash)
+        }
+    }
+}
+
+fn insert_deduped(
+    dedup: &mut BTreeMap<String, ParsedEntry>,
+    parsed: ParsedEntry,
+    dedupe_key: DedupeKey,
+) {
+    let key = dedupe_group_key(&parsed, dedupe_key);
+    if let Some(existing) = dedup.get(&key) {
+        if compare_signal(&parsed, existing).is_gt() {
+            dedup.insert(key, parsed);
+        }
+    } else {
+        dedup.insert(key, parsed);
+    }
+}
+
 fn write_jsonl(path: &Path, rows: &[SampleRow]) -> Result<()> {
     let mut out = String::new();
     for row in rows {
@@ -320,7 +441,7 @@ fn main() -> Result<()> {
             filtered_unchanged += 1;
             continue;
         }
-        dedup.insert(parsed.baseline_hash.clone(), parsed);
+        insert_deduped(&mut dedup, parsed, args.dedupe_key);
     }
 
     let samples = dedup
@@ -351,7 +472,7 @@ fn main() -> Result<()> {
     let mut train = Vec::<SampleRow>::new();
     let mut val = Vec::<SampleRow>::new();
     for sample in samples {
-        if should_go_to_val(&sample.id, args.val_ratio) {
+        if should_go_to_val(split_partition_key(&sample, args.split_key), args.val_ratio) {
             val.push(sample);
         } else {
             train.push(sample);
@@ -371,6 +492,8 @@ fn main() -> Result<()> {
         created_at: chrono_like_now(),
         input_path: args.input.display().to_string(),
         include_unchanged: args.include_unchanged,
+        dedupe_key: args.dedupe_key.as_str().to_string(),
+        split_key: args.split_key.as_str().to_string(),
         val_ratio: args.val_ratio,
         raw_line_count: lines.len(),
         parse_errors,
@@ -393,6 +516,8 @@ fn main() -> Result<()> {
     println!("- raw lines: {}", lines.len());
     println!("- parse errors: {}", parse_errors);
     println!("- filtered unchanged: {}", filtered_unchanged);
+    println!("- dedupe key: {}", args.dedupe_key.as_str());
+    println!("- split key: {}", args.split_key.as_str());
     println!("- deduped samples: {}", train.len() + val.len());
     println!("- train: {} -> {}", train.len(), train_path.display());
     println!("- val: {} -> {}", val.len(), val_path.display());
@@ -449,5 +574,180 @@ fn chrono_from_unix(mut ts: u64) -> DateTimeParts {
         hour,
         min,
         sec,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DedupeKey, ParsedEntry, SampleMeta, SampleRow, SplitKey, compare_signal, hash_hex,
+        insert_deduped, should_go_to_val, split_partition_key,
+    };
+    use std::cmp::Ordering;
+    use std::collections::BTreeMap;
+
+    fn parsed_entry(changed: bool, baseline: &str, candidate: &str, operations: &[&str], ts: Option<&str>) -> ParsedEntry {
+        ParsedEntry {
+            ts: ts.map(ToString::to_string),
+            mode: Some("shadow".to_string()),
+            changed,
+            operations: operations.iter().map(|x| (*x).to_string()).collect(),
+            baseline: baseline.to_string(),
+            candidate: candidate.to_string(),
+            baseline_hash: "basehash".to_string(),
+            candidate_hash: format!("candhash-{}", candidate),
+            baseline_len: baseline.len(),
+            candidate_len: candidate.len(),
+        }
+    }
+
+    fn sample_row(baseline_hash: &str, candidate_hash: &str) -> SampleRow {
+        let id = hash_hex(&format!("{baseline_hash}:{candidate_hash}"))
+            .chars()
+            .take(24)
+            .collect::<String>();
+        SampleRow {
+            id,
+            prompt: "baseline".to_string(),
+            target: "candidate".to_string(),
+            meta: SampleMeta {
+                changed: true,
+                operations: vec![],
+                mode: "shadow".to_string(),
+                source_ts: None,
+                baseline_hash: baseline_hash.to_string(),
+                candidate_hash: candidate_hash.to_string(),
+                baseline_len: 8,
+                candidate_len: 9,
+            },
+        }
+    }
+
+    #[test]
+    fn compare_signal_prefers_changed_over_unchanged() {
+        let changed = parsed_entry(
+            true,
+            "hello   world",
+            "hello world",
+            &["collapse_consecutive_spaces"],
+            Some("2026-03-03T10:00:00Z"),
+        );
+        let unchanged = parsed_entry(false, "hello   world", "hello   world", &[], Some("2026-03-03T11:00:00Z"));
+        assert_eq!(compare_signal(&changed, &unchanged), Ordering::Greater);
+    }
+
+    #[test]
+    fn compare_signal_prefers_richer_changed_sample() {
+        let weaker = parsed_entry(true, "  hello   world!!  ", "hello   world!!", &[], Some("2026-03-03T10:00:00Z"));
+        let richer = parsed_entry(
+            true,
+            "  hello   world!!  ",
+            "hello world!",
+            &["collapse_consecutive_spaces", "remove_duplicate_punctuation", "trim_outer_whitespace"],
+            Some("2026-03-03T10:00:00Z"),
+        );
+        assert_eq!(compare_signal(&richer, &weaker), Ordering::Greater);
+    }
+
+    #[test]
+    fn dedupe_baseline_candidate_keeps_changed_variants() {
+        let mut dedup = BTreeMap::<String, ParsedEntry>::new();
+        insert_deduped(
+            &mut dedup,
+            parsed_entry(
+                true,
+                "hello   world",
+                "hello world",
+                &["collapse_consecutive_spaces"],
+                Some("2026-03-03T10:00:00Z"),
+            ),
+            DedupeKey::BaselineCandidate,
+        );
+        insert_deduped(
+            &mut dedup,
+            parsed_entry(
+                true,
+                "hello   world",
+                "hello world!",
+                &["collapse_consecutive_spaces", "remove_duplicate_punctuation"],
+                Some("2026-03-03T10:01:00Z"),
+            ),
+            DedupeKey::BaselineCandidate,
+        );
+        assert_eq!(dedup.len(), 2);
+    }
+
+    #[test]
+    fn dedupe_baseline_keeps_single_best_sample() {
+        let mut dedup = BTreeMap::<String, ParsedEntry>::new();
+        insert_deduped(
+            &mut dedup,
+            parsed_entry(
+                true,
+                "hello   world",
+                "hello world",
+                &["collapse_consecutive_spaces"],
+                Some("2026-03-03T10:00:00Z"),
+            ),
+            DedupeKey::Baseline,
+        );
+        insert_deduped(
+            &mut dedup,
+            parsed_entry(
+                true,
+                "hello   world",
+                "hello world!",
+                &["collapse_consecutive_spaces", "remove_duplicate_punctuation"],
+                Some("2026-03-03T10:01:00Z"),
+            ),
+            DedupeKey::Baseline,
+        );
+        assert_eq!(dedup.len(), 1);
+        let only = dedup.values().next().expect("expected one deduped entry");
+        assert_eq!(only.candidate, "hello world!");
+    }
+
+    #[test]
+    fn split_key_baseline_prevents_variant_leakage() {
+        let baseline_hash = "base-dup";
+        let val_ratio = 0.5;
+        let mut sample_val: Option<SampleRow> = None;
+        let mut sample_train: Option<SampleRow> = None;
+
+        for idx in 0..256 {
+            let row = sample_row(baseline_hash, &format!("cand-{idx}"));
+            if should_go_to_val(split_partition_key(&row, SplitKey::Sample), val_ratio) {
+                if sample_val.is_none() {
+                    sample_val = Some(row);
+                }
+            } else if sample_train.is_none() {
+                sample_train = Some(row);
+            }
+            if sample_val.is_some() && sample_train.is_some() {
+                break;
+            }
+        }
+
+        let row_val = sample_val.expect("expected at least one sample-mode val variant");
+        let row_train = sample_train.expect("expected at least one sample-mode train variant");
+        let sample_partition = (
+            should_go_to_val(split_partition_key(&row_val, SplitKey::Sample), val_ratio),
+            should_go_to_val(split_partition_key(&row_train, SplitKey::Sample), val_ratio),
+        );
+        assert_ne!(sample_partition.0, sample_partition.1);
+
+        let baseline_partition = (
+            should_go_to_val(split_partition_key(&row_val, SplitKey::Baseline), val_ratio),
+            should_go_to_val(split_partition_key(&row_train, SplitKey::Baseline), val_ratio),
+        );
+        assert_eq!(baseline_partition.0, baseline_partition.1);
+    }
+
+    #[test]
+    fn split_key_partitioning_is_deterministic() {
+        let row = sample_row("base-deterministic", "cand-deterministic");
+        let first = should_go_to_val(split_partition_key(&row, SplitKey::Baseline), 0.37);
+        let second = should_go_to_val(split_partition_key(&row, SplitKey::Baseline), 0.37);
+        assert_eq!(first, second);
     }
 }

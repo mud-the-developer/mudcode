@@ -67,6 +67,7 @@ vi.mock('../../../src/tmux/factory.js', () => ({
 describe('healthCommand', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.validateConfig.mockImplementation(() => {});
     process.exitCode = 0;
     delete process.env.AGENT_DISCORD_CODEX_EVENT_ONLY;
     delete process.env.AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK;
@@ -510,6 +511,101 @@ describe('healthCommand', () => {
           String(c.detail || '').includes('signal stale'),
       ),
     ).toBe(true);
+
+    logSpy.mockRestore();
+  });
+
+  it('scopes checks to one project when --project is provided', async () => {
+    mocks.stateManager.listProjects.mockReturnValue([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'bridge',
+        agents: { codex: true },
+        discordChannels: { codex: 'ch-1' },
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'ch-1',
+          },
+        },
+        createdAt: new Date(),
+        lastActive: new Date(),
+      },
+      {
+        projectName: 'stale',
+        projectPath: '/tmp/stale',
+        tmuxSession: 'bridge',
+        agents: { codex: true },
+        discordChannels: {},
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'stale-codex',
+          },
+        },
+        createdAt: new Date(),
+        lastActive: new Date(),
+      },
+    ]);
+
+    const { healthCommand } = await import('../../../src/cli/commands/health.js');
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await healthCommand({ json: true, project: 'demo' });
+
+    const payload = JSON.parse(String(logSpy.mock.calls[0]?.[0] || '{}'));
+    expect(payload.summary.fail).toBe(0);
+    expect(payload.instances).toHaveLength(1);
+    expect(payload.instances[0].projectName).toBe('demo');
+    expect(
+      payload.checks.some((c: { name?: string }) => String(c.name || '').includes('stale')),
+    ).toBe(false);
+    expect(process.exitCode).toBe(0);
+
+    logSpy.mockRestore();
+  });
+
+  it('fails when requested health project does not exist', async () => {
+    mocks.stateManager.listProjects.mockReturnValue([
+      {
+        projectName: 'demo',
+        projectPath: '/tmp/demo',
+        tmuxSession: 'bridge',
+        agents: { codex: true },
+        discordChannels: { codex: 'ch-1' },
+        instances: {
+          codex: {
+            instanceId: 'codex',
+            agentType: 'codex',
+            tmuxWindow: 'demo-codex',
+            channelId: 'ch-1',
+          },
+        },
+        createdAt: new Date(),
+        lastActive: new Date(),
+      },
+    ]);
+
+    const { healthCommand } = await import('../../../src/cli/commands/health.js');
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await healthCommand({ json: true, project: 'missing' });
+
+    const payload = JSON.parse(String(logSpy.mock.calls[0]?.[0] || '{}'));
+    expect(payload.summary.fail).toBeGreaterThanOrEqual(1);
+    expect(
+      payload.checks.some(
+        (c: { name?: string; level?: string; detail?: string }) =>
+          c.name === 'projects' &&
+          c.level === 'fail' &&
+          String(c.detail || '').includes("project 'missing' not found"),
+      ),
+    ).toBe(true);
+    expect(process.exitCode).toBe(1);
 
     logSpy.mockRestore();
   });

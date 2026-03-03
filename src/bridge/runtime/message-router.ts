@@ -77,7 +77,7 @@ type MaintenanceCommand =
   | { kind: 'doctor'; fix: boolean }
   | { kind: 'update'; git: boolean }
   | { kind: 'daemon-restart' }
-  | { kind: 'repair' }
+  | { kind: 'repair'; mode: 'default' | 'doctor-only' | 'restart-only' | 'verify' | 'deep' }
   | { kind: 'orchestrator-status' }
   | {
       kind: 'orchestrator-enable';
@@ -490,7 +490,26 @@ export class BridgeMessageRouter {
     }
 
     if (command === '/repair' || command === '/self-heal') {
-      return { kind: 'repair' };
+      const modeToken = (parts[1] || '').trim().toLowerCase();
+      if (!modeToken || modeToken === 'default') {
+        return { kind: 'repair', mode: 'default' };
+      }
+      if (modeToken === 'doctor' || modeToken === 'doctor-only') {
+        return { kind: 'repair', mode: 'doctor-only' };
+      }
+      if (modeToken === 'restart' || modeToken === 'restart-only') {
+        return { kind: 'repair', mode: 'restart-only' };
+      }
+      if (modeToken === 'verify' || modeToken === 'check') {
+        return { kind: 'repair', mode: 'verify' };
+      }
+      if (modeToken === 'deep' || modeToken === 'full') {
+        return { kind: 'repair', mode: 'deep' };
+      }
+      return {
+        kind: 'orchestrator-help',
+        message: '⚠️ Usage: `/repair [doctor-only|restart-only|verify|deep]`',
+      };
     }
 
     const subagentsAlias = this.parseSubagentsAliasCommand(content);
@@ -3389,32 +3408,92 @@ export class BridgeMessageRouter {
     }
 
     if (params.command.kind === 'repair') {
-      await this.deps.messaging.sendToChannel(
-        params.channelId,
-        '🛠️ Running doctor auto-fix, then scheduling daemon restart...',
-      );
-      try {
-        const runner = this.deps.doctorRunner || runDoctor;
-        const result = await runner({ fix: true });
-        await this.sendSplitMessage(params.channelId, this.formatDoctorSummary(result));
-      } catch (error) {
+      const runDoctorFix = async (): Promise<boolean> => {
+        try {
+          const runner = this.deps.doctorRunner || runDoctor;
+          const result = await runner({ fix: true });
+          await this.sendSplitMessage(params.channelId, this.formatDoctorSummary(result));
+          if (!result.ok) {
+            await this.deps.messaging.sendToChannel(
+              params.channelId,
+              '⚠️ Repair aborted: doctor reported failure(s).',
+            );
+            return false;
+          }
+          return true;
+        } catch (error) {
+          await this.deps.messaging.sendToChannel(
+            params.channelId,
+            `⚠️ Repair step failed during doctor run: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return false;
+        }
+      };
+
+      const scheduleDaemonRestart = async (): Promise<boolean> => {
         await this.deps.messaging.sendToChannel(
           params.channelId,
-          `⚠️ Repair step failed during doctor run: ${error instanceof Error ? error.message : String(error)}`,
+          '♻️ Scheduling daemon restart after repair...',
         );
+        try {
+          this.scheduleBackgroundCli(['daemon', 'restart'], 500);
+          return true;
+        } catch (error) {
+          await this.deps.messaging.sendToChannel(
+            params.channelId,
+            `⚠️ Failed to schedule daemon restart: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return false;
+        }
+      };
+
+      const scheduleHealthVerify = async (delayMs: number): Promise<void> => {
+        const verifyArgs = ['repair', 'verify', '--project', params.projectName];
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          `🩺 Scheduling health verify (\`mudcode ${verifyArgs.join(' ')}\`) ...`,
+        );
+        try {
+          this.scheduleBackgroundCli(verifyArgs, delayMs);
+        } catch (error) {
+          await this.deps.messaging.sendToChannel(
+            params.channelId,
+            `⚠️ Failed to schedule health verify: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      };
+
+      if (params.command.mode === 'restart-only') {
+        await scheduleDaemonRestart();
         return;
       }
+
+      if (params.command.mode === 'verify') {
+        await scheduleHealthVerify(350);
+        return;
+      }
+
       await this.deps.messaging.sendToChannel(
         params.channelId,
-        '♻️ Scheduling daemon restart after repair...',
+        params.command.mode === 'doctor-only'
+          ? '🛠️ Running doctor auto-fix...'
+          : params.command.mode === 'deep'
+            ? '🛠️ Running doctor auto-fix, then scheduling daemon restart and verify...'
+            : '🛠️ Running doctor auto-fix, then scheduling daemon restart...',
       );
-      try {
-        this.scheduleBackgroundCli(['daemon', 'restart'], 500);
-      } catch (error) {
-        await this.deps.messaging.sendToChannel(
-          params.channelId,
-          `⚠️ Failed to schedule daemon restart: ${error instanceof Error ? error.message : String(error)}`,
-        );
+
+      const doctorOk = await runDoctorFix();
+      if (!doctorOk) return;
+
+      if (params.command.mode === 'doctor-only') {
+        return;
+      }
+
+      const restartScheduled = await scheduleDaemonRestart();
+      if (!restartScheduled) return;
+
+      if (params.command.mode === 'deep') {
+        await scheduleHealthVerify(5000);
       }
       return;
     }

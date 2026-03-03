@@ -82,6 +82,13 @@ type CaptureProbeSnapshot = {
   lastError?: string;
 };
 
+type ProjectScopeResolution = {
+  projects: ReturnType<typeof stateManager.listProjects>;
+  requestedProject?: string;
+  resolvedProject?: string;
+  errorDetail?: string;
+};
+
 function pushCheck(checks: HealthCheck[], name: string, level: HealthLevel, detail: string): void {
   checks.push({ name, level, detail });
 }
@@ -415,12 +422,51 @@ async function fetchRuntimeStatus(port: number): Promise<Map<string, RuntimeSnap
   return map;
 }
 
+function resolveProjectScope(
+  allProjects: ReturnType<typeof stateManager.listProjects>,
+  rawProject?: string,
+): ProjectScopeResolution {
+  const requestedProject = rawProject?.trim();
+  if (!requestedProject) {
+    return { projects: allProjects };
+  }
+
+  const exact = allProjects.find((project) => project.projectName === requestedProject);
+  const caseInsensitive =
+    exact ||
+    allProjects.find((project) => project.projectName.toLowerCase() === requestedProject.toLowerCase());
+  if (caseInsensitive) {
+    return {
+      projects: [caseInsensitive],
+      requestedProject,
+      resolvedProject: caseInsensitive.projectName,
+    };
+  }
+
+  if (allProjects.length === 0) {
+    return {
+      projects: [],
+      requestedProject,
+      errorDetail: `project '${requestedProject}' not found (no configured projects)`,
+    };
+  }
+
+  const preview = allProjects.slice(0, 8).map((project) => project.projectName);
+  const suffix = allProjects.length > preview.length ? ', ...' : '';
+  return {
+    projects: [],
+    requestedProject,
+    errorDetail: `project '${requestedProject}' not found (available: ${preview.join(', ')}${suffix})`,
+  };
+}
+
 export async function healthCommand(
   options: TmuxCliOptions & {
     json?: boolean;
     captureTest?: boolean;
     captureTestPolls?: number;
     captureTestIntervalMs?: number;
+    project?: string;
   } = {},
 ): Promise<void> {
   const effectiveConfig = applyTmuxCliOverrides(config, options);
@@ -474,7 +520,9 @@ export async function healthCommand(
     pushCheck(checks, 'runtime', 'warn', 'daemon not running; runtime status unavailable');
   }
 
-  const projects = stateManager.listProjects();
+  const allProjects = stateManager.listProjects();
+  const scopedProjects = resolveProjectScope(allProjects, options.project);
+  const projects = scopedProjects.projects;
   if (codexEventOnlyEnabled && codexEventOnlyCaptureFallbackEnabled) {
     pushCheck(
       checks,
@@ -499,7 +547,21 @@ export async function healthCommand(
       `event-hook capture fallback stale grace is high (${eventHookCaptureFallbackStaleGraceMs}ms)`,
     );
   }
-  if (projects.length === 0) {
+  if (scopedProjects.errorDetail) {
+    pushCheck(checks, 'projects', 'fail', scopedProjects.errorDetail);
+  } else if (scopedProjects.resolvedProject) {
+    const resolvedSuffix =
+      scopedProjects.requestedProject &&
+      scopedProjects.requestedProject.toLowerCase() !== scopedProjects.resolvedProject.toLowerCase()
+        ? ` (resolved from '${scopedProjects.requestedProject}')`
+        : '';
+    pushCheck(
+      checks,
+      'projects',
+      'ok',
+      `${projects.length} configured project(s) (scoped to ${scopedProjects.resolvedProject}${resolvedSuffix})`,
+    );
+  } else if (projects.length === 0) {
     pushCheck(checks, 'projects', 'warn', 'no configured projects');
   } else {
     pushCheck(checks, 'projects', 'ok', `${projects.length} configured project(s)`);
@@ -662,6 +724,9 @@ export async function healthCommand(
     console.log(chalk.gray(`Config file: ${getConfigPath()}`));
     console.log(chalk.gray(`Platform: ${effectiveConfig.messagingPlatform || 'discord'}`));
     console.log(chalk.gray(`Hook port: ${effectiveConfig.hookServerPort || 18470}`));
+    if (scopedProjects.resolvedProject) {
+      console.log(chalk.gray(`Project scope: ${scopedProjects.resolvedProject}`));
+    }
     if (options.captureTest) {
       const probePolls = resolveCaptureProbePolls(options.captureTestPolls);
       const probeIntervalMs = resolveCaptureProbeIntervalMs(options.captureTestIntervalMs);
