@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { join } from 'path';
+import { tmpdir } from 'os';
+import { mkdirSync, rmSync, writeFileSync } from 'fs';
 
 const mocks = vi.hoisted(() => ({
   runDoctor: vi.fn(),
@@ -28,10 +31,15 @@ vi.mock('../../../src/state/index.js', () => ({
 describe('repairCommand', () => {
   let logSpy: ReturnType<typeof vi.spyOn>;
   let errorSpy: ReturnType<typeof vi.spyOn>;
+  let repairLockPath: string;
 
   beforeEach(() => {
     vi.clearAllMocks();
     process.exitCode = undefined;
+    repairLockPath = join(tmpdir(), `mudcode-repair-test-lock-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    process.env.MUDCODE_REPAIR_LOCK_PATH = repairLockPath;
+    delete process.env.MUDCODE_REPAIR_LOCK_WAIT_MS;
+    delete process.env.MUDCODE_REPAIR_LOCK_STALE_MS;
     mocks.runDoctor.mockResolvedValue({
       ok: true,
       issues: [],
@@ -47,6 +55,10 @@ describe('repairCommand', () => {
   afterEach(() => {
     logSpy.mockRestore();
     errorSpy.mockRestore();
+    rmSync(repairLockPath, { recursive: true, force: true });
+    delete process.env.MUDCODE_REPAIR_LOCK_PATH;
+    delete process.env.MUDCODE_REPAIR_LOCK_WAIT_MS;
+    delete process.env.MUDCODE_REPAIR_LOCK_STALE_MS;
     process.exitCode = undefined;
   });
 
@@ -173,6 +185,21 @@ describe('repairCommand', () => {
   it('rejects unknown mode', async () => {
     const { repairCommand } = await import('../../../src/cli/commands/repair.js');
     await repairCommand({ mode: 'wat' });
+
+    expect(mocks.runDoctor).not.toHaveBeenCalled();
+    expect(mocks.daemonCommand).not.toHaveBeenCalled();
+    expect(mocks.healthCommand).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('fails fast when repair lock is already held', async () => {
+    mkdirSync(repairLockPath, { recursive: true });
+    writeFileSync(join(repairLockPath, 'owner'), 'external-test-owner', 'utf8');
+    process.env.MUDCODE_REPAIR_LOCK_WAIT_MS = '50';
+    process.env.MUDCODE_REPAIR_LOCK_STALE_MS = '600000';
+
+    const { repairCommand } = await import('../../../src/cli/commands/repair.js');
+    await repairCommand();
 
     expect(mocks.runDoctor).not.toHaveBeenCalled();
     expect(mocks.daemonCommand).not.toHaveBeenCalled();

@@ -1,3 +1,7 @@
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs';
+import { homedir } from 'os';
+import { dirname, join } from 'path';
+
 export type AgentEventType =
   | 'session.start'
   | 'session.progress'
@@ -59,6 +63,8 @@ export interface AgentEventHookClient {
   }): Promise<boolean>;
 }
 
+type OutboxEntry = { payload: AgentEventHookPayload; attempt: number; dueAtMs: number };
+
 export class LocalAgentEventHookClient implements AgentEventHookClient {
   readonly enabled: boolean;
   private readonly endpoint: string;
@@ -66,9 +72,15 @@ export class LocalAgentEventHookClient implements AgentEventHookClient {
   private readonly retryMax: number;
   private readonly retryBaseMs: number;
   private readonly retryMaxMs: number;
+  private readonly outboxMax: number;
+  private readonly outboxPersistPath?: string;
+  private readonly outboxPersistFlushMs: number;
+  private readonly outboxPersistRetentionMs: number;
   private draining = false;
   private drainTimer?: ReturnType<typeof setTimeout>;
-  private outbox: Array<{ payload: AgentEventHookPayload; attempt: number; dueAtMs: number }> = [];
+  private persistTimer?: ReturnType<typeof setTimeout>;
+  private persistDirty = false;
+  private outbox: OutboxEntry[] = [];
   private eventSequence = 0;
   private turnSequenceByKey = new Map<string, number>();
 
@@ -80,6 +92,14 @@ export class LocalAgentEventHookClient implements AgentEventHookClient {
     this.retryMax = this.resolveRetryMax();
     this.retryBaseMs = this.resolveRetryBaseMs();
     this.retryMaxMs = this.resolveRetryMaxMs();
+    this.outboxMax = this.resolveOutboxMax();
+    this.outboxPersistPath = this.resolveOutboxPersistPath();
+    this.outboxPersistFlushMs = this.resolveOutboxPersistFlushMs();
+    this.outboxPersistRetentionMs = this.resolveOutboxPersistRetentionMs();
+    this.loadPersistedOutbox();
+    if (this.outbox.length > 0) {
+      this.scheduleDrain(0);
+    }
   }
 
   async post(payload: AgentEventHookPayload): Promise<boolean> {
@@ -138,7 +158,8 @@ export class LocalAgentEventHookClient implements AgentEventHookClient {
     channelId?: string;
     text?: string;
   }): Promise<boolean> {
-    return this.post({
+    if (!this.enabled) return Promise.resolve(false);
+    const payload = this.normalizePayload({
       projectName: params.projectName,
       agentType: 'codex',
       instanceId: params.instanceId,
@@ -148,6 +169,7 @@ export class LocalAgentEventHookClient implements AgentEventHookClient {
       channelId: params.channelId,
       source: 'codex-poc',
     });
+    return Promise.resolve(this.enqueueWithRetry(payload));
   }
 
   emitCodexProgress(params: {
@@ -161,7 +183,8 @@ export class LocalAgentEventHookClient implements AgentEventHookClient {
     progressBlockWindowMs?: number;
     progressBlockMaxChars?: number;
   }): Promise<boolean> {
-    return this.post({
+    if (!this.enabled) return Promise.resolve(false);
+    const payload = this.normalizePayload({
       projectName: params.projectName,
       agentType: 'codex',
       instanceId: params.instanceId,
@@ -175,6 +198,7 @@ export class LocalAgentEventHookClient implements AgentEventHookClient {
       channelId: params.channelId,
       source: 'codex-poc',
     });
+    return Promise.resolve(this.enqueueWithRetry(payload));
   }
 
   emitCodexError(params: {
@@ -248,13 +272,69 @@ export class LocalAgentEventHookClient implements AgentEventHookClient {
 
   private enqueueWithRetry(payload: AgentEventHookPayload): boolean {
     if (!this.enabled) return false;
+    if (this.coalesceQueuedProgress(payload)) {
+      this.scheduleDrain(0);
+      return true;
+    }
+    this.enforceOutboxCapacity();
     this.outbox.push({
       payload,
       attempt: 0,
       dueAtMs: Date.now(),
     });
+    this.markOutboxDirty();
     this.scheduleDrain(0);
     return true;
+  }
+
+  private resolveOutboxMax(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_EVENT_HOOK_OUTBOX_MAX || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 1 && fromEnv <= 20_000) {
+      return Math.trunc(fromEnv);
+    }
+    return 2000;
+  }
+
+  private progressQueueKey(payload: AgentEventHookPayload): string {
+    return [
+      payload.projectName,
+      payload.agentType,
+      payload.instanceId || 'na',
+      payload.turnId || 'na',
+      payload.channelId || 'na',
+    ].join(':');
+  }
+
+  private coalesceQueuedProgress(payload: AgentEventHookPayload): boolean {
+    if (payload.type !== 'session.progress') return false;
+    const key = this.progressQueueKey(payload);
+    for (let i = this.outbox.length - 1; i >= 0; i -= 1) {
+      const queued = this.outbox[i];
+      if (!queued) continue;
+      if (queued.attempt > 0) continue;
+      if (queued.payload.type !== 'session.progress') continue;
+      if (this.progressQueueKey(queued.payload) !== key) continue;
+      this.outbox[i] = {
+        payload,
+        attempt: 0,
+        dueAtMs: Math.min(queued.dueAtMs, Date.now()),
+      };
+      this.markOutboxDirty();
+      return true;
+    }
+    return false;
+  }
+
+  private enforceOutboxCapacity(): void {
+    if (this.outboxMax <= 0) return;
+    if (this.outbox.length < this.outboxMax) return;
+
+    let dropIndex = this.outbox.findIndex((entry) => entry.payload.type === 'session.progress');
+    if (dropIndex < 0) {
+      dropIndex = 0;
+    }
+    this.outbox.splice(dropIndex, 1);
+    this.markOutboxDirty();
   }
 
   private scheduleDrain(delayMs: number): void {
@@ -286,6 +366,7 @@ export class LocalAgentEventHookClient implements AgentEventHookClient {
         }
 
         this.outbox.shift();
+        this.markOutboxDirty();
         const ok = await this.postOnce(head.payload);
         if (ok) continue;
 
@@ -294,11 +375,13 @@ export class LocalAgentEventHookClient implements AgentEventHookClient {
         }
         const nextAttempt = head.attempt + 1;
         const nextDelay = this.computeRetryDelayMs(nextAttempt);
+        this.enforceOutboxCapacity();
         this.outbox.push({
           payload: head.payload,
           attempt: nextAttempt,
           dueAtMs: Date.now() + nextDelay,
         });
+        this.markOutboxDirty();
       }
     } finally {
       this.draining = false;
@@ -306,6 +389,192 @@ export class LocalAgentEventHookClient implements AgentEventHookClient {
         this.scheduleDrain(0);
       }
     }
+  }
+
+  private isValidAgentEventType(value: unknown): value is AgentEventType {
+    return (
+      value === 'session.start' ||
+      value === 'session.progress' ||
+      value === 'session.final' ||
+      value === 'session.idle' ||
+      value === 'session.error' ||
+      value === 'session.cancelled'
+    );
+  }
+
+  private normalizePersistedPayload(raw: unknown): AgentEventHookPayload | undefined {
+    if (!raw || typeof raw !== 'object') return undefined;
+    const candidate = raw as Record<string, unknown>;
+    const projectName =
+      typeof candidate.projectName === 'string' && candidate.projectName.trim().length > 0
+        ? candidate.projectName.trim()
+        : '';
+    const agentType =
+      typeof candidate.agentType === 'string' && candidate.agentType.trim().length > 0
+        ? candidate.agentType.trim()
+        : '';
+    const type = candidate.type;
+    if (!projectName || !agentType || !this.isValidAgentEventType(type)) return undefined;
+
+    const payload: AgentEventHookPayload = {
+      projectName,
+      agentType,
+      type,
+    };
+    if (typeof candidate.instanceId === 'string' && candidate.instanceId.trim().length > 0) {
+      payload.instanceId = candidate.instanceId.trim();
+    }
+    if (typeof candidate.eventId === 'string' && candidate.eventId.trim().length > 0) {
+      payload.eventId = candidate.eventId.trim();
+    }
+    if (typeof candidate.turnId === 'string' && candidate.turnId.trim().length > 0) {
+      payload.turnId = candidate.turnId.trim();
+    }
+    if (typeof candidate.seq === 'number' && Number.isFinite(candidate.seq) && candidate.seq >= 0) {
+      payload.seq = Math.trunc(candidate.seq);
+    }
+    if (typeof candidate.text === 'string') {
+      payload.text = candidate.text;
+    }
+    if (
+      candidate.progressMode === 'off' ||
+      candidate.progressMode === 'thread' ||
+      candidate.progressMode === 'channel'
+    ) {
+      payload.progressMode = candidate.progressMode;
+    }
+    if (typeof candidate.progressBlockStreaming === 'boolean') {
+      payload.progressBlockStreaming = candidate.progressBlockStreaming;
+    }
+    if (
+      typeof candidate.progressBlockWindowMs === 'number' &&
+      Number.isFinite(candidate.progressBlockWindowMs)
+    ) {
+      payload.progressBlockWindowMs = Math.trunc(candidate.progressBlockWindowMs);
+    }
+    if (
+      typeof candidate.progressBlockMaxChars === 'number' &&
+      Number.isFinite(candidate.progressBlockMaxChars)
+    ) {
+      payload.progressBlockMaxChars = Math.trunc(candidate.progressBlockMaxChars);
+    }
+    if (typeof candidate.channelId === 'string' && candidate.channelId.trim().length > 0) {
+      payload.channelId = candidate.channelId.trim();
+    }
+    if (typeof candidate.source === 'string' && candidate.source.trim().length > 0) {
+      payload.source = candidate.source.trim();
+    }
+    return payload;
+  }
+
+  private loadPersistedOutbox(): void {
+    if (!this.outboxPersistPath || !existsSync(this.outboxPersistPath)) return;
+    try {
+      const raw = readFileSync(this.outboxPersistPath, 'utf8');
+      const parsed = JSON.parse(raw) as unknown;
+      const persisted = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray((parsed as { outbox?: unknown[] })?.outbox)
+          ? ((parsed as { outbox: unknown[] }).outbox || [])
+          : [];
+      const now = Date.now();
+      const next: OutboxEntry[] = [];
+      for (const item of persisted) {
+        if (!item || typeof item !== 'object') continue;
+        const record = item as Record<string, unknown>;
+        const payload = this.normalizePersistedPayload(record.payload);
+        if (!payload) continue;
+        const attemptRaw = Number(record.attempt);
+        const attempt =
+          Number.isFinite(attemptRaw) && attemptRaw >= 0 && attemptRaw <= this.retryMax
+            ? Math.trunc(attemptRaw)
+            : 0;
+        const dueAtRaw = Number(record.dueAtMs);
+        const dueAtMs = Number.isFinite(dueAtRaw) ? Math.trunc(dueAtRaw) : now;
+        const updatedAtRaw = Number(record.updatedAtMs ?? dueAtMs);
+        const updatedAtMs = Number.isFinite(updatedAtRaw) ? Math.trunc(updatedAtRaw) : dueAtMs;
+        if (now - updatedAtMs > this.outboxPersistRetentionMs) continue;
+        next.push({
+          payload,
+          attempt,
+          dueAtMs: dueAtMs < now ? now : dueAtMs,
+        });
+      }
+      next.sort((a, b) => a.dueAtMs - b.dueAtMs);
+      this.outbox = next.slice(Math.max(0, next.length - this.outboxMax));
+    } catch {
+      // best effort restore
+    }
+  }
+
+  private markOutboxDirty(): void {
+    if (!this.outboxPersistPath) return;
+    this.persistDirty = true;
+    if (this.outboxPersistFlushMs <= 0) {
+      this.flushPersistedOutbox();
+      return;
+    }
+    if (this.persistTimer) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = undefined;
+      this.flushPersistedOutbox();
+    }, this.outboxPersistFlushMs);
+    this.persistTimer.unref?.();
+  }
+
+  private flushPersistedOutbox(): void {
+    if (!this.outboxPersistPath || !this.persistDirty) return;
+    this.persistDirty = false;
+    try {
+      mkdirSync(dirname(this.outboxPersistPath), { recursive: true });
+      if (this.outbox.length === 0) {
+        rmSync(this.outboxPersistPath, { force: true });
+        return;
+      }
+      const now = Date.now();
+      const serialized = {
+        updatedAtMs: now,
+        outbox: this.outbox.map((entry) => ({
+          payload: entry.payload,
+          attempt: entry.attempt,
+          dueAtMs: entry.dueAtMs,
+          updatedAtMs: now,
+        })),
+      };
+      const tempPath = `${this.outboxPersistPath}.tmp-${process.pid}-${now}`;
+      writeFileSync(tempPath, JSON.stringify(serialized));
+      renameSync(tempPath, this.outboxPersistPath);
+    } catch {
+      this.persistDirty = true;
+    }
+  }
+
+  private resolveOutboxPersistPath(): string | undefined {
+    const raw = process.env.AGENT_DISCORD_EVENT_HOOK_OUTBOX_PATH;
+    if (typeof raw === 'string') {
+      const trimmed = raw.trim();
+      if (trimmed.toLowerCase() === 'off' || trimmed === '0' || trimmed.toLowerCase() === 'false') {
+        return undefined;
+      }
+      if (trimmed.length > 0) return trimmed;
+    }
+    return join(homedir(), '.mudcode', 'runtime', 'agent-event-hook-outbox.json');
+  }
+
+  private resolveOutboxPersistFlushMs(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_EVENT_HOOK_OUTBOX_FLUSH_MS || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 0 && fromEnv <= 10_000) {
+      return Math.trunc(fromEnv);
+    }
+    return 200;
+  }
+
+  private resolveOutboxPersistRetentionMs(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_EVENT_HOOK_OUTBOX_RETENTION_MS || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 1000 && fromEnv <= 7 * 24 * 60 * 60 * 1000) {
+      return Math.trunc(fromEnv);
+    }
+    return 24 * 60 * 60 * 1000;
   }
 
   private resolvePort(configured?: number): number {
@@ -357,10 +626,10 @@ export class LocalAgentEventHookClient implements AgentEventHookClient {
   private resolveEnabled(configured?: boolean): boolean {
     if (typeof configured === 'boolean') return configured;
     const raw = process.env.AGENT_DISCORD_CODEX_EVENT_POC;
-    if (!raw) return false;
+    if (!raw) return true;
     const normalized = raw.trim().toLowerCase();
     if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
     if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
-    return false;
+    return true;
   }
 }

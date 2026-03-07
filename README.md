@@ -70,7 +70,7 @@ mudcode attach my-app --instance codex
 - `mudcode daemon <start|stop|status|restart>`: manage daemon
 - `mudcode doctor [--fix]`: detect config/env/runtime drift and optionally auto-fix
 - `mudcode repair [mode] [--project <name>]`: run self-heal flow (`default|doctor-only|restart-only|verify|deep`)
-- `mudcode update [--git]`: update to latest (auto git mode supported)
+- `mudcode update [--git] [--explain]`: update to latest (auto git mode supported; `--explain` prints plan only)
 - `mudcode stop [project] --instance <id>`: stop one instance
 - `mudcode skill list [--all]`: list skills from `AGENTS.md` and `.agents/skills`
 - `mudcode skill install [name]`: install local/no-api skills into Codex skills dir
@@ -165,6 +165,12 @@ Doctor safety check:
 
 Use these inside mapped channels/threads:
 
+Quick list:
+- plain non-slash text (default): forwarded to the mapped agent
+- `/send <text>` (explicit submit path)
+- `/orchestrator enable|disable [supervisorInstanceId|supervisor=<id>] [hidden|thread|channel]` (advanced/manual; shown in `/help all`)
+
+- `/help [all]` (alias: `/commands [all]`; default = concise categories, `all` = include advanced orchestrator commands)
 - `/retry`
 - `/health`
 - `/snapshot`
@@ -225,6 +231,13 @@ Self-check:
 - Mudcode can auto-link skills from `AGENTS.md` (`### Available skills`) and append a skill hint to outgoing Codex prompts.
 
 Environment toggles:
+- Gemini preflight fallback:
+  - `AGENT_DISCORD_GEMINI_PREFLIGHT_ENABLED=1|0` (default `1`, check Gemini model capability before runtime dispatch)
+  - `AGENT_DISCORD_GEMINI_PREFLIGHT_MODEL=<model>` (default `pro 3.1`, target model string for preflight probe)
+  - `AGENT_DISCORD_GEMINI_PREFLIGHT_CACHE_TTL_MS=<n>` (default `60000`, cache ttl for preflight probe result)
+- Turn-route ledger:
+  - `AGENT_DISCORD_TURN_ROUTE_RETENTION_MS=<n>` (default `21600000`, range `60000..86400000`; keep turn-to-channel route hints for event routing fallback)
+  - `AGENT_DISCORD_TURN_ROUTE_MAX=<n>` (default `20000`, range `100..200000`; max in-memory turn route entries before oldest eviction)
 - `AGENT_DISCORD_CODEX_IO_V2=0` to disable tracker
 - `AGENT_DISCORD_CODEX_IO_V2_ANNOUNCE=0` to keep transcript logging but disable channel command event posts
 - `AGENT_DISCORD_CODEX_IO_V2_DIR=/path` to change transcript root directory
@@ -235,8 +248,35 @@ Environment toggles:
 - `AGENT_DISCORD_CODEX_AUTO_LANGUAGE_POLICY_MODE=off|korean|always` (default `off`; set `korean`/`always` only when you explicitly want this extra policy hint)
 - `AGENT_DISCORD_CAPTURE_FINAL_BUFFER_MAX_CHARS=<n>` (default `120000`, range `4000..500000`; final-only capture buffer budget before truncation)
 - `AGENT_DISCORD_EVENT_PROGRESS_TRANSCRIPT_MAX_CHARS=<n>` (default `100000`, range `500..500000`; transcript budget used for empty `session.final` fallback)
-- `AGENT_DISCORD_CODEX_EVENT_ONLY=1|0` (default `1`, set `0` to keep legacy direct capture output path)
-- `AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK=0|1` (default `0`, set `1` to re-enable tmux stale fallback capture)
+- `AGENT_DISCORD_EVENT_PROGRESS_MAX_MESSAGES_PER_TURN=<n>` (default `6`, range `0..200`; per-turn progress burst guard, `0` disables suppression)
+- `AGENT_DISCORD_EVENT_PROGRESS_MAX_CHARS_PER_TURN=<n>` (default `6000`, range `0..200000`; per-turn progress text budget, additional progress payloads are suppressed after this budget, `0` disables char-budget suppression)
+- `AGENT_DISCORD_EVENT_PROGRESS_DUPLICATE_WINDOW_MS=<n>` (default `10000`, range `0..600000`; suppress repeated identical progress payloads within this window, `0` disables duplicate suppression)
+- `AGENT_DISCORD_EVENT_PROGRESS_MODE_STALE_WARN_MS=<n>` (default `90000`, range `5000..3600000`; health warning threshold when pending Codex runtime progress-mode signal is stale)
+- `AGENT_DISCORD_EVENT_HOOK_OUTBOX_MAX=<n>` (default `2000`, range `1..20000`; max in-memory queued hook events before backpressure drops oldest entries, preferring `session.progress`)
+- `AGENT_DISCORD_EVENT_HOOK_OUTBOX_PATH=<path|off>` (default `~/.mudcode/runtime/agent-event-hook-outbox.json`; durable hook outbox path, set `off` to disable persistence)
+- `AGENT_DISCORD_EVENT_HOOK_OUTBOX_FLUSH_MS=<n>` (default `200`, range `0..10000`; outbox persistence flush cadence, `0` flushes synchronously)
+- `AGENT_DISCORD_EVENT_HOOK_OUTBOX_RETENTION_MS=<n>` (default `86400000`, range `1000..604800000`; max age for restoring persisted hook outbox entries)
+- `AGENT_DISCORD_OUTPUT_DEDUPE_WINDOW_MS=<n>` (default `2500`, range `0..60000`; suppress duplicate same-text output bursts per Discord queue within this window, `0` disables)
+- `AGENT_DISCORD_OUTPUT_MAX_CHUNKS=<n>` (default `4`, range `1..40`; cap Discord text/page chunk fan-out per send, oversized payloads append one truncation notice chunk)
+- `AGENT_DISCORD_LONG_OUTPUT_THREAD_MAX_CHUNKS=<n>` (default `8`, range `1..200`; if long-output estimated chunk count exceeds this, skip thread fan-out and send condensed summary instead)
+- `AGENT_DISCORD_INPUT_DEDUPE_MESSAGE_WINDOW_MS=<n>` (default `1800000`, range `0..86400000`; inbound message-id idempotency window to skip duplicate dispatch)
+- `AGENT_DISCORD_INPUT_DEDUPE_SIGNATURE_WINDOW_MS=<n>` (default `5000`, range `0..3600000`; short dedupe window for slash/control events without messageId)
+- `AGENT_DISCORD_INPUT_DEDUPE_MAX=<n>` (default `50000`, range `100..1000000`; inbound dedupe cache max entries)
+- `AGENT_DISCORD_TMUX_DEFER_MISSING_ENABLED=1|0` (default `1`; when tmux target is missing, queue prompt for automatic replay instead of immediate hard-fail)
+- `AGENT_DISCORD_TMUX_DEFER_MISSING_RETRY_BASE_MS=<n>` (default `2500`, range `250..60000`; base backoff for deferred tmux replay)
+- `AGENT_DISCORD_TMUX_DEFER_MISSING_RETRY_MAX_MS=<n>` (default `15000`, range `500..120000`; max backoff for deferred tmux replay)
+- `AGENT_DISCORD_TMUX_DEFER_MISSING_RETRY_MAX_ATTEMPTS=<n>` (default `24`, range `1..200`; max attempts before deferred replay gives up)
+- `AGENT_DISCORD_TMUX_DEFER_MISSING_MAX_AGE_MS=<n>` (default `600000`, range `10000..86400000`; max queue age before deferred replay is dropped)
+- `AGENT_DISCORD_TMUX_DEFER_MISSING_MAX_QUEUE=<n>` (default `400`, range `1..5000`; deferred replay queue cap)
+- `AGENT_DISCORD_BACKGROUND_CLI_SCHEDULE_COOLDOWN_MS=<n>` (default `15000`, range `0..600000`; suppress duplicate background maintenance scheduling for same CLI args within cooldown, `0` disables)
+- `MUDCODE_REPAIR_LOCK_PATH=<path>` (default `~/.mudcode/locks/repair.lock`; filesystem lock path used by `mudcode repair` to prevent concurrent runs)
+- `MUDCODE_REPAIR_LOCK_WAIT_MS=<n>` (default `2000`, range `0..30000`; wait budget before failing when repair lock is busy)
+- `MUDCODE_REPAIR_LOCK_STALE_MS=<n>` (default `300000`, range `1000..86400000`; stale lock age threshold before auto-recovery)
+- `AGENT_DISCORD_CODEX_EVENT_POC=1|0` (default `1`; enable local Codex event-hook bridge, set `0` to force legacy direct-capture delivery)
+- `AGENT_DISCORD_CODEX_EVENT_ONLY` is deprecated/ignored (no runtime effect; Codex safety gating remains enabled: `session.progress` channel -> thread/off and `session.idle` is suppressed by default)
+- `AGENT_DISCORD_CODEX_EVENT_ONLY_IDLE_OUTPUT=1|0` (default `0`; debug/legacy override to re-enable Codex `session.idle` channel output while event-hook bridge is active)
+- `AGENT_DISCORD_CODEX_FORCE_EVENT_OUTPUT=1|0` (default `1`; keep Codex output event-driven while event-hook bridge is enabled. `0` only disables the authoritative event-output gate and does not re-enable direct fallback while hook delivery is active)
+- `AGENT_DISCORD_EVENT_HOOK_CAPTURE_OUTPUT=1|0` (default `0`; during event-hook stale-capture fallback, set `1` to allow legacy raw direct output for non-Codex instances)
 - `AGENT_DISCORD_EVENT_LIFECYCLE_STRICT_MODE=off|warn|reject` (default `warn`)
 - `AGENT_DISCORD_SUPERVISOR_FINAL_FORMAT_STRICT=0|1` (default `1`, strict validator for supervisor final-format auto-retry policy)
 

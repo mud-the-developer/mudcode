@@ -271,6 +271,104 @@ function resolveAutoGitRepoPath(options: { repo?: string }): string | null {
   return null;
 }
 
+type UpdateExecutionPlan =
+  | {
+      mode: 'git-explicit' | 'git-auto';
+      repoPath: string;
+      installPlan: UpgradeInstallPlan | null;
+      validRepo: boolean;
+      validMudcodeRepo: boolean;
+      hasPackageJson: boolean;
+    }
+  | {
+      mode: 'registry';
+      installPlan: UpgradeInstallPlan | null;
+      forcedNoGit: boolean;
+    };
+
+function resolveUpdateExecutionPlan(options: { git?: boolean; repo?: string }): UpdateExecutionPlan {
+  if (options.git === true) {
+    const repoPath = resolve(options.repo?.trim() || process.env.MUDCODE_GIT_REPO_PATH?.trim() || process.cwd());
+    return {
+      mode: 'git-explicit',
+      repoPath,
+      installPlan: detectLocalUpgradeInstallPlan(repoPath),
+      validRepo: isGitRepository(repoPath),
+      validMudcodeRepo: isMudcodeRepository(repoPath),
+      hasPackageJson: existsSync(resolve(repoPath, 'package.json')),
+    };
+  }
+
+  if (options.git !== false) {
+    const autoGitRepoPath = resolveAutoGitRepoPath({ repo: options.repo });
+    if (autoGitRepoPath) {
+      return {
+        mode: 'git-auto',
+        repoPath: autoGitRepoPath,
+        installPlan: detectLocalUpgradeInstallPlan(autoGitRepoPath),
+        validRepo: true,
+        validMudcodeRepo: true,
+        hasPackageJson: existsSync(resolve(autoGitRepoPath, 'package.json')),
+      };
+    }
+  }
+
+  return {
+    mode: 'registry',
+    installPlan: detectUpgradeInstallPlan(),
+    forcedNoGit: options.git === false,
+  };
+}
+
+async function explainUpdateCommand(options: {
+  git?: boolean;
+  repo?: string;
+  dedupeNpm?: boolean;
+  check?: boolean;
+}): Promise<void> {
+  const plan = resolveUpdateExecutionPlan(options);
+  const dedupeNpm = options.dedupeNpm !== false;
+  const latestVersion = await fetchLatestCliVersion(2500);
+
+  console.log(chalk.cyan('\n🧭 mudcode update --explain\n'));
+  console.log(chalk.gray(`   Current version: ${CLI_VERSION}`));
+  console.log(chalk.gray(`   Latest npm version: ${latestVersion || '(unavailable)'}`));
+
+  if (plan.mode === 'git-explicit' || plan.mode === 'git-auto') {
+    const modeLabel = plan.mode === 'git-explicit' ? 'git (explicit --git)' : 'git (auto-detected)';
+    console.log(chalk.gray(`   Mode: ${modeLabel}`));
+    console.log(chalk.gray(`   Repo: ${plan.repoPath}`));
+    console.log(chalk.gray(`   Repo check: git=${plan.validRepo ? 'ok' : 'fail'}, mudcode=${plan.validMudcodeRepo ? 'ok' : 'fail'}, package.json=${plan.hasPackageJson ? 'ok' : 'fail'}`));
+    console.log(chalk.white('\nPlanned steps:'));
+    console.log(chalk.gray(`  1) git -C ${shellEscapeArg(plan.repoPath)} pull --rebase --autostash`));
+    if (plan.installPlan) {
+      console.log(chalk.gray(`  2) ${plan.installPlan.command}`));
+    } else {
+      console.log(chalk.gray('  2) (blocked) Bun not detected; local git install cannot proceed.'));
+    }
+  } else {
+    const modeLabel = 'forcedNoGit' in plan && plan.forcedNoGit ? 'registry (forced --no-git)' : 'registry';
+    console.log(chalk.gray(`   Mode: ${modeLabel}`));
+    console.log(chalk.white('\nPlanned steps:'));
+    if (plan.installPlan) {
+      console.log(chalk.gray(`  1) ${plan.installPlan.command}`));
+    } else {
+      console.log(chalk.gray('  1) (blocked) Bun not detected; registry install cannot proceed.'));
+    }
+  }
+
+  if (dedupeNpm) {
+    console.log(chalk.gray(`  3) npm uninstall -g ${CLI_PACKAGE_NAME} (if npm is available)`));
+  } else {
+    console.log(chalk.gray('  3) skip npm dedupe (dedupe disabled)'));
+  }
+  console.log(chalk.gray('  4) restart daemon if running + refresh running codex panes'));
+  if (options.check) {
+    console.log(chalk.gray('\nNote: --check is ignored in explain mode (this is a dry plan only).'));
+  }
+  console.log('');
+}
+
 async function performGitUpgrade(
   options: { repo?: string; dedupeNpm?: boolean } = {},
 ): Promise<boolean> {
@@ -458,7 +556,18 @@ async function runUpdateCommand(options: {
   git?: boolean;
   repo?: string;
   dedupeNpm?: boolean;
+  explain?: boolean;
 }): Promise<void> {
+  if (options.explain) {
+    await explainUpdateCommand({
+      git: options.git,
+      repo: options.repo,
+      dedupeNpm: options.dedupeNpm,
+      check: options.check,
+    });
+    return;
+  }
+
   if (options.git === true) {
     await performGitUpgrade({ repo: options.repo, dedupeNpm: options.dedupeNpm });
     return;
@@ -501,6 +610,7 @@ async function runVersionAlignCommand(options: {
   git?: boolean;
   repo?: string;
   dedupeNpm?: boolean;
+  explain?: boolean;
 } = {}): Promise<void> {
   const dedupeNpm = options.dedupeNpm !== false;
   await runUpdateCommand({
@@ -508,6 +618,7 @@ async function runVersionAlignCommand(options: {
     git: options.git,
     repo: options.repo,
     dedupeNpm,
+    explain: options.explain,
   });
 }
 
@@ -1287,6 +1398,7 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
       (y: Argv) =>
         y
           .option('check', { type: 'boolean', default: false, describe: 'Only check for updates (npm registry)' })
+          .option('explain', { type: 'boolean', default: false, describe: 'Print resolved update mode/commands without executing' })
           .option('git', { type: 'boolean', describe: 'Update from a local git checkout (git pull + global reinstall). If omitted, mudcode auto-detects git mode from repo/env/cwd.' })
           .option('repo', { type: 'string', describe: 'Repo path for --git (default: $MUDCODE_GIT_REPO_PATH or current directory)' })
           .option('dedupe-npm', {
@@ -1296,6 +1408,7 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
           }),
       async (argv: any) => runUpdateCommand({
         check: argv.check,
+        explain: argv.explain,
         git: argv.git,
         repo: argv.repo,
         dedupeNpm: argv.dedupeNpm,
@@ -1307,6 +1420,7 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
       (y: Argv) =>
         y
           .option('check', { type: 'boolean', default: false, describe: 'Only check for updates' })
+          .option('explain', { type: 'boolean', default: false, describe: 'Print resolved update mode/commands without executing' })
           .option('git', { type: 'boolean', describe: 'Pull repo first, then install globally from local path via Bun' })
           .option('repo', { type: 'string', describe: 'Repo path for --git (default: $MUDCODE_GIT_REPO_PATH or current directory)' })
           .option('dedupe-npm', {
@@ -1316,6 +1430,7 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
           }),
       async (argv: any) => runVersionAlignCommand({
         check: argv.check,
+        explain: argv.explain,
         git: argv.git,
         repo: argv.repo,
         dedupeNpm: argv.dedupeNpm,

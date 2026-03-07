@@ -24,9 +24,7 @@ impl DedupeKey {
         match value {
             "baseline" => Ok(Self::Baseline),
             "baseline-candidate" => Ok(Self::BaselineCandidate),
-            other => bail!(
-                "invalid --dedupe-key: {other} (expected: baseline|baseline-candidate)"
-            ),
+            other => bail!("invalid --dedupe-key: {other} (expected: baseline|baseline-candidate)"),
         }
     }
 
@@ -370,7 +368,11 @@ fn compare_signal(a: &ParsedEntry, b: &ParsedEntry) -> Ordering {
         .cmp(&(b.changed as u8))
         .then_with(|| (a.candidate != a.baseline).cmp(&(b.candidate != b.baseline)))
         .then_with(|| a.operations.len().cmp(&b.operations.len()))
-        .then_with(|| a.ts.as_deref().unwrap_or("").cmp(b.ts.as_deref().unwrap_or("")))
+        .then_with(|| {
+            a.ts.as_deref()
+                .unwrap_or("")
+                .cmp(b.ts.as_deref().unwrap_or(""))
+        })
         .then_with(|| a.candidate_hash.cmp(&b.candidate_hash))
 }
 
@@ -586,7 +588,13 @@ mod tests {
     use std::cmp::Ordering;
     use std::collections::BTreeMap;
 
-    fn parsed_entry(changed: bool, baseline: &str, candidate: &str, operations: &[&str], ts: Option<&str>) -> ParsedEntry {
+    fn parsed_entry(
+        changed: bool,
+        baseline: &str,
+        candidate: &str,
+        operations: &[&str],
+        ts: Option<&str>,
+    ) -> ParsedEntry {
         ParsedEntry {
             ts: ts.map(ToString::to_string),
             mode: Some("shadow".to_string()),
@@ -632,18 +640,34 @@ mod tests {
             &["collapse_consecutive_spaces"],
             Some("2026-03-03T10:00:00Z"),
         );
-        let unchanged = parsed_entry(false, "hello   world", "hello   world", &[], Some("2026-03-03T11:00:00Z"));
+        let unchanged = parsed_entry(
+            false,
+            "hello   world",
+            "hello   world",
+            &[],
+            Some("2026-03-03T11:00:00Z"),
+        );
         assert_eq!(compare_signal(&changed, &unchanged), Ordering::Greater);
     }
 
     #[test]
     fn compare_signal_prefers_richer_changed_sample() {
-        let weaker = parsed_entry(true, "  hello   world!!  ", "hello   world!!", &[], Some("2026-03-03T10:00:00Z"));
+        let weaker = parsed_entry(
+            true,
+            "  hello   world!!  ",
+            "hello   world!!",
+            &[],
+            Some("2026-03-03T10:00:00Z"),
+        );
         let richer = parsed_entry(
             true,
             "  hello   world!!  ",
             "hello world!",
-            &["collapse_consecutive_spaces", "remove_duplicate_punctuation", "trim_outer_whitespace"],
+            &[
+                "collapse_consecutive_spaces",
+                "remove_duplicate_punctuation",
+                "trim_outer_whitespace",
+            ],
             Some("2026-03-03T10:00:00Z"),
         );
         assert_eq!(compare_signal(&richer, &weaker), Ordering::Greater);
@@ -669,7 +693,10 @@ mod tests {
                 true,
                 "hello   world",
                 "hello world!",
-                &["collapse_consecutive_spaces", "remove_duplicate_punctuation"],
+                &[
+                    "collapse_consecutive_spaces",
+                    "remove_duplicate_punctuation",
+                ],
                 Some("2026-03-03T10:01:00Z"),
             ),
             DedupeKey::BaselineCandidate,
@@ -697,7 +724,10 @@ mod tests {
                 true,
                 "hello   world",
                 "hello world!",
-                &["collapse_consecutive_spaces", "remove_duplicate_punctuation"],
+                &[
+                    "collapse_consecutive_spaces",
+                    "remove_duplicate_punctuation",
+                ],
                 Some("2026-03-03T10:01:00Z"),
             ),
             DedupeKey::Baseline,
@@ -738,7 +768,10 @@ mod tests {
 
         let baseline_partition = (
             should_go_to_val(split_partition_key(&row_val, SplitKey::Baseline), val_ratio),
-            should_go_to_val(split_partition_key(&row_train, SplitKey::Baseline), val_ratio),
+            should_go_to_val(
+                split_partition_key(&row_train, SplitKey::Baseline),
+                val_ratio,
+            ),
         );
         assert_eq!(baseline_partition.0, baseline_partition.1);
     }

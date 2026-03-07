@@ -5,6 +5,7 @@
 import { StateManager, type ProjectState, type BridgeState } from '../../src/state/index.js';
 import type { IStorage } from '../../src/types/interfaces.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { perfMetrics } from '../../src/observability/perf-metrics.js';
 
 // Mock storage implementation for testing
 class MockStorage implements IStorage {
@@ -63,6 +64,7 @@ describe('StateManager', () => {
   const stateFile = '/test/dir/state.json';
 
   afterEach(() => {
+    perfMetrics.resetForTests();
     delete process.env.MUDCODE_STATE_LAST_ACTIVE_SAVE_DEBOUNCE_MS;
     vi.useRealTimers();
   });
@@ -135,6 +137,22 @@ describe('StateManager', () => {
       const savedData = storage.readFile(stateFile, 'utf-8');
       const savedState = JSON.parse(savedData);
       expect(savedState.projects['my-project']).toBeDefined();
+
+      const perfSnapshot = perfMetrics.snapshot();
+      expect(perfSnapshot.timers.state_save_ms.count).toBe(1);
+      expect(perfSnapshot.stateSaveFrequency.inLastMinute).toBe(1);
+    });
+
+    it('skips redundant state writes when normalized project state is unchanged', () => {
+      const storage = new MockStorage();
+      const writeSpy = vi.spyOn(storage, 'writeFile');
+      const manager = new StateManager(storage, stateDir, stateFile);
+      const project = makeProject('same-project', 'channel-111');
+
+      manager.setProject(project);
+      manager.setProject(project);
+
+      expect(writeSpy).toHaveBeenCalledTimes(1);
     });
 
     it('getProject returns existing project', () => {
@@ -249,6 +267,7 @@ describe('StateManager', () => {
 
       manager.setProject(project);
       writeSpy.mockClear();
+      vi.advanceTimersByTime(1);
 
       manager.updateLastActive('active-project');
       manager.updateLastActive('active-project');
@@ -293,6 +312,26 @@ describe('StateManager', () => {
       expect(manager.getAgentTypeByChannel('channel-111')).toBe('claude');
       expect(manager.getAgentTypeByChannel('channel-222')).toBe('gemini');
       expect(manager.getAgentTypeByChannel('channel-999')).toBeUndefined();
+    });
+
+    it('invalidates channel lookup cache when project channel mapping changes', () => {
+      const storage = new MockStorage();
+      const manager = new StateManager(storage, stateDir, stateFile);
+
+      const project = makeProject('cache-invalidation');
+      project.discordChannels = {
+        claude: 'channel-old',
+      };
+      manager.setProject(project);
+      expect(manager.getAgentTypeByChannel('channel-old')).toBe('claude');
+
+      project.discordChannels = {
+        claude: 'channel-new',
+      };
+      manager.setProject(project);
+
+      expect(manager.getAgentTypeByChannel('channel-old')).toBeUndefined();
+      expect(manager.getAgentTypeByChannel('channel-new')).toBe('claude');
     });
   });
 

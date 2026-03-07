@@ -14,6 +14,9 @@ import {
 import { PendingMessageTracker, type PendingRuntimeSnapshot } from './pending-message-tracker.js';
 import { formatDiscordOutput, wrapDiscordCodeblock } from '../formatting/discord-output-formatter.js';
 import { EventProgressBlockPipeline } from './event-progress-block-pipeline.js';
+import type { TurnRouteLedger } from './turn-route-ledger.js';
+import { normalizeAgentEventPayload } from './agent-event-payload.js';
+import { perfMetrics, type PerfMetricsSnapshot } from '../../observability/perf-metrics.js';
 import {
   resolveOrchestratorRole,
   resolveOrchestratorWorkerVisibility,
@@ -24,8 +27,22 @@ import {
 const LONG_OUTPUT_THREAD_THRESHOLD_MIN = 1200;
 const LONG_OUTPUT_THREAD_THRESHOLD_MAX = 20000;
 const LEGACY_LONG_OUTPUT_THREAD_THRESHOLD_MAX = 100000;
+const DISCORD_OUTPUT_MAX_CHUNKS_DEFAULT = 4;
+const DISCORD_OUTPUT_MAX_CHUNKS_MIN = 1;
+const DISCORD_OUTPUT_MAX_CHUNKS_MAX = 40;
 type EventProgressActiveMode = Exclude<EventProgressForwardMode, 'off'>;
 type EventLifecycleStrictMode = 'off' | 'warn' | 'reject';
+type ProgressBurstState = {
+  emittedCount: number;
+  emittedChars: number;
+  suppressedCount: number;
+  suppressedChars: number;
+  channelId: string;
+  mode: EventProgressActiveMode;
+  lastTextSignature?: string;
+  lastEmittedAtMs?: number;
+  updatedAtMs: number;
+};
 
 interface ResolvedProgressEventConfig {
   mode: EventProgressForwardMode;
@@ -34,10 +51,10 @@ interface ResolvedProgressEventConfig {
   blockMaxChars: number;
 }
 
-interface EventOnlyProgressGateResult {
+interface CodexProgressSafetyGateResult {
   mode: EventProgressForwardMode;
   adjusted: boolean;
-  reason?: 'event-only-channel-blocked' | 'event-only-thread-unavailable';
+  reason?: 'codex-channel-blocked' | 'codex-thread-unavailable';
 }
 
 type RuntimeStatusInstanceSnapshot = {
@@ -61,6 +78,9 @@ type RuntimeStatusInstanceSnapshot = {
   eventProgressModeTurnId?: string;
   eventProgressModeUpdatedAt?: string;
   eventProgressModeAgeMs?: number;
+  eventProgressEmittedChars?: number;
+  eventProgressSuppressedCount?: number;
+  eventProgressSuppressedChars?: number;
   eventLifecycleStage?: 'idle' | 'started' | 'progress' | 'final' | 'error' | 'cancelled';
   eventLifecycleTurnId?: string;
   eventLifecycleEventId?: string;
@@ -75,6 +95,7 @@ export interface BridgeHookServerDeps {
   messaging: MessagingClient;
   stateManager: IStateManager;
   pendingTracker: PendingMessageTracker;
+  turnRouteLedger?: TurnRouteLedger;
   reloadChannelMappings: () => void;
 }
 
@@ -84,11 +105,16 @@ export class BridgeHookServer {
     string,
     { count: number; byType: Record<string, number>; lastIgnoredAtMs: number }
   >();
+  private ignoredEventLogStateByRoute = new Map<
+    string,
+    { count: number; lastLoggedAtMs: number }
+  >();
   private lifecycleRejectedEventsByInstance = new Map<
     string,
     { count: number; byType: Record<string, number>; lastRejectedAtMs: number }
   >();
   private processedEventIds = new Map<string, number>();
+  private terminalEventSignatureByTurn = new Map<string, { signature: string; updatedAtMs: number }>();
   private eventLifecycleByInstance = new Map<
     string,
     {
@@ -99,15 +125,22 @@ export class BridgeHookServer {
       updatedAtMs: number;
     }
   >();
+  private terminalTurnInFlight = new Set<string>();
+  private terminalTurnInFlightByRoute = new Set<string>();
   private latestSeqByTurn = new Map<string, { seq: number; updatedAtMs: number }>();
   private startedTurnsByKey = new Map<string, number>();
+  private completedTurnsByKey = new Map<string, number>();
+  private completedTurnsByRouteKey = new Map<string, number>();
+  private readonly verboseEventLogEnabled = this.resolveEventLogVerboseEnabled();
+  private readonly progressEventLogEnabled = this.resolveEventProgressLogEnabled();
   private progressBlockPipeline: EventProgressBlockPipeline;
   private progressTranscriptByTurn = new Map<string, { text: string; updatedAtMs: number }>();
   private progressModeByTurn = new Map<string, { mode: EventProgressForwardMode; updatedAtMs: number }>();
+  private progressBurstByRoute = new Map<string, ProgressBurstState>();
 
   constructor(private deps: BridgeHookServerDeps) {
-    this.progressBlockPipeline = new EventProgressBlockPipeline(async ({ channelId, text, mode }) => {
-      await this.sendProgressEventOutput(channelId, text, mode);
+    this.progressBlockPipeline = new EventProgressBlockPipeline(async ({ key, channelId, text, mode }) => {
+      await this.sendProgressEventOutput(channelId, text, mode, key);
     });
   }
 
@@ -131,6 +164,34 @@ export class BridgeHookServer {
     current.byType[typeKey] = (current.byType[typeKey] || 0) + 1;
     current.lastIgnoredAtMs = Date.now();
     this.ignoredEventsByInstance.set(key, current);
+  }
+
+  private buildIgnoredEventLogKey(projectName: string, instanceId: string, eventType?: string): string {
+    const typeKey = typeof eventType === 'string' && eventType.trim().length > 0 ? eventType.trim() : 'unknown';
+    return `${this.runtimeKey(projectName, instanceId)}|${typeKey}`;
+  }
+
+  private shouldLogIgnoredEvent(
+    projectName: string,
+    instanceId: string,
+    eventType?: string,
+  ): { log: boolean; count: number } {
+    const key = this.buildIgnoredEventLogKey(projectName, instanceId, eventType);
+    const now = Date.now();
+    const state = this.ignoredEventLogStateByRoute.get(key) || {
+      count: 0,
+      lastLoggedAtMs: 0,
+    };
+    state.count += 1;
+
+    const byCount = state.count === 1 || state.count % 25 === 0;
+    const byTime = now - state.lastLoggedAtMs >= 60_000;
+    const log = byCount || byTime;
+    if (log) {
+      state.lastLoggedAtMs = now;
+    }
+    this.ignoredEventLogStateByRoute.set(key, state);
+    return { log, count: state.count };
   }
 
   private getIgnoredEventSnapshot(
@@ -200,6 +261,12 @@ export class BridgeHookServer {
       if (now - snapshot.lastIgnoredAtMs <= retentionMs) continue;
       this.ignoredEventsByInstance.delete(key);
     }
+    for (const [key, snapshot] of this.ignoredEventLogStateByRoute.entries()) {
+      const [runtimeKey] = key.split('|');
+      if (runtimeKey && activeInstanceKeys.has(runtimeKey)) continue;
+      if (now - snapshot.lastLoggedAtMs <= retentionMs) continue;
+      this.ignoredEventLogStateByRoute.delete(key);
+    }
   }
 
   private pruneLifecycleRejectedEvents(activeInstanceKeys: Set<string>): void {
@@ -227,6 +294,46 @@ export class BridgeHookServer {
       return Math.trunc(fromEnv);
     }
     return 50_000;
+  }
+
+  private parseEnvBoolean(raw: string | undefined): boolean | undefined {
+    if (!raw) return undefined;
+    const normalized = raw.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+    return undefined;
+  }
+
+  private resolveEventLogVerboseEnabled(): boolean {
+    return this.parseEnvBoolean(process.env.AGENT_DISCORD_EVENT_LOG_VERBOSE) === true;
+  }
+
+  private resolveEventProgressLogEnabled(): boolean {
+    return this.parseEnvBoolean(process.env.AGENT_DISCORD_EVENT_PROGRESS_LOG) === true;
+  }
+
+  private resolveTerminalEventDedupeRetentionMs(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_EVENT_TERMINAL_DEDUPE_RETENTION_MS || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 5_000) {
+      return Math.trunc(fromEnv);
+    }
+    return 30 * 60 * 1000;
+  }
+
+  private resolveTerminalEventDedupeMaxEntries(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_EVENT_TERMINAL_DEDUPE_MAX || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 100 && fromEnv <= 1_000_000) {
+      return Math.trunc(fromEnv);
+    }
+    return 100_000;
+  }
+
+  private resolveTerminalEventNoTurnDedupeWindowMs(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_EVENT_TERMINAL_NOTURN_DEDUPE_WINDOW_MS || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 1000 && fromEnv <= 5 * 60 * 1000) {
+      return Math.trunc(fromEnv);
+    }
+    return 30_000;
   }
 
   private resolveEventLifecycleStaleMs(): number {
@@ -269,6 +376,14 @@ export class BridgeHookServer {
     return 30 * 60 * 1000;
   }
 
+  private resolveCompletedTurnRetentionMs(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_EVENT_COMPLETED_TURN_RETENTION_MS || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 5_000) {
+      return Math.trunc(fromEnv);
+    }
+    return 30 * 60 * 1000;
+  }
+
   private pruneProcessedEventIds(nowMs: number): void {
     if (this.processedEventIds.size === 0) return;
     const retentionMs = this.resolveEventDedupeRetentionMs();
@@ -283,6 +398,23 @@ export class BridgeHookServer {
       const oldest = this.processedEventIds.keys().next();
       if (oldest.done) return;
       this.processedEventIds.delete(oldest.value);
+    }
+  }
+
+  private pruneTerminalEventSignatures(nowMs: number): void {
+    if (this.terminalEventSignatureByTurn.size === 0) return;
+    const retentionMs = this.resolveTerminalEventDedupeRetentionMs();
+    for (const [key, snapshot] of this.terminalEventSignatureByTurn.entries()) {
+      if (nowMs - snapshot.updatedAtMs > retentionMs) {
+        this.terminalEventSignatureByTurn.delete(key);
+      }
+    }
+
+    const maxEntries = this.resolveTerminalEventDedupeMaxEntries();
+    while (this.terminalEventSignatureByTurn.size > maxEntries) {
+      const oldest = this.terminalEventSignatureByTurn.keys().next();
+      if (oldest.done) return;
+      this.terminalEventSignatureByTurn.delete(oldest.value);
     }
   }
 
@@ -314,12 +446,44 @@ export class BridgeHookServer {
     return `${params.projectName}:${params.agentType}:${params.instanceId || 'na'}:${turnId}`;
   }
 
+  private buildTurnRouteLifecycleKey(params: {
+    projectName: string;
+    agentType: string;
+    channelId?: string;
+    turnId?: string;
+  }): string | undefined {
+    const turnId = params.turnId?.trim();
+    const channelId = params.channelId?.trim();
+    if (!turnId || !channelId) return undefined;
+    return `${params.projectName}:${params.agentType}:${channelId}:${turnId}`;
+  }
+
   private pruneStartedTurns(nowMs: number): void {
     if (this.startedTurnsByKey.size === 0) return;
     const retentionMs = this.resolveStartedTurnRetentionMs();
     for (const [key, updatedAtMs] of this.startedTurnsByKey.entries()) {
       if (nowMs - updatedAtMs > retentionMs) {
         this.startedTurnsByKey.delete(key);
+      }
+    }
+  }
+
+  private pruneCompletedTurns(nowMs: number): void {
+    if (this.completedTurnsByKey.size === 0) return;
+    const retentionMs = this.resolveCompletedTurnRetentionMs();
+    for (const [key, updatedAtMs] of this.completedTurnsByKey.entries()) {
+      if (nowMs - updatedAtMs > retentionMs) {
+        this.completedTurnsByKey.delete(key);
+      }
+    }
+  }
+
+  private pruneCompletedTurnsByRoute(nowMs: number): void {
+    if (this.completedTurnsByRouteKey.size === 0) return;
+    const retentionMs = this.resolveCompletedTurnRetentionMs();
+    for (const [key, updatedAtMs] of this.completedTurnsByRouteKey.entries()) {
+      if (nowMs - updatedAtMs > retentionMs) {
+        this.completedTurnsByRouteKey.delete(key);
       }
     }
   }
@@ -334,6 +498,8 @@ export class BridgeHookServer {
     if (!key) return;
     const now = Date.now();
     this.pruneStartedTurns(now);
+    this.pruneCompletedTurns(now);
+    this.completedTurnsByKey.delete(key);
     this.startedTurnsByKey.set(key, now);
   }
 
@@ -350,6 +516,64 @@ export class BridgeHookServer {
     return this.startedTurnsByKey.has(key);
   }
 
+  private hasTurnCompleted(params: {
+    projectName: string;
+    agentType: string;
+    instanceId?: string;
+    turnId?: string;
+  }): boolean {
+    const key = this.buildTurnLifecycleKey(params);
+    if (!key) return false;
+    const now = Date.now();
+    this.pruneCompletedTurns(now);
+    return this.completedTurnsByKey.has(key);
+  }
+
+  private hasTurnCompletedByRoute(params: {
+    projectName: string;
+    agentType: string;
+    channelId?: string;
+    turnId?: string;
+  }): boolean {
+    const key = this.buildTurnRouteLifecycleKey(params);
+    if (!key) return false;
+    const now = Date.now();
+    this.pruneCompletedTurnsByRoute(now);
+    return this.completedTurnsByRouteKey.has(key);
+  }
+
+  private markTurnCompleted(params: {
+    projectName: string;
+    agentType: string;
+    instanceId?: string;
+    turnId?: string;
+  }): void {
+    const key = this.buildTurnLifecycleKey(params);
+    if (!key) return;
+    this.deps.turnRouteLedger?.complete({
+      turnId: params.turnId,
+      projectName: params.projectName,
+      agentType: params.agentType,
+      instanceId: params.instanceId,
+    });
+    const now = Date.now();
+    this.pruneCompletedTurns(now);
+    this.completedTurnsByKey.set(key, now);
+  }
+
+  private markTurnCompletedByRoute(params: {
+    projectName: string;
+    agentType: string;
+    channelId?: string;
+    turnId?: string;
+  }): void {
+    const key = this.buildTurnRouteLifecycleKey(params);
+    if (!key) return;
+    const now = Date.now();
+    this.pruneCompletedTurnsByRoute(now);
+    this.completedTurnsByRouteKey.set(key, now);
+  }
+
   private clearStartedTurn(params: {
     projectName: string;
     agentType: string;
@@ -361,12 +585,97 @@ export class BridgeHookServer {
     this.startedTurnsByKey.delete(key);
   }
 
+  private isTerminalEventType(eventType?: string): boolean {
+    return (
+      eventType === 'session.final' ||
+      eventType === 'session.idle' ||
+      eventType === 'session.error' ||
+      eventType === 'session.cancelled'
+    );
+  }
+
+  private buildTerminalEventSignatureKey(params: {
+    projectName: string;
+    agentType: string;
+    instanceId?: string;
+    turnId?: string;
+    eventType?: string;
+  }): string | undefined {
+    if (!this.isTerminalEventType(params.eventType)) return undefined;
+    const turnId = params.turnId?.trim();
+    if (turnId) {
+      // Turn-scoped terminal dedupe intentionally ignores instanceId so that
+      // accidental multi-instance overlap on the same turn is collapsed once.
+      return `${params.projectName}:${params.agentType}:${params.eventType}:${turnId}`;
+    }
+    return `${params.projectName}:${params.agentType}:${params.instanceId || 'na'}:${params.eventType}:no-turn`;
+  }
+
+  private buildTextSignature(text?: string): string {
+    const normalized = typeof text === 'string' ? text.trim().replace(/\s+/g, ' ') : '';
+    if (normalized.length === 0) return 'empty';
+
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < normalized.length; i += 1) {
+      hash ^= normalized.charCodeAt(i);
+      hash = Math.imul(hash, 0x01000193);
+    }
+    return `${normalized.length}:${(hash >>> 0).toString(16)}`;
+  }
+
+  private shouldSkipDuplicateTerminalEvent(params: {
+    projectName: string;
+    agentType: string;
+    instanceId?: string;
+    turnId?: string;
+    eventType?: string;
+    text?: string;
+  }): boolean {
+    const key = this.buildTerminalEventSignatureKey(params);
+    if (!key) return false;
+    const now = Date.now();
+    this.pruneTerminalEventSignatures(now);
+    const signature = this.buildTextSignature(params.text);
+    const existing = this.terminalEventSignatureByTurn.get(key);
+    if (existing && existing.signature === signature) {
+      const noTurn = !params.turnId || params.turnId.trim().length === 0;
+      if (!noTurn) return true;
+      const windowMs = this.resolveTerminalEventNoTurnDedupeWindowMs();
+      if (now - existing.updatedAtMs <= windowMs) {
+        return true;
+      }
+    }
+    this.terminalEventSignatureByTurn.set(key, { signature, updatedAtMs: now });
+    return false;
+  }
+
+  private shouldLogEventTrace(params: { eventType?: string; text?: string }): boolean {
+    if (this.verboseEventLogEnabled) return true;
+    if (params.eventType === 'session.error' || params.eventType === 'session.cancelled') {
+      return true;
+    }
+    if (params.eventType === 'session.progress') {
+      return this.progressEventLogEnabled && typeof params.text === 'string' && params.text.trim().length > 0;
+    }
+    if (params.eventType === 'session.final' || params.eventType === 'session.idle') {
+      return typeof params.text === 'string' && params.text.trim().length > 0;
+    }
+    return false;
+  }
+
+  private formatEventTraceText(text?: string): string {
+    if (typeof text !== 'string' || text.trim().length === 0) return '(empty)';
+    const compact = text.replace(/\s+/g, ' ').trim();
+    return `(${compact.length} chars) ${compact.substring(0, 100)}`;
+  }
+
   private shouldSkipBySequence(params: {
     projectName: string;
     agentType: string;
     instanceId?: string;
     turnId?: string;
     seq?: number;
+    eventType?: string;
   }): boolean {
     if (!params.turnId || typeof params.seq !== 'number' || !Number.isFinite(params.seq)) return false;
     const normalizedSeq = Math.trunc(params.seq);
@@ -376,10 +685,22 @@ export class BridgeHookServer {
     const now = Date.now();
     this.pruneLatestSeqByTurn(now);
     const current = this.latestSeqByTurn.get(turnKey);
-    if (current && normalizedSeq <= current.seq) {
-      return true;
+    if (current) {
+      const isTerminal = this.isTerminalEventType(params.eventType);
+      if (isTerminal) {
+        // Some runtimes can emit terminal events with the same sequence number as the
+        // latest progress event. Allow equal sequence for terminal events so final
+        // output is not dropped silently.
+        if (normalizedSeq < current.seq) {
+          return true;
+        }
+      } else if (normalizedSeq <= current.seq) {
+        return true;
+      }
     }
-    this.latestSeqByTurn.set(turnKey, { seq: normalizedSeq, updatedAtMs: now });
+    if (!current || normalizedSeq > current.seq) {
+      this.latestSeqByTurn.set(turnKey, { seq: normalizedSeq, updatedAtMs: now });
+    }
     return false;
   }
 
@@ -466,6 +787,7 @@ export class BridgeHookServer {
     projectName: string,
     agentType: string,
     instanceId?: string,
+    turnId?: string,
   ): { channelId: string | undefined; pendingDepth: number } {
     const pendingTracker = this.deps.pendingTracker as unknown as {
       getPendingChannel?: (projectName: string, agentType: string, instanceId?: string) => string | undefined;
@@ -481,6 +803,15 @@ export class BridgeHookServer {
         : pendingChannel
           ? 1
           : 0;
+    const turnRoute = this.deps.turnRouteLedger?.resolve({
+      turnId,
+      projectName,
+      agentType,
+      instanceId,
+    });
+    if (turnRoute?.channelId) {
+      return { channelId: turnRoute.channelId, pendingDepth };
+    }
 
     if (pendingDepth > 1) {
       return { channelId: defaultChannelId || pendingChannel, pendingDepth };
@@ -497,15 +828,24 @@ export class BridgeHookServer {
       if (normalized <= LEGACY_LONG_OUTPUT_THREAD_THRESHOLD_MAX) return LONG_OUTPUT_THREAD_THRESHOLD_MAX;
       return LONG_OUTPUT_THREAD_THRESHOLD_MAX;
     }
-    return 2000;
+    return 1600;
   }
 
   private shouldUseThreadedLongOutput(text: string): boolean {
-    return (
-      this.deps.messaging.platform === 'discord' &&
-      text.length >= this.resolveLongOutputThreadThreshold() &&
-      typeof this.deps.messaging.sendLongOutput === 'function'
-    );
+    if (
+      this.deps.messaging.platform !== 'discord' ||
+      typeof this.deps.messaging.sendLongOutput !== 'function'
+    ) {
+      return false;
+    }
+    if (text.length >= this.resolveLongOutputThreadThreshold()) {
+      return true;
+    }
+    const nonEmptyLines = text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    return text.length >= 600 && nonEmptyLines.length >= 12;
   }
 
   private resolveEventProgressForwardMode(): EventProgressForwardMode {
@@ -520,20 +860,30 @@ export class BridgeHookServer {
     return 'off';
   }
 
-  private resolveCodexEventOnlyModeEnabled(): boolean {
-    const raw = process.env.AGENT_DISCORD_CODEX_EVENT_ONLY;
-    if (!raw) return true;
+  private resolveCodexPocProgressForwardEnabled(): boolean {
+    const raw = process.env.AGENT_DISCORD_CODEX_POC_PROGRESS_FORWARD;
+    if (!raw) return false;
     const normalized = raw.trim().toLowerCase();
     if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
     if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
-    return true;
+    return false;
   }
 
-  private applyEventOnlyProgressModeGate(params: {
+  private resolveCodexEventOnlyIdleOutputEnabled(): boolean {
+    return this.parseEnvBoolean(process.env.AGENT_DISCORD_CODEX_EVENT_ONLY_IDLE_OUTPUT) === true;
+  }
+
+  private shouldSuppressCodexIdleTerminalOutput(eventType: string | undefined, agentType: string): boolean {
+    if (eventType !== 'session.idle') return false;
+    if (agentType.trim().toLowerCase() !== 'codex') return false;
+    return !this.resolveCodexEventOnlyIdleOutputEnabled();
+  }
+
+  private applyCodexProgressSafetyGate(params: {
     agentType: string;
     mode: EventProgressForwardMode;
-  }): EventOnlyProgressGateResult {
-    if (params.agentType !== 'codex' || !this.resolveCodexEventOnlyModeEnabled()) {
+  }): CodexProgressSafetyGateResult {
+    if (params.agentType.trim().toLowerCase() !== 'codex') {
       return { mode: params.mode, adjusted: false };
     }
     if (params.mode === 'off') {
@@ -547,7 +897,7 @@ export class BridgeHookServer {
       return {
         mode: 'off',
         adjusted: true,
-        reason: 'event-only-thread-unavailable',
+        reason: 'codex-thread-unavailable',
       };
     }
 
@@ -555,7 +905,7 @@ export class BridgeHookServer {
       return {
         mode: 'thread',
         adjusted: true,
-        reason: 'event-only-channel-blocked',
+        reason: 'codex-channel-blocked',
       };
     }
 
@@ -597,6 +947,34 @@ export class BridgeHookServer {
       return Math.trunc(fromEnv);
     }
     return 1800;
+  }
+
+  private resolveEventProgressMaxMessagesPerTurn(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_EVENT_PROGRESS_MAX_MESSAGES_PER_TURN || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 0 && fromEnv <= 200) {
+      return Math.trunc(fromEnv);
+    }
+    return 6;
+  }
+
+  private resolveEventProgressMaxCharsPerTurn(): number {
+    const raw = process.env.AGENT_DISCORD_EVENT_PROGRESS_MAX_CHARS_PER_TURN;
+    if (!raw || raw.trim().length === 0) return 6000;
+    const fromEnv = Number(raw);
+    if (Number.isFinite(fromEnv) && fromEnv >= 0 && fromEnv <= 200_000) {
+      return Math.trunc(fromEnv);
+    }
+    return 6000;
+  }
+
+  private resolveEventProgressDuplicateWindowMs(): number {
+    const raw = process.env.AGENT_DISCORD_EVENT_PROGRESS_DUPLICATE_WINDOW_MS;
+    if (!raw || raw.trim().length === 0) return 10_000;
+    const fromEnv = Number(raw);
+    if (Number.isFinite(fromEnv) && fromEnv >= 0 && fromEnv <= 10 * 60_000) {
+      return Math.trunc(fromEnv);
+    }
+    return 10_000;
   }
 
   private parseEventBoolean(raw: unknown): boolean | undefined {
@@ -892,6 +1270,25 @@ export class BridgeHookServer {
     }
   }
 
+  private pruneProgressBurstStates(activeInstanceKeys: Set<string>): void {
+    if (this.progressBurstByRoute.size === 0) return;
+    const now = Date.now();
+    const retentionMs = this.resolveIgnoredEventRetentionMs();
+    for (const [key, snapshot] of this.progressBurstByRoute.entries()) {
+      if (key.startsWith('channel:')) {
+        if (now - snapshot.updatedAtMs > retentionMs) {
+          this.progressBurstByRoute.delete(key);
+        }
+        continue;
+      }
+      const parts = key.split(':');
+      const runtimeKey = parts.length >= 3 ? `${parts[0]}:${parts[2]}` : key;
+      if (activeInstanceKeys.has(runtimeKey)) continue;
+      if (now - snapshot.updatedAtMs <= retentionMs) continue;
+      this.progressBurstByRoute.delete(key);
+    }
+  }
+
   private getLatestProgressModeSnapshot(params: {
     projectName: string;
     agentType: string;
@@ -944,6 +1341,37 @@ export class BridgeHookServer {
     };
   }
 
+  private getProgressSuppressionSnapshot(params: {
+    projectName: string;
+    agentType: string;
+    instanceId?: string;
+  }):
+    | {
+        eventProgressEmittedChars: number;
+        eventProgressSuppressedCount: number;
+        eventProgressSuppressedChars: number;
+      }
+    | undefined {
+    const routePrefix = `${this.buildProgressRouteKey(params)}:`;
+    let emittedChars = 0;
+    let suppressedCount = 0;
+    let suppressedChars = 0;
+
+    for (const [key, snapshot] of this.progressBurstByRoute.entries()) {
+      if (!key.startsWith(routePrefix)) continue;
+      emittedChars += Math.max(0, Math.trunc(snapshot.emittedChars));
+      suppressedCount += Math.max(0, Math.trunc(snapshot.suppressedCount));
+      suppressedChars += Math.max(0, Math.trunc(snapshot.suppressedChars));
+    }
+
+    if (emittedChars <= 0 && suppressedCount <= 0 && suppressedChars <= 0) return undefined;
+    return {
+      eventProgressEmittedChars: emittedChars,
+      eventProgressSuppressedCount: suppressedCount,
+      eventProgressSuppressedChars: suppressedChars,
+    };
+  }
+
   private async enqueueProgressBlock(params: {
     projectName: string;
     agentType: string;
@@ -976,10 +1404,79 @@ export class BridgeHookServer {
     if (params.turnId) {
       this.progressBlockPipeline.clear(this.buildProgressBlockKey(params));
       this.progressBlockPipeline.clear(this.buildProgressBlockKey({ ...params, turnId: undefined }));
+      this.progressBurstByRoute.delete(this.buildProgressBlockKey(params));
+      this.progressBurstByRoute.delete(this.buildProgressBlockKey({ ...params, turnId: undefined }));
       return;
     }
     const prefix = `${params.projectName}:${params.agentType}:${params.instanceId || 'na'}:${params.channelId}:`;
     this.progressBlockPipeline.clearWhere((key) => key.startsWith(prefix));
+    for (const key of this.progressBurstByRoute.keys()) {
+      if (key.startsWith(prefix)) {
+        this.progressBurstByRoute.delete(key);
+      }
+    }
+  }
+
+  private shouldSuppressProgressBurst(params: {
+    routeKey?: string;
+    channelId: string;
+    mode: EventProgressActiveMode;
+    textLength: number;
+    textSignature: string;
+  }): boolean {
+    const messageLimit = this.resolveEventProgressMaxMessagesPerTurn();
+    const charLimit = this.resolveEventProgressMaxCharsPerTurn();
+
+    const key = params.routeKey || `channel:${params.channelId}:${params.mode}`;
+    const now = Date.now();
+    const current = this.progressBurstByRoute.get(key) || {
+      emittedCount: 0,
+      emittedChars: 0,
+      suppressedCount: 0,
+      suppressedChars: 0,
+      channelId: params.channelId,
+      mode: params.mode,
+      updatedAtMs: now,
+    };
+
+    current.updatedAtMs = now;
+    current.channelId = params.channelId;
+    current.mode = params.mode;
+
+    const duplicateWindowMs = this.resolveEventProgressDuplicateWindowMs();
+    if (
+      duplicateWindowMs > 0 &&
+      typeof current.lastTextSignature === 'string' &&
+      current.lastTextSignature === params.textSignature &&
+      typeof current.lastEmittedAtMs === 'number' &&
+      now - current.lastEmittedAtMs <= duplicateWindowMs
+    ) {
+      current.suppressedCount += 1;
+      current.suppressedChars += Math.max(0, params.textLength);
+      this.progressBurstByRoute.set(key, current);
+      return true;
+    }
+
+    if (charLimit > 0 && current.emittedChars + Math.max(0, params.textLength) > charLimit) {
+      current.suppressedCount += 1;
+      current.suppressedChars += Math.max(0, params.textLength);
+      this.progressBurstByRoute.set(key, current);
+      return true;
+    }
+
+    if (messageLimit > 0 && current.emittedCount >= messageLimit) {
+      current.suppressedCount += 1;
+      current.suppressedChars += Math.max(0, params.textLength);
+      this.progressBurstByRoute.set(key, current);
+      return true;
+    }
+
+    current.emittedCount += 1;
+    current.emittedChars += Math.max(0, params.textLength);
+    current.lastTextSignature = params.textSignature;
+    current.lastEmittedAtMs = now;
+    this.progressBurstByRoute.set(key, current);
+    return false;
   }
 
   private async sendEventOutput(channelId: string, text: string): Promise<void> {
@@ -995,11 +1492,17 @@ export class BridgeHookServer {
       return;
     }
 
-    const split = this.deps.messaging.platform === 'slack' ? splitForSlack : splitForDiscord;
-    for (const chunk of split(content)) {
-      if (chunk.trim().length === 0) continue;
+    const cappedChunks = this.capDiscordOutputChunks(
+      (this.deps.messaging.platform === 'slack' ? splitForSlack : splitForDiscord)(content)
+        .filter((chunk) => chunk.trim().length > 0),
+    );
+    if (cappedChunks.length === 0) return;
+
+    for (const chunk of cappedChunks) {
       const payload =
-        this.deps.messaging.platform === 'discord' && discordFormatted.useCodeblock
+        this.deps.messaging.platform === 'discord' &&
+        discordFormatted.useCodeblock &&
+        !chunk.startsWith('⚠️ Output truncated')
           ? wrapDiscordCodeblock(chunk, discordFormatted.language)
           : chunk;
       await this.deps.messaging.sendToChannel(channelId, payload);
@@ -1010,6 +1513,7 @@ export class BridgeHookServer {
     channelId: string,
     text: string,
     mode: EventProgressForwardMode = this.resolveEventProgressForwardMode(),
+    routeKey?: string,
   ): Promise<void> {
     if (mode === 'off') return;
 
@@ -1019,12 +1523,29 @@ export class BridgeHookServer {
         : { text, useCodeblock: false, language: 'text' };
     const content = discordFormatted.text;
     if (content.trim().length === 0) return;
+    if (
+      this.shouldSuppressProgressBurst({
+        routeKey,
+        channelId,
+        mode,
+        textLength: content.length,
+        textSignature: this.buildTextSignature(content),
+      })
+    ) {
+      return;
+    }
 
-    const split = this.deps.messaging.platform === 'slack' ? splitForSlack : splitForDiscord;
-    for (const chunk of split(content)) {
-      if (chunk.trim().length === 0) continue;
+    const cappedChunks = this.capDiscordOutputChunks(
+      (this.deps.messaging.platform === 'slack' ? splitForSlack : splitForDiscord)(content)
+        .filter((chunk) => chunk.trim().length > 0),
+    );
+    if (cappedChunks.length === 0) return;
+
+    for (const chunk of cappedChunks) {
       const payload =
-        this.deps.messaging.platform === 'discord' && discordFormatted.useCodeblock
+        this.deps.messaging.platform === 'discord' &&
+        discordFormatted.useCodeblock &&
+        !chunk.startsWith('⚠️ Output truncated')
           ? wrapDiscordCodeblock(chunk, discordFormatted.language)
           : chunk;
       if (
@@ -1037,6 +1558,33 @@ export class BridgeHookServer {
         await this.deps.messaging.sendToChannel(channelId, payload);
       }
     }
+  }
+
+  private resolveDiscordOutputMaxChunks(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_OUTPUT_MAX_CHUNKS || '');
+    if (
+      Number.isFinite(fromEnv) &&
+      fromEnv >= DISCORD_OUTPUT_MAX_CHUNKS_MIN &&
+      fromEnv <= DISCORD_OUTPUT_MAX_CHUNKS_MAX
+    ) {
+      return Math.trunc(fromEnv);
+    }
+    return DISCORD_OUTPUT_MAX_CHUNKS_DEFAULT;
+  }
+
+  private capDiscordOutputChunks(chunks: string[]): string[] {
+    if (this.deps.messaging.platform !== 'discord') return chunks;
+    const maxChunks = this.resolveDiscordOutputMaxChunks();
+    if (chunks.length <= maxChunks) return chunks;
+    if (maxChunks <= 1) {
+      return ['⚠️ Output truncated to reduce Discord flood.'];
+    }
+    const keepCount = Math.max(1, maxChunks - 1);
+    const omitted = Math.max(0, chunks.length - keepCount);
+    return [
+      ...chunks.slice(0, keepCount),
+      `⚠️ Output truncated to reduce Discord flood: omitted ${omitted}/${chunks.length} chunks.`,
+    ];
   }
 
   private buildFileNotice(filePaths: string[]): string {
@@ -1071,6 +1619,7 @@ export class BridgeHookServer {
   private buildRuntimeStatusPayload(): {
     generatedAt: string;
     instances: RuntimeStatusInstanceSnapshot[];
+    perfMetrics: PerfMetricsSnapshot;
   } {
     const projects = this.deps.stateManager.listProjects();
     const activeInstanceKeys = new Set<string>();
@@ -1084,6 +1633,11 @@ export class BridgeHookServer {
         const lifecycleRejected = this.getLifecycleRejectedEventSnapshot(project.projectName, instance.instanceId);
         const lifecycle = this.getEventLifecycleSnapshot(project.projectName, instance.instanceId);
         const progressMode = this.getLatestProgressModeSnapshot({
+          projectName: project.projectName,
+          agentType: instance.agentType,
+          instanceId: instance.instanceId,
+        });
+        const progressSuppression = this.getProgressSuppressionSnapshot({
           projectName: project.projectName,
           agentType: instance.agentType,
           instanceId: instance.instanceId,
@@ -1139,6 +1693,7 @@ export class BridgeHookServer {
           ...(ignored || {}),
           ...(lifecycleRejected || {}),
           ...(progressMode || {}),
+          ...(progressSuppression || {}),
           ...(lifecycle || {}),
         });
       }
@@ -1148,10 +1703,15 @@ export class BridgeHookServer {
     this.pruneEventLifecycle(activeInstanceKeys);
     this.pruneProgressTranscripts(activeInstanceKeys);
     this.pruneProgressModes(activeInstanceKeys);
+    this.pruneProgressBurstStates(activeInstanceKeys);
+    this.pruneCompletedTurns(Date.now());
+    this.pruneCompletedTurnsByRoute(Date.now());
+    this.pruneTerminalEventSignatures(Date.now());
 
     return {
       generatedAt: new Date().toISOString(),
       instances,
+      perfMetrics: perfMetrics.snapshot(),
     };
   }
 
@@ -1248,8 +1808,15 @@ export class BridgeHookServer {
     this.clearAllProgressBlocks();
     this.progressTranscriptByTurn.clear();
     this.progressModeByTurn.clear();
+    this.progressBurstByRoute.clear();
     this.startedTurnsByKey.clear();
+    this.completedTurnsByKey.clear();
+    this.completedTurnsByRouteKey.clear();
+    this.terminalTurnInFlight.clear();
+    this.terminalTurnInFlightByRoute.clear();
+    this.terminalEventSignatureByTurn.clear();
     this.lifecycleRejectedEventsByInstance.clear();
+    this.ignoredEventLogStateByRoute.clear();
     this.httpServer?.close();
     this.httpServer = undefined;
   }
@@ -1329,11 +1896,22 @@ export class BridgeHookServer {
   }
 
   private getEventText(payload: Record<string, unknown>): string | undefined {
-    const direct = payload.text;
-    if (typeof direct === 'string' && direct.trim().length > 0) return direct;
-
-    const message = payload.message;
-    if (typeof message === 'string' && message.trim().length > 0) return message;
+    const candidates = [
+      payload.text,
+      payload.message,
+      payload.content,
+      payload.output,
+      payload.finalText,
+      payload.final_text,
+      payload.turnText,
+      payload.turn_text,
+    ];
+    for (const candidate of candidates) {
+      if (typeof candidate !== 'string') continue;
+      const trimmed = candidate.trim();
+      if (trimmed.length === 0) continue;
+      return trimmed;
+    }
     return undefined;
   }
 
@@ -1350,13 +1928,39 @@ export class BridgeHookServer {
     return normalized.charAt(0).toUpperCase() + normalized.slice(1);
   }
 
+  private safeMarkPendingDispatchingFromEvent(params: {
+    projectName: string;
+    agentType: string;
+    instanceId?: string;
+    turnId?: string;
+  }): void {
+    if (!params.turnId) return;
+    const tracker = this.deps.pendingTracker as unknown as {
+      markDispatching?: (projectName: string, agentType: string, instanceId?: string) => Promise<void>;
+      markDispatchingByMessageId?: (
+        projectName: string,
+        agentType: string,
+        messageId: string,
+        instanceId?: string,
+      ) => Promise<void>;
+    };
+    if (typeof tracker.markDispatchingByMessageId === 'function') {
+      tracker
+        .markDispatchingByMessageId(params.projectName, params.agentType, params.turnId, params.instanceId)
+        .catch(() => {});
+      return;
+    }
+    if (typeof tracker.markDispatching === 'function') {
+      tracker.markDispatching(params.projectName, params.agentType, params.instanceId).catch(() => {});
+    }
+  }
+
   private async handleAgentEvent(
     payload: unknown,
     route: 'opencode-event' | 'agent-event',
   ): Promise<boolean> {
-    if (!payload || typeof payload !== 'object') return false;
-
-    const event = payload as Record<string, unknown>;
+    const event = normalizeAgentEventPayload(payload);
+    if (!event) return false;
     const projectName = typeof event.projectName === 'string' ? event.projectName : undefined;
     const agentType = typeof event.agentType === 'string' ? event.agentType : 'opencode';
     const instanceId = typeof event.instanceId === 'string' ? event.instanceId : undefined;
@@ -1364,6 +1968,11 @@ export class BridgeHookServer {
     const turnId = typeof event.turnId === 'string' && event.turnId.trim().length > 0 ? event.turnId.trim() : undefined;
     const seq = typeof event.seq === 'number' && Number.isFinite(event.seq) ? Math.trunc(event.seq) : undefined;
     const eventType = typeof event.type === 'string' ? event.type : undefined;
+    const text = this.getEventText(event);
+    const eventChannelId =
+      typeof event.channelId === 'string' && event.channelId.trim().length > 0
+        ? event.channelId.trim()
+        : undefined;
 
     if (!projectName) return false;
 
@@ -1376,12 +1985,24 @@ export class BridgeHookServer {
       getPrimaryInstanceForAgent(normalizedProject, agentType);
     const resolvedAgentType = instance?.agentType || agentType;
     const resolvedInstanceId = instance?.instanceId;
+    if (turnId && eventChannelId) {
+      this.deps.turnRouteLedger?.upsert({
+        turnId,
+        projectName,
+        agentType: resolvedAgentType,
+        ...(resolvedInstanceId ? { instanceId: resolvedInstanceId } : {}),
+        channelId: eventChannelId,
+      });
+    }
     const allowDisabledEventHook = this.isCodexPocEvent(event, resolvedAgentType);
     if (instance?.eventHook === false && !allowDisabledEventHook) {
       this.markIgnoredEvent(projectName, instance.instanceId, eventType);
-      console.log(
-        `⏭️ [${projectName}/${resolvedAgentType}${instance ? `#${instance.instanceId}` : ''}] ignoring ${eventType || 'unknown'} event (eventHook disabled)`,
-      );
+      const decision = this.shouldLogIgnoredEvent(projectName, instance.instanceId, eventType);
+      if (decision.log) {
+        console.log(
+          `⏭️ [${projectName}/${resolvedAgentType}${instance ? `#${instance.instanceId}` : ''}] ignoring ${eventType || 'unknown'} event (eventHook disabled, count=${decision.count})`,
+        );
+      }
       return true;
     }
 
@@ -1403,6 +2024,7 @@ export class BridgeHookServer {
       instanceId: resolvedInstanceId,
       turnId,
       seq,
+      eventType,
     });
     if (skipBySequence) {
       console.log(
@@ -1415,9 +2037,40 @@ export class BridgeHookServer {
       projectName,
       resolvedAgentType,
       resolvedInstanceId,
+      turnId,
     );
     const channelId = routeInfo.channelId;
     if (!channelId) return false;
+    if (
+      this.isTerminalEventType(eventType) &&
+      (
+        this.hasTurnCompleted({
+          projectName,
+          agentType: resolvedAgentType,
+          instanceId: resolvedInstanceId,
+          turnId,
+        }) ||
+        this.hasTurnCompletedByRoute({
+          projectName,
+          agentType: resolvedAgentType,
+          channelId,
+          turnId,
+        })
+      )
+    ) {
+      return true;
+    }
+    const duplicateTerminalEvent = this.shouldSkipDuplicateTerminalEvent({
+      projectName,
+      agentType: resolvedAgentType,
+      instanceId: resolvedInstanceId,
+      turnId,
+      eventType,
+      text,
+    });
+    if (duplicateTerminalEvent) {
+      return true;
+    }
     const lifecycleStrictMode = this.resolveEventLifecycleStrictMode();
     const requiresStartEvent =
       eventType === 'session.progress' ||
@@ -1425,6 +2078,7 @@ export class BridgeHookServer {
       eventType === 'session.idle' ||
       eventType === 'session.error' ||
       eventType === 'session.cancelled';
+    let startedForTurn = false;
     if (eventType === 'session.start') {
       this.markTurnStarted({
         projectName,
@@ -1432,14 +2086,15 @@ export class BridgeHookServer {
         instanceId: resolvedInstanceId,
         turnId,
       });
+      startedForTurn = true;
     } else if (turnId && requiresStartEvent) {
-      const started = this.hasTurnStarted({
+      startedForTurn = this.hasTurnStarted({
         projectName,
         agentType: resolvedAgentType,
         instanceId: resolvedInstanceId,
         turnId,
       });
-      if (!started) {
+      if (!startedForTurn) {
         const warning =
           `⚠️ [${projectName}/${resolvedAgentType}${resolvedInstanceId ? `#${resolvedInstanceId}` : ''}] ` +
           `received ${eventType} without prior session.start (turnId=${turnId})`;
@@ -1517,10 +2172,11 @@ export class BridgeHookServer {
       });
     }
 
-    const text = this.getEventText(event);
-    console.log(
-      `🔍 [${projectName}/${instance?.agentType || agentType}${instance ? `#${instance.instanceId}` : ''}] route=${route} event=${eventType} text=${text ? `(${text.length} chars) ${text.substring(0, 100)}` : '(empty)'}`,
-    );
+    if (this.shouldLogEventTrace({ eventType, text })) {
+      console.log(
+        `🔍 [${projectName}/${instance?.agentType || agentType}${instance ? `#${instance.instanceId}` : ''}] route=${route} event=${eventType} text=${this.formatEventTraceText(text)}`,
+      );
+    }
 
     if (eventType === 'session.error') {
       this.clearProgressBlocksForRoute({
@@ -1555,6 +2211,12 @@ export class BridgeHookServer {
         channelId,
         `⚠️ ${this.formatAgentLabel(resolvedAgentType)} session error: ${msg}`,
       );
+      this.markTurnCompleted({
+        projectName,
+        agentType: resolvedAgentType,
+        instanceId: resolvedInstanceId,
+        turnId,
+      });
       this.clearStartedTurn({
         projectName,
         agentType: resolvedAgentType,
@@ -1584,10 +2246,24 @@ export class BridgeHookServer {
         instanceId: resolvedInstanceId,
         turnId,
       });
+      this.safeMarkPendingDispatchingFromEvent({
+        projectName,
+        agentType: resolvedAgentType,
+        instanceId: resolvedInstanceId,
+        turnId,
+      });
       return true;
     }
 
     if (eventType === 'session.progress') {
+      if (!startedForTurn) {
+        this.safeMarkPendingDispatchingFromEvent({
+          projectName,
+          agentType: resolvedAgentType,
+          instanceId: resolvedInstanceId,
+          turnId,
+        });
+      }
       const rawProgressConfig = this.resolveProgressEventConfig({
         event,
         project: normalizedProject,
@@ -1595,7 +2271,7 @@ export class BridgeHookServer {
         instanceId: resolvedInstanceId,
         channelId,
       });
-      const modeGate = this.applyEventOnlyProgressModeGate({
+      const modeGate = this.applyCodexProgressSafetyGate({
         agentType: resolvedAgentType,
         mode: rawProgressConfig.mode,
       });
@@ -1604,6 +2280,8 @@ export class BridgeHookServer {
         agentType: resolvedAgentType,
         instanceId: resolvedInstanceId,
       });
+      const codexPocProgressForwardEnabled = this.resolveCodexPocProgressForwardEnabled();
+      const codexPocEvent = this.isCodexPocEvent(event, resolvedAgentType);
       const progressConfig: ResolvedProgressEventConfig = {
         ...rawProgressConfig,
         mode:
@@ -1613,10 +2291,13 @@ export class BridgeHookServer {
               ? 'thread'
               : modeGate.mode,
       };
+      if (codexPocEvent && !codexPocProgressForwardEnabled) {
+        progressConfig.mode = 'off';
+      }
       if (modeGate.adjusted) {
         console.log(
           `🛡️ [${projectName}/${resolvedAgentType}${resolvedInstanceId ? `#${resolvedInstanceId}` : ''}] ` +
-            `event-only progress mode adjusted ${rawProgressConfig.mode} -> ${progressConfig.mode}` +
+            `codex progress safety gate adjusted ${rawProgressConfig.mode} -> ${progressConfig.mode}` +
             (modeGate.reason ? ` (${modeGate.reason})` : ''),
         );
       }
@@ -1661,7 +2342,18 @@ export class BridgeHookServer {
               blockMaxChars: progressConfig.blockMaxChars,
             });
           } else {
-            await this.sendProgressEventOutput(channelId, text.trim(), progressConfig.mode);
+            await this.sendProgressEventOutput(
+              channelId,
+              text.trim(),
+              progressConfig.mode,
+              this.buildProgressBlockKey({
+                projectName,
+                agentType: resolvedAgentType,
+                instanceId: resolvedInstanceId,
+                channelId,
+                turnId,
+              }),
+            );
           }
         }
       }
@@ -1700,6 +2392,12 @@ export class BridgeHookServer {
         channelId,
         `ℹ️ ${this.formatAgentLabel(resolvedAgentType)} session cancelled${msg}`,
       );
+      this.markTurnCompleted({
+        projectName,
+        agentType: resolvedAgentType,
+        instanceId: resolvedInstanceId,
+        turnId,
+      });
       this.clearStartedTurn({
         projectName,
         agentType: resolvedAgentType,
@@ -1710,6 +2408,30 @@ export class BridgeHookServer {
     }
 
     if (eventType === 'session.idle' || eventType === 'session.final') {
+      const terminalTurnKey = this.buildTurnLifecycleKey({
+        projectName,
+        agentType: resolvedAgentType,
+        instanceId: resolvedInstanceId,
+        turnId,
+      });
+      const terminalRouteTurnKey = this.buildTurnRouteLifecycleKey({
+        projectName,
+        agentType: resolvedAgentType,
+        channelId,
+        turnId,
+      });
+      if (
+        (terminalTurnKey && this.terminalTurnInFlight.has(terminalTurnKey)) ||
+        (terminalRouteTurnKey && this.terminalTurnInFlightByRoute.has(terminalRouteTurnKey))
+      ) {
+        return true;
+      }
+      if (terminalTurnKey) {
+        this.terminalTurnInFlight.add(terminalTurnKey);
+      }
+      if (terminalRouteTurnKey) {
+        this.terminalTurnInFlightByRoute.add(terminalRouteTurnKey);
+      }
       this.clearProgressBlocksForRoute({
         projectName,
         agentType: resolvedAgentType,
@@ -1717,6 +2439,25 @@ export class BridgeHookServer {
         channelId,
         turnId,
       });
+      const suppressIdleTerminalOutput = this.shouldSuppressCodexIdleTerminalOutput(
+        eventType,
+        resolvedAgentType,
+      );
+      if (suppressIdleTerminalOutput) {
+        if (text && text.trim().length > 0) {
+          console.log(
+            `🛡️ [${projectName}/${resolvedAgentType}${resolvedInstanceId ? `#${resolvedInstanceId}` : ''}] ` +
+              'suppressed session.idle channel output in codex safety mode',
+          );
+        }
+        if (terminalTurnKey) {
+          this.terminalTurnInFlight.delete(terminalTurnKey);
+        }
+        if (terminalRouteTurnKey) {
+          this.terminalTurnInFlightByRoute.delete(terminalRouteTurnKey);
+        }
+        return true;
+      }
       try {
         const trimmed = text && text.trim().length > 0 ? text.trim() : '';
         const effectiveProgressMode = this.resolveProgressModeForTurn({
@@ -1741,6 +2482,7 @@ export class BridgeHookServer {
           agentType: resolvedAgentType,
           instanceId: resolvedInstanceId,
         });
+        let emittedTerminalOutput = false;
         if (deliveredText.length > 0) {
           if (workerVisibility === 'hidden') {
             console.log(
@@ -1760,6 +2502,7 @@ export class BridgeHookServer {
 
             if (workerVisibility === 'thread') {
               await this.sendProgressEventOutput(channelId, displayText, 'thread');
+              emittedTerminalOutput = true;
               if (filePaths.length > 0) {
                 if (
                   typeof this.deps.messaging.sendToProgressThreadWithFiles === 'function'
@@ -1769,12 +2512,14 @@ export class BridgeHookServer {
                     this.buildFileNotice(filePaths),
                     filePaths,
                   );
+                  emittedTerminalOutput = true;
                 } else {
                   await this.deps.messaging.sendToChannelWithFiles(
                     channelId,
                     this.buildFileNotice(filePaths),
                     filePaths,
                   );
+                  emittedTerminalOutput = true;
                   console.log(
                     `🧭 [${projectName}/${resolvedAgentType}${resolvedInstanceId ? `#${resolvedInstanceId}` : ''}] ` +
                       'orchestrator thread mode relayed worker file attachments via channel fallback',
@@ -1783,12 +2528,30 @@ export class BridgeHookServer {
               }
             } else {
               await this.sendEventOutput(channelId, displayText);
+              emittedTerminalOutput = true;
 
               if (filePaths.length > 0) {
                 await this.deps.messaging.sendToChannelWithFiles(channelId, this.buildFileNotice(filePaths), filePaths);
+                emittedTerminalOutput = true;
               }
             }
           }
+        }
+        const shouldSendEmptyFinalNotice =
+          !emittedTerminalOutput &&
+          workerVisibility !== 'hidden' &&
+          eventType === 'session.final' &&
+          resolvedAgentType.trim().toLowerCase() === 'codex';
+        if (shouldSendEmptyFinalNotice) {
+          const emptyFinalNotice =
+            `⚠️ ${this.formatAgentLabel(resolvedAgentType)} finished without a visible response.\n` +
+            'Use `/snapshot` to inspect tmux state or `/retry` to resend the prompt.';
+          if (workerVisibility === 'thread') {
+            await this.sendProgressEventOutput(channelId, emptyFinalNotice, 'thread');
+          } else {
+            await this.sendEventOutput(channelId, emptyFinalNotice);
+          }
+          emittedTerminalOutput = true;
         }
 
         // Complete after idle output delivery so pending-channel routing remains stable.
@@ -1801,6 +2564,18 @@ export class BridgeHookServer {
             .markCompleted(projectName, resolvedAgentType, resolvedInstanceId)
             .catch(() => {});
         }
+        this.markTurnCompleted({
+          projectName,
+          agentType: resolvedAgentType,
+          instanceId: resolvedInstanceId,
+          turnId,
+        });
+        this.markTurnCompletedByRoute({
+          projectName,
+          agentType: resolvedAgentType,
+          channelId,
+          turnId,
+        });
         return true;
       } catch (error) {
         if (turnId && typeof this.deps.pendingTracker.markErrorByMessageId === 'function') {
@@ -1812,6 +2587,12 @@ export class BridgeHookServer {
         }
         throw error;
       } finally {
+        if (terminalTurnKey) {
+          this.terminalTurnInFlight.delete(terminalTurnKey);
+        }
+        if (terminalRouteTurnKey) {
+          this.terminalTurnInFlightByRoute.delete(terminalRouteTurnKey);
+        }
         this.clearProgressTranscriptsForRoute({
           projectName,
           agentType: resolvedAgentType,

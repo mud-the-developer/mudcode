@@ -63,6 +63,23 @@ describe('PendingMessageTracker', () => {
     expect(tracker.getPendingChannel('demo', 'codex', 'codex')).toBe('thread-b');
   });
 
+  it('deduplicates repeated markPending calls for the same messageId', async () => {
+    const messaging = {
+      platform: 'discord' as const,
+      addReactionToMessage: vi.fn().mockResolvedValue(undefined),
+      replaceOwnReactionOnMessage: vi.fn().mockResolvedValue(undefined),
+    } as any;
+    const tracker = new PendingMessageTracker(messaging);
+
+    await tracker.markPending('demo', 'codex', 'thread-a', 'msg-a', 'codex', 'prompt-a');
+    await tracker.markPending('demo', 'codex', 'thread-b', 'msg-a', 'codex', 'prompt-a-updated');
+
+    expect(tracker.getPendingDepth('demo', 'codex', 'codex')).toBe(1);
+    expect(tracker.getPendingChannel('demo', 'codex', 'codex')).toBe('thread-b');
+    expect(tracker.getPendingPromptTail('demo', 'codex', 'codex')).toContain('prompt-a-updated');
+    expect(messaging.addReactionToMessage).toHaveBeenCalledTimes(1);
+  });
+
   it('completes a specific pending request by messageId without forcing FIFO head removal', async () => {
     const messaging = {
       platform: 'discord' as const,
@@ -102,6 +119,26 @@ describe('PendingMessageTracker', () => {
 
     const tails = tracker.getPendingPromptTails('demo', 'codex', 'codex');
     expect(tails).toEqual([stored]);
+  });
+
+  it('returns pending route snapshot in a single lookup', async () => {
+    const messaging = {
+      platform: 'discord' as const,
+      addReactionToMessage: vi.fn().mockResolvedValue(undefined),
+      replaceOwnReactionOnMessage: vi.fn().mockResolvedValue(undefined),
+    } as any;
+    const tracker = new PendingMessageTracker(messaging);
+
+    await tracker.markPending('demo', 'codex', 'thread-a', 'msg-a', 'codex', 'prompt-a');
+    await tracker.markPending('demo', 'codex', 'thread-b', 'msg-b', 'codex', 'prompt-b');
+
+    const snapshot = tracker.getPendingRouteSnapshot('demo', 'codex', 'codex');
+    expect(snapshot.pendingDepth).toBe(2);
+    expect(snapshot.channelId).toBe('thread-a');
+    expect(snapshot.messageId).toBe('msg-a');
+    expect(snapshot.promptTails.length).toBe(2);
+    expect(snapshot.promptTails[0]).toContain('prompt-a');
+    expect(snapshot.promptTails[1]).toContain('prompt-b');
   });
 
   it('exposes runtime snapshot for in-flight and terminal states', async () => {
@@ -147,7 +184,7 @@ describe('PendingMessageTracker', () => {
     expect(tracker.getPendingChannel('demo', 'codex', 'codex')).toBeUndefined();
   });
 
-  it('starts and stops Discord typing indicator through lifecycle', async () => {
+  it('starts and stops Discord typing indicator through processing lifecycle', async () => {
     const stopTyping = vi.fn();
     const messaging = {
       platform: 'discord' as const,
@@ -158,6 +195,8 @@ describe('PendingMessageTracker', () => {
     const tracker = new PendingMessageTracker(messaging);
 
     await tracker.markPending('demo', 'codex', 'ch-typing', 'msg-typing', 'codex');
+    expect(messaging.startTypingIndicator).not.toHaveBeenCalled();
+    await tracker.markDispatching('demo', 'codex', 'codex');
     expect(messaging.startTypingIndicator).toHaveBeenCalledWith('ch-typing');
     expect(stopTyping).not.toHaveBeenCalled();
 
@@ -176,6 +215,7 @@ describe('PendingMessageTracker', () => {
     const tracker = new PendingMessageTracker(messaging);
 
     await tracker.markPending('demo', 'codex', 'ch-typing', 'msg-typing', 'codex');
+    await tracker.markDispatching('demo', 'codex', 'codex');
     await tracker.markError('demo', 'codex', 'codex');
 
     expect(stopTyping).toHaveBeenCalledTimes(1);
@@ -196,7 +236,9 @@ describe('PendingMessageTracker', () => {
     const tracker = new PendingMessageTracker(messaging);
 
     await tracker.markPending('demo', 'codex', 'thread-a', 'msg-a', 'codex');
+    await tracker.markDispatching('demo', 'codex', 'codex');
     await tracker.markPending('demo', 'codex', 'thread-b', 'msg-b', 'codex');
+    await tracker.markDispatching('demo', 'codex', 'codex');
 
     tracker.clearPendingForInstance('demo', 'codex', 'codex');
 
@@ -204,14 +246,13 @@ describe('PendingMessageTracker', () => {
     expect(stopB).toHaveBeenCalledTimes(1);
   });
 
-  it('retries typing keepalive instead of sending delayed stuck-processing text', async () => {
+  it('does not restart typing from timer keepalive when pending is still received', async () => {
     vi.useFakeTimers();
-    process.env.AGENT_DISCORD_PENDING_ALERT_MS = '5000';
     try {
       const stopTyping = vi.fn();
       const messaging = {
         platform: 'discord' as const,
-        startTypingIndicator: vi.fn().mockRejectedValueOnce(new Error('transient failure')).mockResolvedValueOnce(stopTyping),
+        startTypingIndicator: vi.fn().mockResolvedValue(stopTyping),
         sendToChannel: vi.fn().mockResolvedValue(undefined),
         addReactionToMessage: vi.fn().mockResolvedValue(undefined),
         replaceOwnReactionOnMessage: vi.fn().mockResolvedValue(undefined),
@@ -219,18 +260,19 @@ describe('PendingMessageTracker', () => {
       const tracker = new PendingMessageTracker(messaging);
 
       await tracker.markPending('demo', 'codex', 'ch-1', 'msg-1', 'codex');
-      expect(messaging.startTypingIndicator).toHaveBeenCalledTimes(1);
+      expect(messaging.startTypingIndicator).toHaveBeenCalledTimes(0);
       await vi.advanceTimersByTimeAsync(5000);
       await Promise.resolve();
 
-      expect(messaging.startTypingIndicator).toHaveBeenCalledTimes(2);
+      expect(messaging.startTypingIndicator).toHaveBeenCalledTimes(0);
       expect(messaging.sendToChannel).not.toHaveBeenCalled();
       expect(stopTyping).not.toHaveBeenCalled();
 
+      await tracker.markDispatching('demo', 'codex', 'codex');
+      expect(messaging.startTypingIndicator).toHaveBeenCalledTimes(1);
       await tracker.markCompleted('demo', 'codex', 'codex');
       expect(stopTyping).toHaveBeenCalledTimes(1);
     } finally {
-      delete process.env.AGENT_DISCORD_PENDING_ALERT_MS;
       vi.useRealTimers();
     }
   });

@@ -47,6 +47,8 @@
     "ops:doctor": "bun dist/bin/mudcode.js doctor",
     "ops:doctor:fix": "bun dist/bin/mudcode.js doctor --fix",
     "ops:daemon:restart": "bun dist/bin/mudcode.js daemon restart",
+    "ops:update:explain": "bun dist/bin/mudcode.js update --explain",
+    "ops:align:explain": "bun dist/bin/mudcode.js align-version --explain",
     "ops:self-heal": "bun run build && bun dist/bin/mudcode.js repair deep",
     "ops:verify:fast": "bun run typecheck && bun run test -- tests/config/index.test.ts tests/bridge/runtime/message-router.test.ts tests/bridge/runtime/capture-poller.test.ts tests/index.test.ts",
     "ops:verify:gepa": "bun run typecheck && bun run test -- tests/prompt-refiner-shadow-to-gepa.test.ts tests/prompt-refiner-policy.test.ts && python -m unittest tests/prompt_refiner_gepa_optimize_test.py && cargo test --manifest-path mudcode-rs/Cargo.toml --bin prompt_refiner_shadow_to_gepa && cargo run --manifest-path mudcode-rs/Cargo.toml --bin prompt_refiner_shadow_to_gepa -- --help && python scripts/prompt/prompt-refiner-gepa-optimize.py --help",

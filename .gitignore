@@ -14,3 +14,7 @@ opencode-ref/
 
 .venv
 .mudcode
+__pycache__/
+*.pyc
+.pytest_cache/
+.tmp-vitest-*.json

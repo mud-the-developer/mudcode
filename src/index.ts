@@ -28,6 +28,7 @@ import { BridgeProjectBootstrap } from './bridge/bootstrap/project-bootstrap.js'
 import { BridgeMessageRouter } from './bridge/runtime/message-router.js';
 import { BridgeHookServer } from './bridge/runtime/hook-server.js';
 import { BridgeCapturePoller } from './bridge/runtime/capture-poller.js';
+import { TurnRouteLedger } from './bridge/runtime/turn-route-ledger.js';
 import { LocalAgentEventHookClient } from './bridge/events/agent-event-hook.js';
 import { CodexIoV2Tracker } from './bridge/events/codex-io-v2.js';
 import { SkillAutoLinker } from './bridge/skills/skill-autolinker.js';
@@ -49,6 +50,7 @@ export class AgentBridge {
   private messageRouter: BridgeMessageRouter;
   private hookServer: BridgeHookServer;
   private capturePoller: BridgeCapturePoller;
+  private turnRouteLedger: TurnRouteLedger;
   private eventHookClient: LocalAgentEventHookClient;
   private codexIoTracker: CodexIoV2Tracker;
   private skillAutoLinker: SkillAutoLinker;
@@ -74,12 +76,15 @@ export class AgentBridge {
     });
     this.skillAutoLinker = new SkillAutoLinker();
     this.pendingTracker = new PendingMessageTracker(this.messaging);
+    this.turnRouteLedger = new TurnRouteLedger();
     this.projectBootstrap = new BridgeProjectBootstrap(this.stateManager, this.messaging, this.bridgeConfig.hookServerPort || 18470);
     this.messageRouter = new BridgeMessageRouter({
       messaging: this.messaging,
       tmux: this.tmux,
       stateManager: this.stateManager,
       pendingTracker: this.pendingTracker,
+      turnRouteLedger: this.turnRouteLedger,
+      reloadChannelMappings: () => this.projectBootstrap.reloadChannelMappings(),
       sanitizeInput: (content) => this.sanitizeInput(content),
       ioTracker: this.codexIoTracker,
       skillAutoLinker: this.skillAutoLinker,
@@ -94,6 +99,7 @@ export class AgentBridge {
       messaging: this.messaging,
       stateManager: this.stateManager,
       pendingTracker: this.pendingTracker,
+      turnRouteLedger: this.turnRouteLedger,
       reloadChannelMappings: () => this.projectBootstrap.reloadChannelMappings(),
     });
     this.capturePoller = new BridgeCapturePoller({
@@ -226,11 +232,6 @@ export class AgentBridge {
         const tmuxSession = this.ensureProjectSessionExists(normalizedProject, windowName);
         this.tmux.setSessionEnv(tmuxSession, 'AGENT_DISCORD_PORT', String(port));
 
-        const integration = installAgentIntegration('codex', normalizedProject.projectPath, 'install');
-        for (const warning of integration.warningMessages) {
-          warnings.push(`${instanceId}: ${warning}`);
-        }
-
         const exportPrefix = buildExportPrefix(buildAgentLaunchEnv({
           projectName: normalizedProject.projectName,
           port,
@@ -238,17 +239,14 @@ export class AgentBridge {
           instanceId,
           permissionAllow: false,
         }));
-        const startCommand = withClaudePluginDir(
-          adapter.getStartCommand(normalizedProject.projectPath, false),
-          integration.claudePluginDir,
-        );
+        const startCommand = adapter.getStartCommand(normalizedProject.projectPath, false);
         this.tmux.startAgentInWindow(tmuxSession, windowName, `${exportPrefix}${startCommand}`);
 
         const createdInstance: ProjectInstanceState = {
           instanceId,
           agentType: 'codex',
           tmuxWindow: windowName,
-          eventHook: integration.eventHookInstalled,
+          eventHook: false,
         };
         normalizedProject = normalizeProjectState({
           ...normalizedProject,
@@ -400,11 +398,14 @@ export class AgentBridge {
 
     // Start agent in tmux window
     const permissionAllow = this.bridgeConfig.opencode?.permissionMode === 'allow';
-    const integration = installAgentIntegration(adapter.config.name, projectPath, 'install');
-    for (const message of integration.infoMessages) {
+    const integration =
+      adapter.config.name === 'codex'
+        ? undefined
+        : installAgentIntegration(adapter.config.name, projectPath, 'install');
+    for (const message of integration?.infoMessages ?? []) {
       console.log(message);
     }
-    for (const message of integration.warningMessages) {
+    for (const message of integration?.warningMessages ?? []) {
       console.warn(message);
     }
 
@@ -428,7 +429,10 @@ export class AgentBridge {
       instanceId,
       permissionAllow: adapter.config.name === 'opencode' && permissionAllow,
     }));
-    const startCommand = withClaudePluginDir(adapter.getStartCommand(projectPath, permissionAllow), integration.claudePluginDir);
+    const startCommand = withClaudePluginDir(
+      adapter.getStartCommand(projectPath, permissionAllow),
+      integration?.claudePluginDir,
+    );
 
     this.tmux.startAgentInWindow(
       tmuxSession,
@@ -454,7 +458,8 @@ export class AgentBridge {
         agentType: adapter.config.name,
         tmuxWindow: windowName,
         channelId,
-        eventHook: adapter.config.name === 'opencode' || integration.eventHookInstalled,
+        eventHook:
+          adapter.config.name === 'opencode' || integration?.eventHookInstalled === true,
       },
     };
     const projectState = normalizeProjectState({

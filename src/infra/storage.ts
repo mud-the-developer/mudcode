@@ -2,7 +2,7 @@
  * Default IStorage implementation using Node.js fs
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, openSync, chmodSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, openSync, chmodSync, renameSync, rmSync } from 'fs';
 import type { IStorage } from '../types/interfaces.js';
 
 export class FileStorage implements IStorage {
@@ -11,7 +11,18 @@ export class FileStorage implements IStorage {
   }
 
   writeFile(path: string, data: string): void {
-    writeFileSync(path, data);
+    const tempPath = `${path}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    writeFileSync(tempPath, data);
+    try {
+      renameSync(tempPath, path);
+    } catch (error) {
+      try {
+        rmSync(tempPath, { force: true });
+      } catch {
+        // best effort
+      }
+      throw error;
+    }
   }
 
   chmod(path: string, mode: number): void {

@@ -65,7 +65,8 @@ function normalizeLegacyInstances(project: ProjectState): Record<string, Project
 }
 
 function normalizeInstanceMap(project: ProjectState): Record<string, ProjectInstanceState> {
-  const instances = project.instances || {};
+  const hasExplicitInstances = !!project.instances && typeof project.instances === 'object';
+  const instances = hasExplicitInstances ? project.instances || {} : {};
   const normalized: Record<string, ProjectInstanceState> = {};
 
   for (const [rawKey, rawValue] of Object.entries(instances)) {
@@ -101,6 +102,7 @@ function normalizeInstanceMap(project: ProjectState): Record<string, ProjectInst
   }
 
   if (Object.keys(normalized).length > 0) return normalized;
+  if (hasExplicitInstances) return {};
   return normalizeLegacyInstances(project);
 }
 

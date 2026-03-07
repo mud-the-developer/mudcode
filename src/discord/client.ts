@@ -29,6 +29,33 @@ const DEFAULT_DISCORD_SEND_MAX_RETRIES = 2;
 const DISCORD_SEND_BASE_BACKOFF_MS = 600;
 const DISCORD_SEND_MAX_BACKOFF_MS = 10000;
 const DISCORD_MAX_MESSAGE_LENGTH = 2000;
+const DISCORD_UNKNOWN_MESSAGE_ERROR_CODE = 10008;
+const DISCORD_REACTION_SUPPRESS_TTL_MS_DEFAULT = 5 * 60 * 1000;
+const DISCORD_REACTION_SUPPRESS_TTL_MS_MIN = 5_000;
+const DISCORD_REACTION_SUPPRESS_TTL_MS_MAX = 60 * 60 * 1000;
+const DISCORD_REACTION_WARN_LOG_INTERVAL_MS = 60_000;
+const DISCORD_REACTION_SUPPRESSION_CACHE_MAX = 4000;
+const DISCORD_OUTPUT_DEDUPE_WINDOW_MS_DEFAULT = 2500;
+const DISCORD_OUTPUT_DEDUPE_WINDOW_MS_MIN = 0;
+const DISCORD_OUTPUT_DEDUPE_WINDOW_MS_MAX = 60_000;
+const DISCORD_OUTPUT_DEDUPE_CACHE_MAX = 10_000;
+const DISCORD_OUTPUT_MAX_CHUNKS_DEFAULT = 4;
+const DISCORD_OUTPUT_MAX_CHUNKS_MIN = 1;
+const DISCORD_OUTPUT_MAX_CHUNKS_MAX = 40;
+const DISCORD_LONG_OUTPUT_THREAD_MAX_CHUNKS_DEFAULT = 8;
+const DISCORD_LONG_OUTPUT_THREAD_MAX_CHUNKS_MIN = 1;
+const DISCORD_LONG_OUTPUT_THREAD_MAX_CHUNKS_MAX = 200;
+
+type ReactionSuppressionState = {
+  untilMs: number;
+  failures: number;
+  lastWarnAtMs: number;
+};
+
+type OutputDedupeState = {
+  signature: string;
+  atMs: number;
+};
 
 export class DiscordClient implements MessagingClient {
   readonly platform = 'discord' as const;
@@ -40,6 +67,9 @@ export class DiscordClient implements MessagingClient {
   private typingIndicators: Map<string, { timer: ReturnType<typeof setInterval>; refs: number }> = new Map();
   private sendQueues: Map<string, Promise<void>> = new Map();
   private progressThreadByChannel: Map<string, string> = new Map();
+  private longOutputThreadByChannel: Map<string, string> = new Map();
+  private reactionSuppressionByMessage: Map<string, ReactionSuppressionState> = new Map();
+  private outputDedupeByQueue: Map<string, OutputDedupeState> = new Map();
   private registry: AgentRegistry;
 
   constructor(token: string, registry?: AgentRegistry) {
@@ -128,7 +158,7 @@ export class DiscordClient implements MessagingClient {
       const commandName = interaction.commandName.toLowerCase();
       const sessionCommands = new Set(['q', 'qw']);
       const keyCommands = new Set(['enter', 'tab', 'esc', 'up', 'down']);
-      const utilityCommands = new Set(['retry', 'health', 'snapshot', 'io']);
+      const utilityCommands = new Set(['retry', 'health', 'snapshot', 'io', 'send']);
       const panelCommands = new Set(['controls']);
       if (
         !sessionCommands.has(commandName) &&
@@ -181,9 +211,15 @@ export class DiscordClient implements MessagingClient {
         threadId,
       });
       const count = keyCommands.has(commandName) ? interaction.options.getInteger('count') || 1 : 1;
+      const sendText =
+        commandName === 'send'
+          ? String(interaction.options.getString('text') || '').trim()
+          : undefined;
       const commandPayload =
         keyCommands.has(commandName) && count > 1
           ? `/${commandName} ${count}`
+          : commandName === 'send'
+            ? (sendText ? `/send ${sendText}` : '/send')
           : `/${commandName}`;
 
       try {
@@ -236,7 +272,7 @@ export class DiscordClient implements MessagingClient {
   }
 
   private buildControlPanelRows(): ActionRowBuilder<ButtonBuilder>[] {
-    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    const primaryRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
         .setCustomId(`${CONTROL_BUTTON_PREFIX}retry`)
         .setLabel('Retry')
@@ -259,7 +295,7 @@ export class DiscordClient implements MessagingClient {
         .setStyle(ButtonStyle.Success),
     );
 
-    return [row];
+    return [primaryRow];
   }
 
   private async sendControlPanelToChannel(channelId: string): Promise<boolean> {
@@ -366,6 +402,18 @@ export class DiscordClient implements MessagingClient {
       {
         name: 'io',
         description: 'Show codex I/O tracker status for this instance.',
+      },
+      {
+        name: 'send',
+        description: 'Send a prompt to the mapped agent instance.',
+        options: [
+          {
+            name: 'text',
+            description: 'Prompt text to send to the agent.',
+            type: ApplicationCommandOptionType.String,
+            required: true,
+          },
+        ],
       },
       {
         name: 'controls',
@@ -478,6 +526,37 @@ export class DiscordClient implements MessagingClient {
     sourceChannelId: string,
     channel: unknown,
   ): { channelInfo: ChannelInfo; routeChannelId: string; threadId?: string } | null {
+    const threadLike = channel as { isThread?: () => boolean; parentId?: string };
+    const isThread = typeof threadLike?.isThread === 'function' && threadLike.isThread();
+    const parentId = isThread ? threadLike.parentId : undefined;
+    if (parentId) {
+      const parentMapping = this.channelMapping.get(parentId);
+      if (parentMapping) {
+        return {
+          channelInfo: parentMapping,
+          routeChannelId: parentId,
+          threadId: sourceChannelId,
+        };
+      }
+
+      const threadMapping = this.channelMapping.get(sourceChannelId);
+      if (threadMapping) {
+        return {
+          channelInfo: threadMapping,
+          routeChannelId: parentId,
+          threadId: sourceChannelId,
+        };
+      }
+
+      const fallback = this.resolveChannelNameFallbackRoute(sourceChannelId, channel, parentId);
+      if (!fallback) return null;
+      return {
+        ...fallback,
+        routeChannelId: parentId,
+        threadId: sourceChannelId,
+      };
+    }
+
     const direct = this.channelMapping.get(sourceChannelId);
     if (direct) {
       return {
@@ -486,18 +565,26 @@ export class DiscordClient implements MessagingClient {
       };
     }
 
-    const threadLike = channel as { isThread?: () => boolean; parentId?: string };
-    const isThread = typeof threadLike?.isThread === 'function' && threadLike.isThread();
-    const parentId = isThread ? threadLike.parentId : undefined;
-    if (!parentId) return null;
+    return this.resolveChannelNameFallbackRoute(sourceChannelId, channel);
+  }
 
-    const parentMapping = this.channelMapping.get(parentId);
-    if (!parentMapping) return null;
+  private resolveChannelNameFallbackRoute(
+    sourceChannelId: string,
+    channel: unknown,
+    registerChannelId?: string,
+  ): { channelInfo: ChannelInfo; routeChannelId: string; threadId?: string } | null {
+    if (!this.shouldRouteByChannelNameFallback()) return null;
+    const channelLike = channel as { name?: unknown };
+    const channelName = typeof channelLike?.name === 'string' ? channelLike.name.trim() : '';
+    if (!channelName) return null;
+    const parsed = this.parseChannelName(channelName);
+    if (!parsed) return null;
 
+    // Self-heal stale/empty channel map on first inbound message for this channel.
+    this.channelMapping.set(registerChannelId || sourceChannelId, parsed);
     return {
-      channelInfo: parentMapping,
-      routeChannelId: parentId,
-      threadId: sourceChannelId,
+      channelInfo: parsed,
+      routeChannelId: registerChannelId || sourceChannelId,
     };
   }
 
@@ -541,9 +628,18 @@ export class DiscordClient implements MessagingClient {
     // Use agent registry to parse channel names dynamically
     const result = this.registry.parseChannelName(channelName);
     if (result) {
+      const marker = `-${result.agent.config.channelSuffix}`;
+      const markerIndex = channelName.lastIndexOf(marker);
+      const tail = markerIndex >= 0 ? channelName.slice(markerIndex + marker.length) : '';
+      const suffix = tail.startsWith('-') ? tail.slice(1).trim().toLowerCase() : '';
+      const inferredInstanceId =
+        suffix && /^[a-z0-9][a-z0-9-]{0,63}$/.test(suffix)
+          ? `${result.agent.config.name}-${suffix}`
+          : undefined;
       return {
         projectName: result.projectName,
         agentType: result.agent.config.name,
+        ...(inferredInstanceId ? { instanceId: inferredInstanceId } : {}),
       };
     }
     return null;
@@ -706,6 +802,8 @@ export class DiscordClient implements MessagingClient {
     }
     this.typingIndicators.clear();
     this.progressThreadByChannel.clear();
+    this.longOutputThreadByChannel.clear();
+    this.outputDedupeByQueue.clear();
     await this.client.destroy();
   }
 
@@ -945,10 +1043,16 @@ export class DiscordClient implements MessagingClient {
     }
   }
 
-  private buildLongOutputPreview(content: string, maxLength: number = 180): string {
-    const compact = content.replace(/\s+/g, ' ').trim();
-    if (compact.length <= maxLength) return compact;
-    return `${compact.slice(0, maxLength - 1)}…`;
+  private buildLongOutputPreview(content: string, maxLength: number = 120): string {
+    const lines = content
+      .split(/\r?\n/)
+      .map((line) => line.replace(/\s+/g, ' ').trim())
+      .filter((line) => line.length > 0);
+    if (lines.length === 0) return '';
+
+    const firstMeaningful = lines[0]!;
+    if (firstMeaningful.length <= maxLength) return firstMeaningful;
+    return `${firstMeaningful.slice(0, maxLength - 1)}…`;
   }
 
   private resolveBooleanEnv(name: string, fallback: boolean): boolean {
@@ -964,6 +1068,12 @@ export class DiscordClient implements MessagingClient {
     // Disabled by default so only explicit state bindings are routed.
     // Set AGENT_DISCORD_SCAN_EXISTING_CHANNELS=true to opt in to legacy name-based discovery.
     return this.resolveBooleanEnv('AGENT_DISCORD_SCAN_EXISTING_CHANNELS', false);
+  }
+
+  private shouldRouteByChannelNameFallback(): boolean {
+    // Disabled by default: channel routing should follow explicit state mappings.
+    // Enable only for emergency recovery via env toggle.
+    return this.resolveBooleanEnv('AGENT_DISCORD_ROUTE_CHANNEL_NAME_FALLBACK', false);
   }
 
   private shouldSuppressNotifications(): boolean {
@@ -1087,6 +1197,88 @@ export class DiscordClient implements MessagingClient {
     }
   }
 
+  private resolveReactionSuppressTtlMs(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_REACTION_SUPPRESS_TTL_MS || '');
+    if (
+      Number.isFinite(fromEnv) &&
+      fromEnv >= DISCORD_REACTION_SUPPRESS_TTL_MS_MIN &&
+      fromEnv <= DISCORD_REACTION_SUPPRESS_TTL_MS_MAX
+    ) {
+      return Math.trunc(fromEnv);
+    }
+    return DISCORD_REACTION_SUPPRESS_TTL_MS_DEFAULT;
+  }
+
+  private reactionMessageKey(channelId: string, messageId: string): string {
+    return `${channelId}:${messageId}`;
+  }
+
+  private pruneReactionSuppressionCache(): void {
+    const now = Date.now();
+    for (const [key, state] of this.reactionSuppressionByMessage.entries()) {
+      if (state.untilMs <= now) {
+        this.reactionSuppressionByMessage.delete(key);
+      }
+    }
+    while (this.reactionSuppressionByMessage.size > DISCORD_REACTION_SUPPRESSION_CACHE_MAX) {
+      const oldest = this.reactionSuppressionByMessage.keys().next();
+      if (oldest.done) break;
+      this.reactionSuppressionByMessage.delete(oldest.value);
+    }
+  }
+
+  private extractErrorCode(error: unknown): number | undefined {
+    const payload = error as { code?: unknown; rawError?: { code?: unknown } };
+    const code = Number(payload.code ?? payload.rawError?.code);
+    if (Number.isFinite(code)) return Math.trunc(code);
+    return undefined;
+  }
+
+  private isUnknownMessageError(error: unknown): boolean {
+    const code = this.extractErrorCode(error);
+    if (code === DISCORD_UNKNOWN_MESSAGE_ERROR_CODE) return true;
+    const payload = error as { message?: unknown };
+    const message = typeof payload.message === 'string' ? payload.message : '';
+    return /unknown message/i.test(message);
+  }
+
+  private shouldSuppressReactionAttempt(channelId: string, messageId: string): boolean {
+    const key = this.reactionMessageKey(channelId, messageId);
+    const state = this.reactionSuppressionByMessage.get(key);
+    if (!state) return false;
+    const now = Date.now();
+    if (state.untilMs <= now) {
+      this.reactionSuppressionByMessage.delete(key);
+      return false;
+    }
+    return true;
+  }
+
+  private markUnknownMessageSuppressed(
+    channelId: string,
+    messageId: string,
+    operation: 'add' | 'replace',
+  ): void {
+    const ttlMs = this.resolveReactionSuppressTtlMs();
+    const key = this.reactionMessageKey(channelId, messageId);
+    const now = Date.now();
+    const previous = this.reactionSuppressionByMessage.get(key);
+    const next: ReactionSuppressionState = {
+      untilMs: now + ttlMs,
+      failures: (previous?.failures || 0) + 1,
+      lastWarnAtMs: previous?.lastWarnAtMs || 0,
+    };
+    const shouldLog = !previous || now - previous.lastWarnAtMs >= DISCORD_REACTION_WARN_LOG_INTERVAL_MS;
+    if (shouldLog) {
+      console.warn(
+        `Discord reaction ${operation} skipped for stale message ${channelId}/${messageId}: Unknown Message (10008), suppressing retries for ${Math.round(ttlMs / 1000)}s`,
+      );
+      next.lastWarnAtMs = now;
+    }
+    this.reactionSuppressionByMessage.set(key, next);
+    this.pruneReactionSuppressionCache();
+  }
+
   private async enqueueSend(queueKey: string, task: () => Promise<void>): Promise<void> {
     const previous = this.sendQueues.get(queueKey) || Promise.resolve();
     const next = previous.catch(() => undefined).then(task);
@@ -1107,9 +1299,104 @@ export class DiscordClient implements MessagingClient {
     return splitForDiscord(content);
   }
 
+  private resolveOutputMaxChunks(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_OUTPUT_MAX_CHUNKS || '');
+    if (
+      Number.isFinite(fromEnv) &&
+      fromEnv >= DISCORD_OUTPUT_MAX_CHUNKS_MIN &&
+      fromEnv <= DISCORD_OUTPUT_MAX_CHUNKS_MAX
+    ) {
+      return Math.trunc(fromEnv);
+    }
+    return DISCORD_OUTPUT_MAX_CHUNKS_DEFAULT;
+  }
+
+  private resolveLongOutputThreadMaxChunks(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_LONG_OUTPUT_THREAD_MAX_CHUNKS || '');
+    if (
+      Number.isFinite(fromEnv) &&
+      fromEnv >= DISCORD_LONG_OUTPUT_THREAD_MAX_CHUNKS_MIN &&
+      fromEnv <= DISCORD_LONG_OUTPUT_THREAD_MAX_CHUNKS_MAX
+    ) {
+      return Math.trunc(fromEnv);
+    }
+    return DISCORD_LONG_OUTPUT_THREAD_MAX_CHUNKS_DEFAULT;
+  }
+
   private annotatePagedChunks(chunks: string[], label: string): string[] {
     if (chunks.length <= 1) return chunks;
     return chunks.map((chunk, index) => `**${label} ${index + 1}/${chunks.length}**\n${chunk}`);
+  }
+
+  private capOutputChunks(chunks: string[], label: 'Part' | 'Page'): string[] {
+    const maxChunks = this.resolveOutputMaxChunks();
+    if (chunks.length <= maxChunks) return chunks;
+
+    const noun = label === 'Page' ? 'pages' : 'parts';
+    if (maxChunks <= 1) {
+      return [
+        `⚠️ Output truncated to reduce Discord flood: ${chunks.length} ${noun} were generated.`,
+      ];
+    }
+
+    const keepCount = Math.max(1, maxChunks - 1);
+    const omitted = Math.max(0, chunks.length - keepCount);
+    return [
+      ...chunks.slice(0, keepCount),
+      `⚠️ Output truncated to reduce Discord flood: omitted ${omitted}/${chunks.length} ${noun}.`,
+    ];
+  }
+
+  private resolveOutputDedupeWindowMs(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_OUTPUT_DEDUPE_WINDOW_MS || '');
+    if (
+      Number.isFinite(fromEnv) &&
+      fromEnv >= DISCORD_OUTPUT_DEDUPE_WINDOW_MS_MIN &&
+      fromEnv <= DISCORD_OUTPUT_DEDUPE_WINDOW_MS_MAX
+    ) {
+      return Math.trunc(fromEnv);
+    }
+    return DISCORD_OUTPUT_DEDUPE_WINDOW_MS_DEFAULT;
+  }
+
+  private normalizeOutputDedupeSignature(content: string): string {
+    return content.replace(/\s+/g, ' ').trim();
+  }
+
+  private pruneOutputDedupeCache(): void {
+    const now = Date.now();
+    const windowMs = this.resolveOutputDedupeWindowMs();
+    const retentionMs = Math.max(windowMs * 2, 30_000);
+    for (const [key, state] of this.outputDedupeByQueue.entries()) {
+      if (now - state.atMs > retentionMs) {
+        this.outputDedupeByQueue.delete(key);
+      }
+    }
+    while (this.outputDedupeByQueue.size > DISCORD_OUTPUT_DEDUPE_CACHE_MAX) {
+      const oldest = this.outputDedupeByQueue.keys().next();
+      if (oldest.done) break;
+      this.outputDedupeByQueue.delete(oldest.value);
+    }
+  }
+
+  private shouldSuppressDuplicateOutput(queueKey: string, content: string): boolean {
+    const windowMs = this.resolveOutputDedupeWindowMs();
+    if (windowMs <= 0) return false;
+    const signature = this.normalizeOutputDedupeSignature(content);
+    if (signature.length === 0) return false;
+    this.pruneOutputDedupeCache();
+
+    const now = Date.now();
+    const current = this.outputDedupeByQueue.get(queueKey);
+    if (current && current.signature === signature && now - current.atMs <= windowMs) {
+      return true;
+    }
+
+    this.outputDedupeByQueue.set(queueKey, {
+      signature,
+      atMs: now,
+    });
+    return false;
   }
 
   private async sendSplitText(
@@ -1118,11 +1405,15 @@ export class DiscordClient implements MessagingClient {
     content: string,
     label: 'Part' | 'Page',
   ): Promise<void> {
-    const chunks = this.splitForSend(content).map((chunk) => chunk.trimEnd()).filter((chunk) => chunk.trim().length > 0);
+    const normalized = content.trimEnd();
+    if (normalized.trim().length === 0) return;
+    if (this.shouldSuppressDuplicateOutput(queueKey, normalized)) return;
+    const chunks = this.splitForSend(normalized).map((chunk) => chunk.trimEnd()).filter((chunk) => chunk.trim().length > 0);
     if (chunks.length === 0) return;
     const decorated = this.annotatePagedChunks(chunks, label);
+    const capped = this.capOutputChunks(decorated, label);
     await this.enqueueSend(queueKey, async () => {
-      for (const chunk of decorated) {
+      for (const chunk of capped) {
         await this.sendWithRetry(`text:${queueKey}`, async () => {
           await target.send(this.buildTextSendPayload(chunk));
         });
@@ -1246,15 +1537,48 @@ export class DiscordClient implements MessagingClient {
       }
 
       const textChannel = channel as TextChannel;
+      const estimatedChunks = this.splitForSend(full).length;
+      if (estimatedChunks > this.resolveLongOutputThreadMaxChunks()) {
+        const preview = this.buildLongOutputPreview(full);
+        const condensed = [
+          `🧾 **Long response condensed** (${estimatedChunks} chunks)`,
+          preview ? `Summary: ${preview}` : undefined,
+          'Full payload was truncated to avoid Discord output flood.',
+        ]
+          .filter((line): line is string => typeof line === 'string' && line.length > 0)
+          .join('\n');
+        await this.sendSplitText(
+          channelId,
+          textChannel as { send: (payload: unknown) => Promise<unknown> },
+          condensed,
+          'Part',
+        );
+        return;
+      }
+
+      const cachedThreadId = this.longOutputThreadByChannel.get(channelId);
+      if (cachedThreadId) {
+        const cachedThread = await this.client.channels.fetch(cachedThreadId).catch(() => null);
+        if (cachedThread?.isTextBased()) {
+          await this.sendSplitText(
+            cachedThreadId,
+            cachedThread as { send: (payload: unknown) => Promise<unknown> },
+            full,
+            'Page',
+          );
+          return;
+        }
+        this.longOutputThreadByChannel.delete(channelId);
+      }
+
       const preview = this.buildLongOutputPreview(full);
       let anchor: unknown;
       await this.enqueueSend(channelId, async () => {
         anchor = await this.sendWithRetry(`long-output-anchor:${channelId}`, async () =>
           textChannel.send(
             this.buildTextSendPayload(
-              `🧾 **Long response received**\n` +
-              `Full output was posted in a thread.\n` +
-              `Preview: ${preview}`,
+              `🧾 **Long response moved to thread**\n` +
+              (preview ? `Summary: ${preview}` : 'Open the thread for the full response.'),
             ),
           ),
         );
@@ -1268,6 +1592,7 @@ export class DiscordClient implements MessagingClient {
           reason: 'mudcode long response overflow',
         });
         const threadId = typeof thread?.id === 'string' && thread.id.length > 0 ? thread.id : `${channelId}:long-output-thread`;
+        this.longOutputThreadByChannel.set(channelId, threadId);
         await this.sendSplitText(threadId, thread as { send: (payload: unknown) => Promise<unknown> }, full, 'Page');
       } catch (threadError) {
         console.warn(`Failed to create thread for long output on ${channelId}:`, threadError);
@@ -1322,18 +1647,25 @@ export class DiscordClient implements MessagingClient {
 
   async addReactionToMessage(channelId: string, messageId: string, emoji: string): Promise<void> {
     if (!this.isDiscordSnowflake(messageId)) return;
+    if (this.shouldSuppressReactionAttempt(channelId, messageId)) return;
     try {
       const channel = await this.client.channels.fetch(channelId);
       if (!channel?.isTextBased() || !('messages' in channel)) return;
       const message = await (channel as TextChannel).messages.fetch(messageId);
       await message.react(emoji);
+      this.reactionSuppressionByMessage.delete(this.reactionMessageKey(channelId, messageId));
     } catch (error) {
+      if (this.isUnknownMessageError(error)) {
+        this.markUnknownMessageSuppressed(channelId, messageId, 'add');
+        return;
+      }
       console.warn(`Failed to add reaction ${emoji} on ${channelId}/${messageId}:`, error);
     }
   }
 
   async replaceOwnReactionOnMessage(channelId: string, messageId: string, fromEmoji: string, toEmoji: string): Promise<void> {
     if (!this.isDiscordSnowflake(messageId)) return;
+    if (this.shouldSuppressReactionAttempt(channelId, messageId)) return;
     try {
       const channel = await this.client.channels.fetch(channelId);
       if (!channel?.isTextBased() || !('messages' in channel)) return;
@@ -1346,7 +1678,12 @@ export class DiscordClient implements MessagingClient {
       }
 
       await message.react(toEmoji);
+      this.reactionSuppressionByMessage.delete(this.reactionMessageKey(channelId, messageId));
     } catch (error) {
+      if (this.isUnknownMessageError(error)) {
+        this.markUnknownMessageSuppressed(channelId, messageId, 'replace');
+        return;
+      }
       console.warn(`Failed to replace reaction on ${channelId}/${messageId}:`, error);
     }
   }

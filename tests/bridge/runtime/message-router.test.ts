@@ -3,6 +3,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BridgeMessageRouter } from '../../../src/bridge/runtime/message-router.js';
+import { TurnRouteLedger } from '../../../src/bridge/runtime/turn-route-ledger.js';
 import { SkillAutoLinker } from '../../../src/bridge/skills/skill-autolinker.js';
 
 function createProjectState() {
@@ -50,6 +51,57 @@ function createMultiInstanceProjectState() {
         agentType: 'codex',
         tmuxWindow: 'demo-codex-2',
         channelId: 'ch-2',
+        eventHook: false,
+      },
+    },
+  };
+}
+
+function createGeminiProjectState() {
+  const now = new Date();
+  return {
+    projectName: 'demo',
+    projectPath: '/tmp/demo',
+    tmuxSession: 'agent-demo',
+    agents: { gemini: true },
+    discordChannels: { gemini: 'ch-1' },
+    createdAt: now,
+    lastActive: now,
+    instances: {
+      gemini: {
+        instanceId: 'gemini',
+        agentType: 'gemini',
+        tmuxWindow: 'demo-gemini',
+        channelId: 'ch-1',
+        eventHook: false,
+      },
+    },
+  };
+}
+
+function createGeminiWithCodexProjectState() {
+  const now = new Date();
+  return {
+    projectName: 'demo',
+    projectPath: '/tmp/demo',
+    tmuxSession: 'agent-demo',
+    agents: { gemini: true, codex: true },
+    discordChannels: { gemini: 'ch-1', codex: 'ch-codex' },
+    createdAt: now,
+    lastActive: now,
+    instances: {
+      gemini: {
+        instanceId: 'gemini',
+        agentType: 'gemini',
+        tmuxWindow: 'demo-gemini',
+        channelId: 'ch-1',
+        eventHook: false,
+      },
+      codex: {
+        instanceId: 'codex',
+        agentType: 'codex',
+        tmuxWindow: 'demo-codex',
+        channelId: 'ch-codex',
         eventHook: false,
       },
     },
@@ -118,6 +170,19 @@ describe('BridgeMessageRouter (codex)', () => {
     delete process.env.AGENT_DISCORD_ORCHESTRATOR_MANUAL_COMMANDS;
     delete process.env.AGENT_DISCORD_ORCHESTRATOR_DELEGATION_CONTRACT_MODE;
     delete process.env.AGENT_DISCORD_ORCHESTRATOR_SUPERVISOR_GUARD;
+    delete process.env.AGENT_DISCORD_GEMINI_PREFLIGHT_ENABLED;
+    delete process.env.AGENT_DISCORD_GEMINI_PREFLIGHT_MODEL;
+    delete process.env.AGENT_DISCORD_GEMINI_PREFLIGHT_CACHE_TTL_MS;
+    delete process.env.AGENT_DISCORD_TMUX_DEFER_MISSING_ENABLED;
+    delete process.env.AGENT_DISCORD_TMUX_DEFER_MISSING_RETRY_BASE_MS;
+    delete process.env.AGENT_DISCORD_TMUX_DEFER_MISSING_RETRY_MAX_MS;
+    delete process.env.AGENT_DISCORD_TMUX_DEFER_MISSING_RETRY_MAX_ATTEMPTS;
+    delete process.env.AGENT_DISCORD_TMUX_DEFER_MISSING_MAX_QUEUE;
+    delete process.env.AGENT_DISCORD_TMUX_DEFER_MISSING_MAX_AGE_MS;
+    delete process.env.AGENT_DISCORD_BACKGROUND_CLI_SCHEDULE_COOLDOWN_MS;
+    delete process.env.AGENT_DISCORD_INPUT_DEDUPE_MESSAGE_WINDOW_MS;
+    delete process.env.AGENT_DISCORD_INPUT_DEDUPE_SIGNATURE_WINDOW_MS;
+    delete process.env.AGENT_DISCORD_INPUT_DEDUPE_MAX;
     for (const dir of tempDirs.splice(0)) {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -216,6 +281,312 @@ describe('BridgeMessageRouter (codex)', () => {
     expect(messaging.sendToChannel).not.toHaveBeenCalled();
     expect(pendingTracker.markError).not.toHaveBeenCalled();
     expect(pendingTracker.markRetry).not.toHaveBeenCalled();
+  });
+
+  it('skips duplicate inbound dispatch when the same messageId is delivered twice', async () => {
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_INPUT_DEDUPE_MESSAGE_WINDOW_MS = '600000';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', 'same message', 'demo', 'ch-1', 'msg-dup-1', 'codex');
+    await callback('codex', 'same message', 'demo', 'ch-1', 'msg-dup-1', 'codex');
+
+    expect(tmux.typeKeysToWindow).toHaveBeenCalledTimes(1);
+    expect(tmux.sendEnterToWindow).toHaveBeenCalledTimes(1);
+    expect(pendingTracker.markPending).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips duplicate slash/control-like dispatch without messageId within signature window', async () => {
+    process.env.AGENT_DISCORD_INPUT_DEDUPE_SIGNATURE_WINDOW_MS = '60000';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    const context = {
+      sourceChannelId: 'ch-1',
+      routeChannelId: 'ch-1',
+      authorId: 'u-1',
+      conversationKey: 'discord:channel:ch-1:author:u-1',
+    };
+    await callback('codex', '/retry', 'demo', 'ch-1', undefined, 'codex', undefined, context as any);
+    await callback('codex', '/retry', 'demo', 'ch-1', undefined, 'codex', undefined, context as any);
+
+    const warnings = messaging.sendToChannel.mock.calls
+      .map((args: unknown[]) => String(args[1] || ''))
+      .filter((line) => line.includes('No previous prompt found'));
+    expect(warnings).toHaveLength(1);
+  });
+
+  it('falls back to codex when gemini preflight fails', async () => {
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_GEMINI_PREFLIGHT_MODEL = 'pro 3.1';
+
+    const geminiModelProbe = vi.fn().mockResolvedValue({
+      ok: false,
+      reason: 'ModelNotFoundError',
+    });
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createGeminiWithCodexProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      geminiModelProbe,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('gemini', 'route this', 'demo', 'ch-1', 'msg-1', 'gemini');
+
+    expect(geminiModelProbe).toHaveBeenCalledWith('pro 3.1');
+    expect(tmux.typeKeysToWindow).toHaveBeenCalledWith('agent-demo', 'demo-codex', 'route this', 'codex');
+    expect(tmux.sendEnterToWindow).toHaveBeenCalledWith('agent-demo', 'demo-codex', 'codex');
+    expect(pendingTracker.markPending).toHaveBeenCalledWith('demo', 'codex', 'ch-1', 'msg-1', 'codex', 'route this');
+    expect(messaging.sendToChannel).toHaveBeenCalledWith(
+      'ch-1',
+      expect.stringContaining('Routed this turn to codex instance `codex` automatically'),
+    );
+  });
+
+  it('returns guidance when gemini preflight fails and codex fallback is unavailable', async () => {
+    const geminiModelProbe = vi.fn().mockResolvedValue({
+      ok: false,
+      reason: 'ModelNotFoundError',
+    });
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('gemini'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createGeminiProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      geminiModelProbe,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('gemini', 'hello gemini', 'demo', 'ch-1', 'msg-1', 'gemini');
+
+    expect(geminiModelProbe).toHaveBeenCalledWith('pro 3.1');
+    expect(messaging.sendToChannel).toHaveBeenCalledWith(
+      'ch-1',
+      expect.stringContaining('No codex instance is available in this project'),
+    );
+    expect(tmux.typeKeysToWindow).not.toHaveBeenCalled();
+    expect(tmux.sendKeysToWindow).not.toHaveBeenCalled();
+    expect(pendingTracker.markPending).not.toHaveBeenCalled();
+  });
+
+  it('caches gemini preflight probe result for configured ttl', async () => {
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_GEMINI_PREFLIGHT_CACHE_TTL_MS = '60000';
+
+    const geminiModelProbe = vi.fn().mockResolvedValue({
+      ok: false,
+      reason: 'ModelNotFoundError',
+    });
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createGeminiWithCodexProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      geminiModelProbe,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('gemini', 'first', 'demo', 'ch-1', 'msg-1', 'gemini');
+    await callback('gemini', 'second', 'demo', 'ch-1', 'msg-2', 'gemini');
+
+    expect(geminiModelProbe).toHaveBeenCalledTimes(1);
+    expect(tmux.typeKeysToWindow).toHaveBeenCalledTimes(2);
+    expect(tmux.typeKeysToWindow).toHaveBeenNthCalledWith(1, 'agent-demo', 'demo-codex', 'first', 'codex');
+    expect(tmux.typeKeysToWindow).toHaveBeenNthCalledWith(2, 'agent-demo', 'demo-codex', 'second', 'codex');
+  });
+
+  it('skips gemini preflight when disabled via env', async () => {
+    process.env.AGENT_DISCORD_GEMINI_PREFLIGHT_ENABLED = '0';
+
+    const geminiModelProbe = vi.fn().mockResolvedValue({
+      ok: false,
+      reason: 'ModelNotFoundError',
+    });
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('gemini'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createGeminiProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      geminiModelProbe,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('gemini', 'hello', 'demo', 'ch-1', 'msg-1', 'gemini');
+
+    expect(geminiModelProbe).not.toHaveBeenCalled();
+    expect(tmux.sendKeysToWindow).toHaveBeenCalledWith('agent-demo', 'demo-gemini', 'hello', 'gemini');
+    expect(messaging.sendToChannel).not.toHaveBeenCalledWith(
+      'ch-1',
+      expect.stringContaining('Gemini preflight failed'),
+    );
   });
 
   it('emits codex session.start hook after successful codex submit', async () => {
@@ -333,6 +704,178 @@ describe('BridgeMessageRouter (codex)', () => {
       text: 'tmux write failed',
     });
     expect(pendingTracker.markError).toHaveBeenCalledWith('demo', 'codex', 'codex', 'tail');
+  });
+
+  it('queues deferred retry when tmux target is missing', async () => {
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_TMUX_DEFER_MISSING_ENABLED = '1';
+    process.env.AGENT_DISCORD_TMUX_DEFER_MISSING_RETRY_BASE_MS = '10000';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn().mockImplementation(() => {
+        throw new Error("can't find window: demo-codex");
+      }),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+      windowExists: vi.fn().mockReturnValue(false),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+    const eventHookClient = {
+      enabled: true,
+      post: vi.fn().mockResolvedValue(true),
+      emitCodexStart: vi.fn().mockResolvedValue(true),
+      emitCodexProgress: vi.fn().mockResolvedValue(true),
+      emitCodexFinal: vi.fn().mockResolvedValue(true),
+      emitCodexError: vi.fn().mockResolvedValue(true),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      eventHookClient,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', 'recover me', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    expect(pendingTracker.markRetry).toHaveBeenCalledWith('demo', 'codex', 'codex', 'tail');
+    expect(pendingTracker.markError).not.toHaveBeenCalled();
+    expect(eventHookClient.emitCodexError).not.toHaveBeenCalled();
+    expect(messaging.sendToChannel).toHaveBeenCalledWith(
+      'ch-1',
+      expect.stringContaining('queued your message for automatic retry'),
+    );
+  });
+
+  it('suppresses duplicate deferred-retry queue notice for same queued turn', async () => {
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_TMUX_DEFER_MISSING_ENABLED = '1';
+    process.env.AGENT_DISCORD_TMUX_DEFER_MISSING_RETRY_BASE_MS = '10000';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn().mockImplementation(() => {
+        throw new Error("can't find window: demo-codex");
+      }),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+      windowExists: vi.fn().mockReturnValue(false),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', 'recover me', 'demo', 'ch-1', 'msg-1', 'codex');
+    await callback('codex', 'recover me', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    const queuedNotices = messaging.sendToChannel.mock.calls.filter((call: unknown[]) =>
+      String(call[1] || '').includes('queued your message for automatic retry'),
+    );
+    expect(queuedNotices).toHaveLength(1);
+  });
+
+  it('defers codex dispatching stage to event hook when instance uses event hook', async () => {
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const project = createProjectState();
+    (project.instances.codex as any).eventHook = true;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(project),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+    const eventHookClient = {
+      enabled: true,
+      post: vi.fn().mockResolvedValue(true),
+      emitCodexStart: vi.fn().mockResolvedValue(true),
+      emitCodexProgress: vi.fn().mockResolvedValue(true),
+      emitCodexFinal: vi.fn().mockResolvedValue(true),
+      emitCodexError: vi.fn().mockResolvedValue(true),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      eventHookClient,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', 'defer dispatching', 'demo', 'ch-1', 'msg-evt-1', 'codex');
+
+    expect(eventHookClient.emitCodexStart).toHaveBeenCalledWith({
+      projectName: 'demo',
+      instanceId: 'codex',
+      turnId: 'msg-evt-1',
+      channelId: 'ch-1',
+    });
+    expect(pendingTracker.markDispatching).not.toHaveBeenCalled();
   });
 
   it('auto-links AGENTS skill hint into codex prompt when applicable', async () => {
@@ -1182,6 +1725,218 @@ describe('BridgeMessageRouter (codex)', () => {
     expect(tmux.typeKeysToWindow).not.toHaveBeenCalled();
   });
 
+  it('returns categorized runtime command guide via /help and /commands', async () => {
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', '/help', 'demo', 'ch-1', 'msg-1', 'codex');
+    await callback('codex', '/commands', 'demo', 'ch-1', 'msg-2', 'codex');
+
+    const first = String(messaging.sendToChannel.mock.calls[0]?.[1] || '');
+    const second = String(messaging.sendToChannel.mock.calls[1]?.[1] || '');
+    expect(first).toContain('Runtime Commands');
+    expect(first).toContain('General:');
+    expect(first).toContain('/send <text>');
+    expect(first).toContain('/help all');
+    expect(first).not.toContain('/smoke');
+    expect(first).not.toContain('/orchestrator status|run|spawn|remove|enable|disable');
+    expect(second).toContain('Runtime Commands');
+    expect(tmux.typeKeysToWindow).not.toHaveBeenCalled();
+  });
+
+  it('returns advanced runtime command guide via /help all', async () => {
+    process.env.AGENT_DISCORD_ORCHESTRATOR_MANUAL_COMMANDS = '0';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', '/help all', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    const guide = String(messaging.sendToChannel.mock.calls[0]?.[1] || '');
+    expect(guide).toContain('Toggles (advanced): `/orchestrator enable|disable`');
+    expect(guide).toContain('/orchestrator status|run|spawn|remove|enable|disable');
+    expect(guide).toContain('/subagents list|send|steer|spawn|info|log|kill');
+    expect(guide).toContain('AGENT_DISCORD_ORCHESTRATOR_MANUAL_COMMANDS=1');
+    expect(tmux.typeKeysToWindow).not.toHaveBeenCalled();
+  });
+
+  it('forwards plain text by default and treats /chat as a normal prompt', async () => {
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+      sessionExistsFull: vi.fn().mockReturnValue(true),
+      windowExists: vi.fn().mockReturnValue(true),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      getPendingDepth: vi.fn().mockReturnValue(0),
+      getRuntimeSnapshot: vi.fn().mockReturnValue({
+        pendingDepth: 0,
+        lastTerminalStage: 'completed',
+        lastTerminalAgeMs: 500,
+      }),
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', 'plain default on', 'demo', 'ch-1', 'msg-0', 'codex');
+    await callback('codex', '/chat toggle', 'demo', 'ch-1', 'msg-1', 'codex');
+    await callback('codex', '/send slash still works', 'demo', 'ch-1', 'msg-2', 'codex');
+    await callback('codex', '/health', 'demo', 'ch-1', 'msg-3', 'codex');
+
+    const sentMessages = messaging.sendToChannel.mock.calls.map((call: unknown[]) => String(call[1] || ''));
+    expect(sentMessages.some((line) => line.includes('Mudcode Health'))).toBe(true);
+    expect(tmux.typeKeysToWindow).toHaveBeenCalledTimes(3);
+    expect(tmux.typeKeysToWindow).toHaveBeenNthCalledWith(
+      1,
+      'agent-demo',
+      'demo-codex',
+      expect.stringContaining('plain default on'),
+      'codex',
+    );
+    expect(tmux.typeKeysToWindow).toHaveBeenNthCalledWith(
+      2,
+      'agent-demo',
+      'demo-codex',
+      expect.stringContaining('/chat toggle'),
+      'codex',
+    );
+    expect(tmux.typeKeysToWindow).toHaveBeenNthCalledWith(
+      3,
+      'agent-demo',
+      'demo-codex',
+      expect.stringContaining('slash still works'),
+      'codex',
+    );
+  });
+
+  it('rejects /send without text with usage guidance', async () => {
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', '/send', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    expect(messaging.sendToChannel).toHaveBeenCalledWith('ch-1', expect.stringContaining('Usage: `/send <text>`'));
+    expect(tmux.typeKeysToWindow).not.toHaveBeenCalled();
+    expect(pendingTracker.markPending).not.toHaveBeenCalled();
+  });
+
   it('runs /doctor and sends summary to channel', async () => {
     const { messaging, getCallback } = createMessagingMock();
     const tmux = {
@@ -1368,11 +2123,83 @@ describe('BridgeMessageRouter (codex)', () => {
     await callback('codex', '/repair', 'demo', 'ch-1', 'msg-1', 'codex');
 
     expect(doctorRunner).toHaveBeenCalledWith({ fix: true });
-    expect(backgroundCliRunner).toHaveBeenCalledWith(['daemon', 'restart'], 500);
+    expect(backgroundCliRunner).toHaveBeenCalledWith(['repair', 'restart-only'], 500);
     const sentMessages = messaging.sendToChannel.mock.calls.map((call: unknown[]) => String(call[1] || ''));
     expect(sentMessages.some((line) => line.includes('Running doctor auto-fix'))).toBe(true);
     expect(sentMessages.some((line) => line.includes('Scheduling daemon restart after repair'))).toBe(true);
     expect(tmux.typeKeysToWindow).not.toHaveBeenCalled();
+  });
+
+  it('runs mapping recovery preflight during /repair before doctor/restart flow', async () => {
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createMultiInstanceProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      getRuntimeSnapshot: vi.fn().mockImplementation((_projectName: string, _agentType: string, instanceId?: string) => (
+        instanceId === 'codex-2'
+          ? { pendingDepth: 1, oldestAgeMs: 2 * 60 * 60 * 1000, oldestStage: 'processing' }
+          : { pendingDepth: 0 }
+      )),
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+    const doctorRunner = vi.fn().mockResolvedValue({
+      ok: true,
+      fixed: true,
+      issues: [],
+      fixes: [{ code: 'save-config-threshold', message: 'saved 20000' }],
+      summary: {
+        configPath: '/tmp/config.json',
+        storedThreshold: 20000,
+        envThresholdRaw: undefined,
+        effectiveThreshold: 20000,
+      },
+    });
+    const backgroundCliRunner = vi.fn();
+    const reloadChannelMappings = vi.fn();
+    const turnRouteLedger = new TurnRouteLedger();
+    const clearProjectSpy = vi.spyOn(turnRouteLedger, 'clearProject');
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      doctorRunner,
+      backgroundCliRunner,
+      reloadChannelMappings,
+      turnRouteLedger,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', '/repair', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    expect(reloadChannelMappings).toHaveBeenCalledTimes(1);
+    expect(clearProjectSpy).toHaveBeenCalledWith('demo');
+    expect(pendingTracker.clearPendingForInstance).toHaveBeenCalledWith('demo', 'codex', 'codex-2');
+    expect(doctorRunner).toHaveBeenCalledWith({ fix: true });
+    expect(backgroundCliRunner).toHaveBeenCalledWith(['repair', 'restart-only'], 500);
+    expect(messaging.sendToChannel).toHaveBeenCalledWith(
+      'ch-1',
+      expect.stringContaining('Mapping recovery preflight'),
+    );
   });
 
   it('does not restart daemon when /repair doctor step fails', async () => {
@@ -1518,7 +2345,7 @@ describe('BridgeMessageRouter (codex)', () => {
     await callback('codex', '/repair restart-only', 'demo', 'ch-1', 'msg-1', 'codex');
 
     expect(doctorRunner).not.toHaveBeenCalled();
-    expect(backgroundCliRunner).toHaveBeenCalledWith(['daemon', 'restart'], 500);
+    expect(backgroundCliRunner).toHaveBeenCalledWith(['repair', 'restart-only'], 500);
   });
 
   it('supports verify repair mode', async () => {
@@ -1614,8 +2441,242 @@ describe('BridgeMessageRouter (codex)', () => {
     await callback('codex', '/repair deep', 'demo', 'ch-1', 'msg-1', 'codex');
 
     expect(doctorRunner).toHaveBeenCalledWith({ fix: true });
-    expect(backgroundCliRunner).toHaveBeenNthCalledWith(1, ['daemon', 'restart'], 500);
+    expect(backgroundCliRunner).toHaveBeenNthCalledWith(1, ['repair', 'restart-only'], 500);
     expect(backgroundCliRunner).toHaveBeenNthCalledWith(2, ['repair', 'verify', '--project', 'demo'], 5000);
+  });
+
+  it('clears remembered routes for project when /repair mapping reload succeeds', async () => {
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createMultiInstanceProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+    const reloadChannelMappings = vi.fn();
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      reloadChannelMappings,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback(
+      'codex',
+      '/send seed target',
+      'demo',
+      'ch-2',
+      'msg-route-seed',
+      'codex-2',
+      undefined,
+      {
+        platform: 'discord',
+        sourceChannelId: 'ch-2',
+        routeChannelId: 'ch-2',
+        authorId: 'u-route',
+        conversationKey: 'discord:channel:ch-1:author:u-route',
+      },
+    );
+    await callback('codex', '/repair mapping', 'demo', 'ch-1', 'msg-route-repair', 'codex');
+    await callback(
+      'codex',
+      '/send follow-up',
+      'demo',
+      'ch-1',
+      'msg-route-follow-up',
+      undefined,
+      undefined,
+      {
+        platform: 'discord',
+        sourceChannelId: 'ch-1',
+        routeChannelId: 'ch-1',
+        authorId: 'u-route',
+        conversationKey: 'discord:channel:ch-1:author:u-route',
+        replyToMessageId: 'msg-route-seed',
+      },
+    );
+
+    expect(reloadChannelMappings).toHaveBeenCalledTimes(1);
+    expect(messaging.sendToChannel).toHaveBeenCalledWith(
+      'ch-1',
+      '✅ Reloaded channel mappings from state (`/repair mapping`).',
+    );
+    expect(tmux.typeKeysToWindow).toHaveBeenNthCalledWith(1, 'agent-demo', 'demo-codex-2', 'seed target', 'codex');
+    expect(tmux.typeKeysToWindow).toHaveBeenNthCalledWith(2, 'agent-demo', 'demo-codex', 'follow-up', 'codex');
+    expect(pendingTracker.markRouteResolved).toHaveBeenLastCalledWith('demo', 'codex', 'codex', undefined);
+  });
+
+  it('clears stale pending and turn-route ledger entries when /repair mapping runs', async () => {
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createMultiInstanceProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      getRuntimeSnapshot: vi.fn().mockImplementation((_projectName: string, _agentType: string, instanceId?: string) => (
+        instanceId === 'codex-2'
+          ? { pendingDepth: 1, oldestAgeMs: 2 * 60 * 60 * 1000, oldestStage: 'processing' }
+          : { pendingDepth: 0 }
+      )),
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+    const reloadChannelMappings = vi.fn();
+    const turnRouteLedger = new TurnRouteLedger();
+    const clearProjectSpy = vi.spyOn(turnRouteLedger, 'clearProject').mockReturnValue(3);
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      reloadChannelMappings,
+      turnRouteLedger,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', '/repair mapping', 'demo', 'ch-1', 'msg-route-repair-cleanup', 'codex');
+
+    expect(reloadChannelMappings).toHaveBeenCalledTimes(1);
+    expect(clearProjectSpy).toHaveBeenCalledWith('demo');
+    expect(pendingTracker.clearPendingForInstance).toHaveBeenCalledWith('demo', 'codex', 'codex-2');
+    expect(messaging.sendToChannel).toHaveBeenCalledWith(
+      'ch-1',
+      '✅ Reloaded channel mappings from state (`/repair mapping`).',
+    );
+    expect(messaging.sendToChannel).toHaveBeenCalledWith(
+      'ch-1',
+      expect.stringContaining('Mapping recovery details'),
+    );
+  });
+
+  it('warns when /repair mapping reload handler is missing', async () => {
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', '/repair mapping', 'demo', 'ch-1', 'msg-route-repair-missing', 'codex');
+
+    expect(messaging.sendToChannel).toHaveBeenCalledWith(
+      'ch-1',
+      '⚠️ Mapping reload is not available in this runtime.',
+    );
+    expect(tmux.typeKeysToWindow).not.toHaveBeenCalled();
+  });
+
+  it('warns when /repair mapping reload handler throws', async () => {
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+    const reloadChannelMappings = vi.fn(() => {
+      throw new Error('mapping reload failed');
+    });
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      reloadChannelMappings,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', '/repair mapping', 'demo', 'ch-1', 'msg-route-repair-throw', 'codex');
+
+    expect(reloadChannelMappings).toHaveBeenCalledTimes(1);
+    expect(messaging.sendToChannel).toHaveBeenCalledWith(
+      'ch-1',
+      '⚠️ Failed to reload channel mappings: mapping reload failed',
+    );
+    expect(tmux.typeKeysToWindow).not.toHaveBeenCalled();
   });
 
   it('shows usage for invalid repair mode', async () => {
@@ -1793,6 +2854,52 @@ describe('BridgeMessageRouter (codex)', () => {
       expect.stringContaining('Scheduling daemon restart'),
     );
     expect(tmux.typeKeysToWindow).not.toHaveBeenCalled();
+  });
+
+  it('deduplicates repeated /daemon-restart scheduling within cooldown window', async () => {
+    process.env.AGENT_DISCORD_BACKGROUND_CLI_SCHEDULE_COOLDOWN_MS = '60000';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+    const backgroundCliRunner = vi.fn();
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      backgroundCliRunner,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', '/daemon-restart', 'demo', 'ch-1', 'msg-1', 'codex');
+    await callback('codex', '/daemon-restart', 'demo', 'ch-1', 'msg-2', 'codex');
+
+    expect(backgroundCliRunner).toHaveBeenCalledTimes(1);
+    const sentMessages = messaging.sendToChannel.mock.calls.map((call: unknown[]) => String(call[1] || ''));
+    expect(sentMessages.some((line) => line.includes('already scheduled'))).toBe(true);
   });
 
   it('blocks manual /orchestrator commands when manual mode is disabled', async () => {
@@ -3367,6 +4474,60 @@ describe('BridgeMessageRouter (codex)', () => {
     );
   });
 
+  it('adds guardrail marker for oversized /subagents log output', async () => {
+    const { messaging, getCallback } = createMessagingMock();
+    const longLine = `payload:${'z'.repeat(5000)}`;
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      capturePaneFromWindow: vi.fn().mockReturnValue(longLine),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue({
+        ...createMultiInstanceProjectState(),
+        orchestrator: {
+          enabled: true,
+          supervisorInstanceId: 'codex',
+          workerInstanceIds: ['codex-2'],
+          workerFinalVisibility: 'hidden',
+        },
+      }),
+      setProject: vi.fn(),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    process.env.AGENT_DISCORD_ORCHESTRATOR_MANUAL_COMMANDS = '1';
+    await callback('codex', '/subagents log codex-2 40', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    const sent = messaging.sendToChannel.mock.calls.map((call: any[]) => String(call[1] ?? '')).join('\n');
+    expect(sent).toContain('truncated by subagents-log guardrail');
+    expect(sent).toContain('line truncated +');
+    expect(sent).not.toContain(longLine);
+  });
+
   it('removes all workers via /subagents kill all alias', async () => {
     const { messaging, getCallback } = createMessagingMock();
     const tmux = {
@@ -3971,6 +5132,50 @@ describe('BridgeMessageRouter (codex)', () => {
     );
   });
 
+  it('adds guardrail marker for oversized /snapshot output lines', async () => {
+    const { messaging, getCallback } = createMessagingMock();
+    const longLine = `trace:${'x'.repeat(5000)}`;
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+      capturePaneFromWindow: vi.fn().mockReturnValue(longLine),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', '/snapshot', 'demo', 'ch-1', 'msg-1', 'codex');
+
+    const sent = messaging.sendToChannel.mock.calls.map((call: any[]) => String(call[1] ?? '')).join('\n');
+    expect(sent).toContain('truncated by snapshot guardrail');
+    expect(sent).toContain('line truncated +');
+    expect(sent).not.toContain(longLine);
+  });
+
   it('treats codex as working when pane shows "Esc to interrupt" even if queue is empty', async () => {
     const { messaging, getCallback } = createMessagingMock();
     const tmux = {
@@ -4107,7 +5312,7 @@ describe('BridgeMessageRouter (codex)', () => {
     const callback = getCallback();
     await callback(
       'codex',
-      'first',
+      '/send first',
       'demo',
       'ch-2',
       'msg-1',
@@ -4123,7 +5328,7 @@ describe('BridgeMessageRouter (codex)', () => {
     );
     await callback(
       'codex',
-      'follow-up',
+      '/send follow-up',
       'demo',
       'ch-1',
       'msg-2',
@@ -4140,6 +5345,279 @@ describe('BridgeMessageRouter (codex)', () => {
 
     expect(tmux.typeKeysToWindow).toHaveBeenCalledWith('agent-demo', 'demo-codex-2', 'follow-up', 'codex');
     expect(pendingTracker.markRouteResolved).toHaveBeenLastCalledWith('demo', 'codex', 'codex-2', 'memory');
+  });
+
+  it('prefers incoming routeChannelId over stale instance channel mapping for replies', async () => {
+    const staleProject = createProjectState();
+    staleProject.instances.codex.channelId = 'ch-stale';
+    staleProject.discordChannels.codex = 'ch-stale';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(staleProject),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback(
+      'codex',
+      '/send fallback target channel',
+      'demo',
+      'ch-fallback',
+      'msg-route-fallback-1',
+      undefined,
+      undefined,
+      {
+        platform: 'discord',
+        sourceChannelId: 'ch-fallback',
+        routeChannelId: 'ch-fallback',
+        authorId: 'u-route',
+        conversationKey: 'discord:channel:ch-fallback:author:u-route',
+      },
+    );
+
+    expect(pendingTracker.markPending).toHaveBeenCalledWith(
+      'demo',
+      'codex',
+      'ch-fallback',
+      'msg-route-fallback-1',
+      'codex',
+      'fallback target channel',
+    );
+  });
+
+  it('recovers unresolved mapping after one auto-reload and continues delivery', async () => {
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+
+    const unresolvedProject: any = createProjectState();
+    unresolvedProject.agents = {};
+    unresolvedProject.discordChannels = {};
+    unresolvedProject.instances = {};
+
+    const resolvedProject = createProjectState();
+    const reloadChannelMappings = vi.fn();
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValueOnce(unresolvedProject).mockReturnValue(resolvedProject),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      reloadChannelMappings,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', 'self-heal me', 'demo', 'ch-1', 'msg-self-heal-1', 'codex');
+
+    expect(reloadChannelMappings).toHaveBeenCalledTimes(1);
+    expect(stateManager.getProject).toHaveBeenCalledTimes(2);
+    expect(tmux.typeKeysToWindow).toHaveBeenCalledWith('agent-demo', 'demo-codex', 'self-heal me', 'codex');
+    expect(tmux.sendEnterToWindow).toHaveBeenCalledWith('agent-demo', 'demo-codex', 'codex');
+    expect(messaging.sendToChannel).not.toHaveBeenCalledWith(
+      'ch-1',
+      '⚠️ Agent instance mapping not found for this channel',
+    );
+  });
+
+  it('keeps warning path when unresolved mapping stays missing after auto-reload', async () => {
+    const unresolvedProject: any = createProjectState();
+    unresolvedProject.agents = {};
+    unresolvedProject.discordChannels = {};
+    unresolvedProject.instances = {};
+    const reloadChannelMappings = vi.fn();
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(unresolvedProject),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      reloadChannelMappings,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', 'still unresolved', 'demo', 'ch-1', 'msg-self-heal-2', 'codex');
+
+    expect(reloadChannelMappings).toHaveBeenCalledTimes(1);
+    expect(stateManager.getProject).toHaveBeenCalledTimes(2);
+    expect(messaging.sendToChannel).toHaveBeenCalledWith(
+      'ch-1',
+      '⚠️ Agent instance mapping not found for this channel',
+    );
+    expect(tmux.typeKeysToWindow).not.toHaveBeenCalled();
+  });
+
+  it('keeps unresolved warning path when auto-reload throws', async () => {
+    const unresolvedProject: any = createProjectState();
+    unresolvedProject.agents = {};
+    unresolvedProject.discordChannels = {};
+    unresolvedProject.instances = {};
+    const reloadChannelMappings = vi.fn(() => {
+      throw new Error('mapping reload failed');
+    });
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(unresolvedProject),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      reloadChannelMappings,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await expect(callback('codex', 'reload throws', 'demo', 'ch-1', 'msg-self-heal-throw', 'codex')).resolves.toBeUndefined();
+
+    expect(reloadChannelMappings).toHaveBeenCalledTimes(1);
+    expect(stateManager.getProject).toHaveBeenCalledTimes(2);
+    expect(messaging.sendToChannel).toHaveBeenCalledTimes(1);
+    expect(messaging.sendToChannel).toHaveBeenCalledWith(
+      'ch-1',
+      '⚠️ Agent instance mapping not found for this channel',
+    );
+    expect(tmux.typeKeysToWindow).not.toHaveBeenCalled();
+    expect(tmux.sendEnterToWindow).not.toHaveBeenCalled();
+  });
+
+  it('calls auto-reload only once per unresolved event', async () => {
+    const unresolvedProject: any = createProjectState();
+    unresolvedProject.agents = {};
+    unresolvedProject.discordChannels = {};
+    unresolvedProject.instances = {};
+    const reloadChannelMappings = vi.fn();
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(unresolvedProject),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+      reloadChannelMappings,
+    });
+    router.register();
+
+    const callback = getCallback();
+    await callback('codex', 'only once', 'demo', 'ch-1', 'msg-self-heal-3', 'codex');
+
+    expect(reloadChannelMappings).toHaveBeenCalledTimes(1);
+    expect(stateManager.getProject).toHaveBeenCalledTimes(2);
   });
 
   it('sends /enter key command to tmux without submitting prompt', async () => {

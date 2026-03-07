@@ -16,11 +16,13 @@ import { cleanCapture, splitForDiscord, splitForSlack } from '../../capture/pars
 import type { CodexIoV2Tracker } from '../events/codex-io-v2.js';
 import type { SkillAutoLinker } from '../skills/skill-autolinker.js';
 import type { AgentEventHookClient } from '../events/agent-event-hook.js';
+import type { TurnRouteLedger } from './turn-route-ledger.js';
 import { spawn } from 'child_process';
 import { createHash } from 'crypto';
 import { mkdirSync, writeFileSync } from 'fs';
 import { join, relative } from 'path';
 import { runDoctor, type DoctorResult } from '../../cli/commands/doctor.js';
+import { perfMetrics } from '../../observability/perf-metrics.js';
 
 export interface OrchestratorWorkerProvisioner {
   spawnCodexWorkers(params: {
@@ -49,9 +51,12 @@ export interface BridgeMessageRouterDeps {
   ioTracker?: CodexIoV2Tracker;
   skillAutoLinker?: SkillAutoLinker;
   eventHookClient?: AgentEventHookClient;
+  turnRouteLedger?: TurnRouteLedger;
+  reloadChannelMappings?: () => void;
   doctorRunner?: (options: { fix?: boolean }) => Promise<DoctorResult>;
   backgroundCliRunner?: (args: string[], delayMs?: number) => void;
   orchestratorWorkerProvisioner?: OrchestratorWorkerProvisioner;
+  geminiModelProbe?: (model: string) => Promise<{ ok: boolean; reason?: string }>;
 }
 
 type RouteResolutionSource = 'mapped' | 'reply' | 'conversation' | 'channel' | 'primary';
@@ -73,10 +78,19 @@ type SpecialKeyCommandParse =
   | { kind: 'valid'; command: SpecialKeyCommand };
 
 type SessionControlCommand = 'q' | 'qw';
+type RuntimeHelpCommandParse =
+  | { kind: 'none' }
+  | { kind: 'invalid'; message: string }
+  | { kind: 'show'; includeAll: boolean };
+type SendCommandParse =
+  | { kind: 'none' }
+  | { kind: 'invalid'; message: string }
+  | { kind: 'command'; text: string };
 type MaintenanceCommand =
   | { kind: 'doctor'; fix: boolean }
   | { kind: 'update'; git: boolean }
   | { kind: 'daemon-restart' }
+  | { kind: 'repair-mapping' }
   | { kind: 'repair'; mode: 'default' | 'doctor-only' | 'restart-only' | 'verify' | 'deep' }
   | { kind: 'orchestrator-status' }
   | {
@@ -154,6 +168,44 @@ interface OrchestratorTaskPacketParams {
   prompt: string;
 }
 
+interface GeminiModelProbeResult {
+  ok: boolean;
+  reason?: string;
+}
+
+interface GeminiModelPreflightCacheEntry extends GeminiModelProbeResult {
+  checkedAtMs: number;
+  expiresAtMs: number;
+}
+
+interface MappingRecoverySummary {
+  mappingReloaded: boolean;
+  clearedTurnRouteEntries: number;
+  stalePendingClearedInstanceIds: string[];
+}
+
+interface DeferredTmuxDelivery {
+  queueKey: string;
+  projectName: string;
+  agentType: string;
+  instanceId: string;
+  tmuxSession: string;
+  windowName: string;
+  prompt: string;
+  notifyChannelId: string;
+  commandChannelId: string;
+  turnId?: string;
+  createdAtMs: number;
+  attempts: number;
+  nextAttemptAtMs: number;
+}
+
+type DeferredTmuxEnqueueResult = 'none' | 'new' | 'updated';
+
+type InboundDispatchDedupeEntry = {
+  atMs: number;
+};
+
 export class BridgeMessageRouter {
   private routeByMessageId: Map<string, RouteMemory> = new Map();
   private routeByConversationKey: Map<string, RouteMemory> = new Map();
@@ -164,6 +216,13 @@ export class BridgeMessageRouter {
   private orchestratorQueueByWorker: Map<string, OrchestratorQueuedTask[]> = new Map();
   private orchestratorQueueDrainInFlight = new Set<string>();
   private orchestratorQueueDrainTimerByWorker = new Map<string, ReturnType<typeof setTimeout>>();
+  private geminiModelPreflightCacheByModel = new Map<string, GeminiModelPreflightCacheEntry>();
+  private geminiModelPreflightInFlightByModel = new Map<string, Promise<GeminiModelProbeResult>>();
+  private deferredTmuxDeliveries: DeferredTmuxDelivery[] = [];
+  private deferredTmuxDrainTimer?: ReturnType<typeof setTimeout>;
+  private deferredTmuxDrainInFlight = false;
+  private backgroundCliScheduleByKey = new Map<string, number>();
+  private inboundDispatchDedupeByKey = new Map<string, InboundDispatchDedupeEntry>();
   private readonly maxMessageRoutes = 4000;
   private readonly maxConversationRoutes = 2000;
   private readonly maxPromptMemory = 2000;
@@ -179,6 +238,397 @@ export class BridgeMessageRouter {
     }
   }
 
+  private resolveDeferredTmuxRetryEnabled(): boolean {
+    const raw = process.env.AGENT_DISCORD_TMUX_DEFER_MISSING_ENABLED;
+    if (!raw) return true;
+    const normalized = raw.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+    return true;
+  }
+
+  private resolveDeferredTmuxRetryBaseMs(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_TMUX_DEFER_MISSING_RETRY_BASE_MS || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 250 && fromEnv <= 60_000) {
+      return Math.trunc(fromEnv);
+    }
+    return 2500;
+  }
+
+  private resolveDeferredTmuxRetryMaxMs(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_TMUX_DEFER_MISSING_RETRY_MAX_MS || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 500 && fromEnv <= 120_000) {
+      return Math.trunc(fromEnv);
+    }
+    return 15_000;
+  }
+
+  private resolveDeferredTmuxRetryMaxAttempts(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_TMUX_DEFER_MISSING_RETRY_MAX_ATTEMPTS || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 1 && fromEnv <= 200) {
+      return Math.trunc(fromEnv);
+    }
+    return 24;
+  }
+
+  private resolveDeferredTmuxRetryMaxQueue(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_TMUX_DEFER_MISSING_MAX_QUEUE || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 1 && fromEnv <= 5000) {
+      return Math.trunc(fromEnv);
+    }
+    return 400;
+  }
+
+  private resolveDeferredTmuxRetryMaxAgeMs(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_TMUX_DEFER_MISSING_MAX_AGE_MS || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 10_000 && fromEnv <= 24 * 60 * 60 * 1000) {
+      return Math.trunc(fromEnv);
+    }
+    return 10 * 60 * 1000;
+  }
+
+  private resolveInboundMessageIdDedupeWindowMs(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_INPUT_DEDUPE_MESSAGE_WINDOW_MS || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 0 && fromEnv <= 24 * 60 * 60 * 1000) {
+      return Math.trunc(fromEnv);
+    }
+    return 30 * 60 * 1000;
+  }
+
+  private resolveInboundSignatureDedupeWindowMs(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_INPUT_DEDUPE_SIGNATURE_WINDOW_MS || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 0 && fromEnv <= 60 * 60 * 1000) {
+      return Math.trunc(fromEnv);
+    }
+    return 5_000;
+  }
+
+  private resolveInboundDedupeMaxEntries(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_INPUT_DEDUPE_MAX || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 100 && fromEnv <= 1_000_000) {
+      return Math.trunc(fromEnv);
+    }
+    return 50_000;
+  }
+
+  private pruneInboundDispatchDedupe(nowMs: number): void {
+    if (this.inboundDispatchDedupeByKey.size === 0) return;
+    const messageWindow = this.resolveInboundMessageIdDedupeWindowMs();
+    const signatureWindow = this.resolveInboundSignatureDedupeWindowMs();
+    const retentionMs = Math.max(60_000, Math.max(messageWindow, signatureWindow) * 2);
+    for (const [key, snapshot] of this.inboundDispatchDedupeByKey.entries()) {
+      if (nowMs - snapshot.atMs > retentionMs) {
+        this.inboundDispatchDedupeByKey.delete(key);
+      }
+    }
+    this.pruneOldest(this.inboundDispatchDedupeByKey, this.resolveInboundDedupeMaxEntries());
+  }
+
+  private shouldSkipDuplicateInboundDispatch(params: {
+    projectName: string;
+    agentType: string;
+    channelId: string;
+    content: string;
+    messageId?: string;
+    instanceId?: string;
+    context?: MessageContext;
+  }): boolean {
+    const now = Date.now();
+    this.pruneInboundDispatchDedupe(now);
+
+    const rawMessageId = params.messageId?.trim();
+    if (rawMessageId && rawMessageId.length > 0) {
+      const windowMs = this.resolveInboundMessageIdDedupeWindowMs();
+      if (windowMs <= 0) return false;
+      const key = `msg:${rawMessageId}`;
+      const existing = this.inboundDispatchDedupeByKey.get(key);
+      if (existing && now - existing.atMs <= windowMs) {
+        return true;
+      }
+      this.inboundDispatchDedupeByKey.set(key, { atMs: now });
+      return false;
+    }
+
+    const signatureWindowMs = this.resolveInboundSignatureDedupeWindowMs();
+    if (signatureWindowMs <= 0) return false;
+    const normalizedContent = params.content.replace(/\s+/g, ' ').trim();
+    if (normalizedContent.length === 0) return false;
+    const routeScope = [
+      params.projectName,
+      params.instanceId || params.agentType,
+      params.channelId,
+      params.context?.threadId || '-',
+      params.context?.authorId || '-',
+      params.context?.conversationKey || '-',
+    ].join('|');
+    const digest = createHash('sha1').update(`${routeScope}\u0000${normalizedContent}`).digest('hex').slice(0, 16);
+    const key = `sig:${digest}`;
+    const existing = this.inboundDispatchDedupeByKey.get(key);
+    if (existing && now - existing.atMs <= signatureWindowMs) {
+      return true;
+    }
+    this.inboundDispatchDedupeByKey.set(key, { atMs: now });
+    return false;
+  }
+
+  private resolveBackgroundCliScheduleCooldownMs(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_BACKGROUND_CLI_SCHEDULE_COOLDOWN_MS || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 0 && fromEnv <= 10 * 60 * 1000) {
+      return Math.trunc(fromEnv);
+    }
+    return 15_000;
+  }
+
+  private backgroundCliScheduleKey(args: string[]): string {
+    return args.join('\u0001');
+  }
+
+  private pruneBackgroundCliScheduleCache(now: number): void {
+    if (this.backgroundCliScheduleByKey.size === 0) return;
+    const cooldownMs = this.resolveBackgroundCliScheduleCooldownMs();
+    const retentionMs = Math.max(60_000, cooldownMs * 2);
+    for (const [key, atMs] of this.backgroundCliScheduleByKey.entries()) {
+      if (now - atMs > retentionMs) {
+        this.backgroundCliScheduleByKey.delete(key);
+      }
+    }
+    this.pruneOldest(this.backgroundCliScheduleByKey, 2000);
+  }
+
+  private shouldScheduleBackgroundCli(args: string[]): boolean {
+    const cooldownMs = this.resolveBackgroundCliScheduleCooldownMs();
+    if (cooldownMs <= 0) return true;
+    const now = Date.now();
+    this.pruneBackgroundCliScheduleCache(now);
+    const key = this.backgroundCliScheduleKey(args);
+    const previousAt = this.backgroundCliScheduleByKey.get(key);
+    if (typeof previousAt === 'number' && now - previousAt < cooldownMs) {
+      return false;
+    }
+    this.backgroundCliScheduleByKey.set(key, now);
+    return true;
+  }
+
+  private isMissingTmuxTargetError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /(can't find (window|pane|session)|no such (window|pane|session)|unknown target)/i.test(message);
+  }
+
+  private buildDeferredTmuxQueueKey(params: {
+    projectName: string;
+    instanceId: string;
+    turnId?: string;
+    prompt: string;
+  }): string {
+    const turnId = params.turnId?.trim();
+    if (turnId) return `${params.projectName}:${params.instanceId}:${turnId}`;
+    const digest = createHash('sha1').update(params.prompt).digest('hex').slice(0, 12);
+    return `${params.projectName}:${params.instanceId}:prompt-${digest}`;
+  }
+
+  private scheduleDeferredTmuxDrain(delayMs: number): void {
+    if (this.deferredTmuxDrainTimer) return;
+    const safeDelay = Math.max(0, Math.trunc(delayMs));
+    this.deferredTmuxDrainTimer = setTimeout(() => {
+      this.deferredTmuxDrainTimer = undefined;
+      void this.drainDeferredTmuxDeliveries();
+    }, safeDelay);
+    this.deferredTmuxDrainTimer.unref?.();
+  }
+
+  private enqueueDeferredTmuxDelivery(params: {
+    projectName: string;
+    agentType: string;
+    instanceId: string;
+    tmuxSession: string;
+    windowName: string;
+    prompt: string;
+    notifyChannelId: string;
+    commandChannelId: string;
+    turnId?: string;
+  }): DeferredTmuxEnqueueResult {
+    if (!this.resolveDeferredTmuxRetryEnabled()) return 'none';
+    const normalizedPrompt = params.prompt.trim();
+    if (normalizedPrompt.length === 0) return 'none';
+    const queueKey = this.buildDeferredTmuxQueueKey({
+      projectName: params.projectName,
+      instanceId: params.instanceId,
+      turnId: params.turnId,
+      prompt: normalizedPrompt,
+    });
+    const now = Date.now();
+    const existing = this.deferredTmuxDeliveries.find((entry) => entry.queueKey === queueKey);
+    if (existing) {
+      existing.prompt = normalizedPrompt;
+      existing.tmuxSession = params.tmuxSession;
+      existing.windowName = params.windowName;
+      existing.notifyChannelId = params.notifyChannelId;
+      existing.commandChannelId = params.commandChannelId;
+      existing.nextAttemptAtMs = Math.min(existing.nextAttemptAtMs, now + this.resolveDeferredTmuxRetryBaseMs());
+      this.scheduleDeferredTmuxDrain(0);
+      return 'updated';
+    }
+
+    const maxQueue = this.resolveDeferredTmuxRetryMaxQueue();
+    while (this.deferredTmuxDeliveries.length >= maxQueue) {
+      this.deferredTmuxDeliveries.shift();
+    }
+
+    this.deferredTmuxDeliveries.push({
+      queueKey,
+      projectName: params.projectName,
+      agentType: params.agentType,
+      instanceId: params.instanceId,
+      tmuxSession: params.tmuxSession,
+      windowName: params.windowName,
+      prompt: normalizedPrompt,
+      notifyChannelId: params.notifyChannelId,
+      commandChannelId: params.commandChannelId,
+      ...(params.turnId ? { turnId: params.turnId } : {}),
+      createdAtMs: now,
+      attempts: 0,
+      nextAttemptAtMs: now + this.resolveDeferredTmuxRetryBaseMs(),
+    });
+    this.scheduleDeferredTmuxDrain(this.resolveDeferredTmuxRetryBaseMs());
+    return 'new';
+  }
+
+  private requeueDeferredTmuxDelivery(entry: DeferredTmuxDelivery): boolean {
+    const now = Date.now();
+    const maxAttempts = this.resolveDeferredTmuxRetryMaxAttempts();
+    const maxAgeMs = this.resolveDeferredTmuxRetryMaxAgeMs();
+    const nextAttempts = entry.attempts + 1;
+    if (nextAttempts > maxAttempts) return false;
+    if (now - entry.createdAtMs > maxAgeMs) return false;
+    const baseMs = this.resolveDeferredTmuxRetryBaseMs();
+    const maxMs = this.resolveDeferredTmuxRetryMaxMs();
+    const delayMs = Math.min(maxMs, baseMs * (2 ** Math.max(0, nextAttempts - 1)));
+    entry.attempts = nextAttempts;
+    entry.nextAttemptAtMs = now + delayMs;
+    this.deferredTmuxDeliveries.push(entry);
+    this.scheduleDeferredTmuxDrain(delayMs);
+    return true;
+  }
+
+  private async drainDeferredTmuxDeliveries(): Promise<void> {
+    if (this.deferredTmuxDrainInFlight) return;
+    this.deferredTmuxDrainInFlight = true;
+    try {
+      while (this.deferredTmuxDeliveries.length > 0) {
+        this.deferredTmuxDeliveries.sort((a, b) => a.nextAttemptAtMs - b.nextAttemptAtMs);
+        const head = this.deferredTmuxDeliveries[0]!;
+        const now = Date.now();
+        if (head.nextAttemptAtMs > now) {
+          this.scheduleDeferredTmuxDrain(head.nextAttemptAtMs - now);
+          return;
+        }
+        this.deferredTmuxDeliveries.shift();
+
+        const project = this.deps.stateManager.getProject(head.projectName);
+        if (!project) {
+          await this.deps.messaging.sendToChannel(
+            head.notifyChannelId,
+            `⚠️ Deferred retry dropped: project \`${head.projectName}\` is no longer active.`,
+          );
+          continue;
+        }
+        const normalizedProject = project as ReturnType<typeof normalizeProjectState>;
+        const instance = getProjectInstance(normalizedProject, head.instanceId);
+        if (!instance) {
+          await this.deps.messaging.sendToChannel(
+            head.notifyChannelId,
+            `⚠️ Deferred retry dropped: instance \`${head.instanceId}\` is no longer active.`,
+          );
+          continue;
+        }
+
+        const tmuxSession = normalizedProject.tmuxSession;
+        const windowName = instance.tmuxWindow || instance.instanceId;
+        if (!this.deps.tmux.windowExists(tmuxSession, windowName)) {
+          const queued = this.requeueDeferredTmuxDelivery({
+            ...head,
+            tmuxSession,
+            windowName,
+          });
+          if (!queued) {
+            await this.deps.messaging.sendToChannel(
+              head.notifyChannelId,
+              this.buildDeliveryFailureGuidance(head.projectName, 'tmux window missing during deferred retry'),
+            );
+          }
+          continue;
+        }
+
+        try {
+          if (instance.agentType === 'codex') {
+            const result = await this.submitToCodex(tmuxSession, windowName, head.prompt);
+            if (result === 'restarted') {
+              const queued = this.requeueDeferredTmuxDelivery({
+                ...head,
+                tmuxSession,
+                windowName,
+              });
+              if (!queued) {
+                await this.deps.messaging.sendToChannel(
+                  head.notifyChannelId,
+                  this.buildDeliveryFailureGuidance(
+                    head.projectName,
+                    'codex pane was restarted but prompt could not be replayed in time',
+                  ),
+                );
+              }
+              continue;
+            }
+            void this.safeEmitCodexStartEvent({
+              projectName: head.projectName,
+              instanceId: instance.instanceId,
+              turnId: head.turnId,
+              channelId: head.commandChannelId,
+            });
+          } else if (instance.agentType === 'opencode') {
+            await this.submitToOpencode(tmuxSession, windowName, head.prompt);
+          } else {
+            this.deps.tmux.sendKeysToWindow(tmuxSession, windowName, head.prompt, instance.agentType);
+          }
+          this.rememberPrompt(head.projectName, instance.instanceId, head.prompt);
+          if (head.turnId) {
+            this.rememberTurnRoute({
+              projectName: head.projectName,
+              agentType: instance.agentType,
+              instanceId: instance.instanceId,
+              turnId: head.turnId,
+              channelId: head.commandChannelId,
+            });
+          }
+        } catch (error) {
+          if (this.isMissingTmuxTargetError(error)) {
+            const queued = this.requeueDeferredTmuxDelivery({
+              ...head,
+              tmuxSession,
+              windowName,
+            });
+            if (!queued) {
+              await this.deps.messaging.sendToChannel(
+                head.notifyChannelId,
+                this.buildDeliveryFailureGuidance(head.projectName, error),
+              );
+            }
+            continue;
+          }
+          await this.deps.messaging.sendToChannel(
+            head.notifyChannelId,
+            this.buildDeliveryFailureGuidance(head.projectName, error),
+          );
+        }
+      }
+    } finally {
+      this.deferredTmuxDrainInFlight = false;
+      if (this.deferredTmuxDeliveries.length > 0 && !this.deferredTmuxDrainTimer) {
+        this.scheduleDeferredTmuxDrain(0);
+      }
+    }
+  }
+
   private rememberMessageRoute(messageId: string | undefined, route: RouteMemory): void {
     if (!messageId) return;
     this.routeByMessageId.set(messageId, route);
@@ -189,6 +639,19 @@ export class BridgeMessageRouter {
     if (!conversationKey) return;
     this.routeByConversationKey.set(conversationKey, route);
     this.pruneOldest(this.routeByConversationKey, this.maxConversationRoutes);
+  }
+
+  private forgetRoutesForProject(projectName: string): void {
+    for (const [key, route] of this.routeByMessageId.entries()) {
+      if (route.projectName === projectName) {
+        this.routeByMessageId.delete(key);
+      }
+    }
+    for (const [key, route] of this.routeByConversationKey.entries()) {
+      if (route.projectName === projectName) {
+        this.routeByConversationKey.delete(key);
+      }
+    }
   }
 
   private resolveRememberedRoute(
@@ -301,6 +764,66 @@ export class BridgeMessageRouter {
     const head = this.peekOrchestratorTask(projectName, workerInstanceId);
     if (!head) return undefined;
     return `head(${this.formatAge(Date.now() - head.queuedAtMs)}): ${this.summarizeOrchestratorWorkerPrompt(head.prompt, maxChars)}`;
+  }
+
+  private parseRuntimeHelpCommand(content: string): RuntimeHelpCommandParse {
+    const parts = content.trim().split(/\s+/).filter(Boolean);
+    if (parts.length === 0) return { kind: 'none' };
+    const command = (parts[0] || '').toLowerCase();
+    if (command !== '/help' && command !== '/commands') return { kind: 'none' };
+    if (parts.length === 1) {
+      return { kind: 'show', includeAll: false };
+    }
+    const mode = (parts[1] || '').toLowerCase();
+    if (mode === 'all' && parts.length === 2) {
+      return { kind: 'show', includeAll: true };
+    }
+    return {
+      kind: 'invalid',
+      message: '⚠️ Usage: `/help [all]` (alias: `/commands [all]`)',
+    };
+  }
+
+  private buildRuntimeCommandGuide(includeAll: boolean): string {
+    const lines = [
+      '🧭 Runtime Commands',
+      'General: plain text, `/send <text>`, `/help` (`/commands`), `/retry`, `/health`, `/snapshot`, `/io`',
+      'Session: `/q`, `/qw`',
+      'Keys: `/enter [count]`, `/tab [count]`, `/esc [count]`, `/up [count]`, `/down [count]`',
+      'Maintenance: `/doctor [fix]`, `/repair [mapping|doctor-only|restart-only|verify|deep]`, `/update [--git]`, `/daemon-restart`',
+    ];
+
+    if (!includeAll) {
+      lines.push('Advanced: run `/help all` for orchestrator commands.');
+      return lines.join('\n');
+    }
+
+    const manualEnabled = this.resolveOrchestratorManualCommandsEnabled();
+    lines.push(
+      `Advanced orchestration: ${manualEnabled ? 'enabled' : 'disabled'} (${manualEnabled ? 'ready' : 'set `AGENT_DISCORD_ORCHESTRATOR_MANUAL_COMMANDS=1` + restart daemon'})`,
+    );
+    lines.push('Toggles (advanced): `/orchestrator enable|disable`');
+    lines.push('- `/orchestrator status|run|spawn|remove|enable|disable`');
+    lines.push('- `/subagents list|send|steer|spawn|info|log|kill`');
+    return lines.join('\n');
+  }
+
+  private parseSendCommand(content: string): SendCommandParse {
+    const trimmed = content.trim();
+    if (!trimmed) return { kind: 'none' };
+    if (!/^\/send(?:\s|$)/i.test(trimmed)) return { kind: 'none' };
+    const match = trimmed.match(/^\/send\s+([\s\S]+)$/i);
+    const text = (match?.[1] || '').trim();
+    if (!text) {
+      return {
+        kind: 'invalid',
+        message: '⚠️ Usage: `/send <text>`',
+      };
+    }
+    return {
+      kind: 'command',
+      text,
+    };
   }
 
   private parseUtilityCommand(content: string): 'retry' | 'health' | 'snapshot' | 'io' | undefined {
@@ -494,6 +1017,9 @@ export class BridgeMessageRouter {
       if (!modeToken || modeToken === 'default') {
         return { kind: 'repair', mode: 'default' };
       }
+      if (modeToken === 'mapping' || modeToken === 'map' || modeToken === 'mappings') {
+        return { kind: 'repair-mapping' };
+      }
       if (modeToken === 'doctor' || modeToken === 'doctor-only') {
         return { kind: 'repair', mode: 'doctor-only' };
       }
@@ -508,7 +1034,7 @@ export class BridgeMessageRouter {
       }
       return {
         kind: 'orchestrator-help',
-        message: '⚠️ Usage: `/repair [doctor-only|restart-only|verify|deep]`',
+        message: '⚠️ Usage: `/repair [mapping|doctor-only|restart-only|verify|deep]`',
       };
     }
 
@@ -2183,6 +2709,13 @@ export class BridgeMessageRouter {
     const instance = params.instance;
     const windowName = instance.tmuxWindow || instance.instanceId;
     const targetChannelId = instance.channelId || params.sourceChannelId;
+    this.rememberTurnRoute({
+      projectName: params.projectName,
+      agentType: instance.agentType,
+      instanceId: instance.instanceId,
+      turnId: params.turnId,
+      channelId: targetChannelId,
+    });
 
     await this.safePendingUpdate('orchestrator:markPending', () =>
       this.deps.pendingTracker.markPending(
@@ -2202,13 +2735,20 @@ export class BridgeMessageRouter {
         params.routeHint || 'memory',
       ),
     );
-    await this.safePendingUpdate('orchestrator:markDispatching', () =>
-      this.deps.pendingTracker.markDispatching(
-        params.projectName,
-        instance.agentType,
-        instance.instanceId,
-      ),
-    );
+    const deferDispatchingToEvents = this.shouldDeferDispatchingLifecycleToEvents({
+      normalizedProject: params.normalizedProject,
+      agentType: instance.agentType,
+      instanceId: instance.instanceId,
+    });
+    if (!deferDispatchingToEvents) {
+      await this.safePendingUpdate('orchestrator:markDispatching', () =>
+        this.deps.pendingTracker.markDispatching(
+          params.projectName,
+          instance.agentType,
+          instance.instanceId,
+        ),
+      );
+    }
 
     try {
       if (instance.agentType === 'codex') {
@@ -2288,6 +2828,63 @@ export class BridgeMessageRouter {
       return Math.max(tailLines, Math.trunc(fromEnv));
     }
     return Math.max(tailLines, 120);
+  }
+
+  private guardTmuxDumpLines(lines: string[], scopeLabel: string): string[] {
+    if (lines.length === 0) return lines;
+
+    const maxTotalChars = 6000;
+    const maxLineChars = 320;
+    let clampedLineCount = 0;
+    let clampedChars = 0;
+
+    const normalized = lines.map((line) => {
+      if (line.length <= maxLineChars) return line;
+      const overflow = line.length - maxLineChars;
+      clampedLineCount += 1;
+      clampedChars += overflow;
+      return `${line.slice(0, maxLineChars)} ...[line truncated +${overflow} chars]`;
+    });
+
+    const fitsBudget = (candidateLines: string[]): boolean => candidateLines.join('\n').length <= maxTotalChars;
+    let kept: string[] = [];
+    let omittedLines = 0;
+
+    for (let index = normalized.length - 1; index >= 0; index -= 1) {
+      const nextLine = normalized[index] || '';
+      const candidate = [nextLine, ...kept];
+      if (fitsBudget(candidate)) {
+        kept = candidate;
+      } else {
+        omittedLines += 1;
+      }
+    }
+
+    const hasGuardrailEffects = omittedLines > 0 || clampedLineCount > 0;
+    if (!hasGuardrailEffects) return kept;
+
+    const buildMarker = (droppedLines: number): string => {
+      const parts: string[] = [];
+      if (droppedLines > 0) {
+        parts.push(`omitted ${droppedLines} line(s)`);
+      }
+      if (clampedLineCount > 0) {
+        parts.push(`clamped ${clampedLineCount} long line(s), trimmed ${clampedChars} char(s)`);
+      }
+      return `...[truncated by ${scopeLabel} guardrail: ${parts.join('; ')}]`;
+    };
+
+    let marker = buildMarker(omittedLines);
+    while (kept.length > 0 && !fitsBudget([marker, ...kept])) {
+      kept = kept.slice(1);
+      omittedLines += 1;
+      marker = buildMarker(omittedLines);
+    }
+
+    if (marker.length > maxTotalChars) {
+      return [marker.slice(0, maxTotalChars)];
+    }
+    return [marker, ...kept];
   }
 
   private shouldUseSnapshotThreadDelivery(payload: string): boolean {
@@ -2687,11 +3284,12 @@ export class BridgeMessageRouter {
 
       const lines = snapshot.split('\n');
       const tailLines = lines.slice(-tailLineLimit);
+      const guardedTailLines = this.guardTmuxDumpLines(tailLines, 'snapshot');
       const title =
         tailLines.length < lines.length
           ? `📸 Snapshot \`${params.projectName}/${params.instanceId}\` (last ${tailLines.length}/${lines.length} lines)`
           : `📸 Snapshot \`${params.projectName}/${params.instanceId}\``;
-      const payload = `${title}\n\`\`\`text\n${tailLines.join('\n')}\n\`\`\``;
+      const payload = `${title}\n\`\`\`text\n${guardedTailLines.join('\n')}\n\`\`\``;
       if (this.shouldUseSnapshotThreadDelivery(payload)) {
         await this.deps.messaging.sendLongOutput!(params.channelId, payload);
       } else {
@@ -2770,11 +3368,12 @@ export class BridgeMessageRouter {
       }
       const lines = snapshot.split('\n');
       const tail = lines.slice(-tailLineLimit);
+      const guardedTail = this.guardTmuxDumpLines(tail, 'subagents-log');
       const title =
         tail.length < lines.length
           ? `📜 Subagent log \`${params.projectName}/${params.workerInstanceId}\` (last ${tail.length}/${lines.length} lines)`
           : `📜 Subagent log \`${params.projectName}/${params.workerInstanceId}\``;
-      const codeblockPayload = `${title}\n\`\`\`text\n${tail.join('\n')}\n\`\`\``;
+      const codeblockPayload = `${title}\n\`\`\`text\n${guardedTail.join('\n')}\n\`\`\``;
       if (this.shouldUseSnapshotThreadDelivery(codeblockPayload)) {
         await this.deps.messaging.sendLongOutput!(params.channelId, codeblockPayload);
         return;
@@ -2783,7 +3382,7 @@ export class BridgeMessageRouter {
         await this.deps.messaging.sendToChannel(params.channelId, codeblockPayload);
         return;
       }
-      await this.sendSplitMessage(params.channelId, `${title}\n${tail.join('\n')}`);
+      await this.sendSplitMessage(params.channelId, `${title}\n${guardedTail.join('\n')}`);
     } catch (error) {
       await this.deps.messaging.sendToChannel(params.channelId, this.buildDeliveryFailureGuidance(params.projectName, error));
     }
@@ -2870,10 +3469,14 @@ export class BridgeMessageRouter {
     return { command: 'mudcode', args };
   }
 
-  private scheduleBackgroundCli(args: string[], delayMs: number = 0): void {
+  private scheduleBackgroundCli(args: string[], delayMs: number = 0): boolean {
+    if (!this.shouldScheduleBackgroundCli(args)) {
+      return false;
+    }
+
     if (this.deps.backgroundCliRunner) {
       this.deps.backgroundCliRunner(args, delayMs);
-      return;
+      return true;
     }
 
     const invocation = this.resolveMudcodeCliInvocation(args);
@@ -2890,10 +3493,11 @@ export class BridgeMessageRouter {
     if (delayMs > 0) {
       const timer = setTimeout(run, delayMs);
       timer.unref();
-      return;
+      return true;
     }
 
     run();
+    return true;
   }
 
   private async handleMaintenanceCommand(params: {
@@ -3407,6 +4011,41 @@ export class BridgeMessageRouter {
       return;
     }
 
+    if (params.command.kind === 'repair-mapping') {
+      const latest = this.deps.stateManager.getProject(params.projectName);
+      const latestProject = normalizeProjectState(latest || params.normalizedProject);
+      const recovery = this.runMappingRecovery({
+        projectName: params.projectName,
+        project: latestProject,
+        requireReload: true,
+        clearStalePending: true,
+      });
+      if (!recovery.ok) {
+        await this.deps.messaging.sendToChannel(params.channelId, recovery.errorMessage);
+        return;
+      }
+      await this.deps.messaging.sendToChannel(
+        params.channelId,
+        '✅ Reloaded channel mappings from state (`/repair mapping`).',
+      );
+      const detailParts: string[] = [];
+      if (recovery.summary.clearedTurnRouteEntries > 0) {
+        detailParts.push(`turn-route entries cleared: \`${recovery.summary.clearedTurnRouteEntries}\``);
+      }
+      if (recovery.summary.stalePendingClearedInstanceIds.length > 0) {
+        detailParts.push(
+          `stale pending cleared: ${recovery.summary.stalePendingClearedInstanceIds.map((id) => `\`${id}\``).join(', ')}`,
+        );
+      }
+      if (detailParts.length > 0) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          `ℹ️ Mapping recovery details: ${detailParts.join(', ')}`,
+        );
+      }
+      return;
+    }
+
     if (params.command.kind === 'repair') {
       const runDoctorFix = async (): Promise<boolean> => {
         try {
@@ -3431,12 +4070,20 @@ export class BridgeMessageRouter {
       };
 
       const scheduleDaemonRestart = async (): Promise<boolean> => {
-        await this.deps.messaging.sendToChannel(
-          params.channelId,
-          '♻️ Scheduling daemon restart after repair...',
-        );
         try {
-          this.scheduleBackgroundCli(['daemon', 'restart'], 500);
+          // Route through `repair restart-only` so repair locking guards concurrent maintenance jobs.
+          const scheduled = this.scheduleBackgroundCli(['repair', 'restart-only'], 500);
+          if (!scheduled) {
+            await this.deps.messaging.sendToChannel(
+              params.channelId,
+              'ℹ️ Repair restart is already scheduled; skipping duplicate request.',
+            );
+            return true;
+          }
+          await this.deps.messaging.sendToChannel(
+            params.channelId,
+            '♻️ Scheduling daemon restart after repair...',
+          );
           return true;
         } catch (error) {
           await this.deps.messaging.sendToChannel(
@@ -3449,18 +4096,57 @@ export class BridgeMessageRouter {
 
       const scheduleHealthVerify = async (delayMs: number): Promise<void> => {
         const verifyArgs = ['repair', 'verify', '--project', params.projectName];
-        await this.deps.messaging.sendToChannel(
-          params.channelId,
-          `🩺 Scheduling health verify (\`mudcode ${verifyArgs.join(' ')}\`) ...`,
-        );
         try {
-          this.scheduleBackgroundCli(verifyArgs, delayMs);
+          const scheduled = this.scheduleBackgroundCli(verifyArgs, delayMs);
+          if (!scheduled) {
+            await this.deps.messaging.sendToChannel(
+              params.channelId,
+              'ℹ️ Health verify is already scheduled; skipping duplicate request.',
+            );
+            return;
+          }
+          await this.deps.messaging.sendToChannel(
+            params.channelId,
+            `🩺 Scheduling health verify (\`mudcode ${verifyArgs.join(' ')}\`) ...`,
+          );
         } catch (error) {
           await this.deps.messaging.sendToChannel(
             params.channelId,
             `⚠️ Failed to schedule health verify: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
+      };
+
+      const runMappingRecoveryPreflight = async (): Promise<void> => {
+        const latest = this.deps.stateManager.getProject(params.projectName);
+        const latestProject = normalizeProjectState(latest || params.normalizedProject);
+        const recovery = this.runMappingRecovery({
+          projectName: params.projectName,
+          project: latestProject,
+          requireReload: false,
+          clearStalePending: true,
+        });
+        if (!recovery.ok) {
+          await this.deps.messaging.sendToChannel(params.channelId, recovery.errorMessage);
+          return;
+        }
+        const detailParts: string[] = [];
+        if (recovery.summary.mappingReloaded) {
+          detailParts.push('mappings reloaded');
+        }
+        if (recovery.summary.clearedTurnRouteEntries > 0) {
+          detailParts.push(`turn-routes cleared=\`${recovery.summary.clearedTurnRouteEntries}\``);
+        }
+        if (recovery.summary.stalePendingClearedInstanceIds.length > 0) {
+          detailParts.push(
+            `stale pending cleared=${recovery.summary.stalePendingClearedInstanceIds.map((id) => `\`${id}\``).join(', ')}`,
+          );
+        }
+        if (detailParts.length === 0) return;
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          `🔁 Mapping recovery preflight: ${detailParts.join(', ')}`,
+        );
       };
 
       if (params.command.mode === 'restart-only') {
@@ -3472,6 +4158,8 @@ export class BridgeMessageRouter {
         await scheduleHealthVerify(350);
         return;
       }
+
+      await runMappingRecoveryPreflight();
 
       await this.deps.messaging.sendToChannel(
         params.channelId,
@@ -3501,13 +4189,20 @@ export class BridgeMessageRouter {
     if (params.command.kind === 'update') {
       const args = ['update', ...(params.command.git ? ['--git'] : [])];
       const suffix = params.command.git ? ' (`--git`)' : '';
-      await this.deps.messaging.sendToChannel(
-        params.channelId,
-        `⬆️ Starting mudcode update${suffix}. This may restart the daemon shortly.`,
-      );
       try {
         // Give Discord send a brief head start before daemon lifecycle changes.
-        this.scheduleBackgroundCli(args, 350);
+        const scheduled = this.scheduleBackgroundCli(args, 350);
+        if (!scheduled) {
+          await this.deps.messaging.sendToChannel(
+            params.channelId,
+            'ℹ️ Update command is already scheduled; skipping duplicate request.',
+          );
+          return;
+        }
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          `⬆️ Starting mudcode update${suffix}. This may restart the daemon shortly.`,
+        );
       } catch (error) {
         await this.deps.messaging.sendToChannel(
           params.channelId,
@@ -3517,13 +4212,20 @@ export class BridgeMessageRouter {
       return;
     }
 
-    await this.deps.messaging.sendToChannel(
-      params.channelId,
-      '♻️ Scheduling daemon restart...',
-    );
     try {
       // Delay to increase chance the acknowledgement message is delivered first.
-      this.scheduleBackgroundCli(['daemon', 'restart'], 350);
+      const scheduled = this.scheduleBackgroundCli(['daemon', 'restart'], 350);
+      if (!scheduled) {
+        await this.deps.messaging.sendToChannel(
+          params.channelId,
+          'ℹ️ Daemon restart is already scheduled; skipping duplicate request.',
+        );
+        return;
+      }
+      await this.deps.messaging.sendToChannel(
+        params.channelId,
+        '♻️ Scheduling daemon restart...',
+      );
     } catch (error) {
       await this.deps.messaging.sendToChannel(
         params.channelId,
@@ -3636,11 +4338,6 @@ export class BridgeMessageRouter {
     return undefined;
   }
 
-  private isMissingTmuxTargetError(error: unknown): boolean {
-    const message = error instanceof Error ? error.message : String(error);
-    return /can't find (window|pane)|no such (window|pane)|unknown target/i.test(message);
-  }
-
   private forgetRoutesForInstance(projectName: string, instanceId: string): void {
     for (const [key, route] of this.routeByMessageId.entries()) {
       if (route.projectName === projectName && route.instanceId === instanceId) {
@@ -3662,6 +4359,81 @@ export class BridgeMessageRouter {
     pendingTracker.clearPendingForInstance?.(projectName, agentType, instanceId);
   }
 
+  private resolveRepairStalePendingMs(): number {
+    const configured = this.getEnvInt('AGENT_DISCORD_REPAIR_STALE_PENDING_MS', 20 * 60 * 1000);
+    return Math.max(60_000, Math.min(24 * 60 * 60 * 1000, configured));
+  }
+
+  private clearTurnRoutesForProject(projectName: string): number {
+    if (!this.deps.turnRouteLedger) return 0;
+    const ledger = this.deps.turnRouteLedger as unknown as {
+      clearProject?: (projectName: string) => number | void;
+    };
+    if (typeof ledger.clearProject !== 'function') return 0;
+    const removed = ledger.clearProject(projectName);
+    if (typeof removed !== 'number' || !Number.isFinite(removed)) return 0;
+    return Math.max(0, Math.trunc(removed));
+  }
+
+  private clearStalePendingForProject(
+    projectName: string,
+    project: ReturnType<typeof normalizeProjectState>,
+  ): string[] {
+    const staleThresholdMs = this.resolveRepairStalePendingMs();
+    const clearedInstanceIds: string[] = [];
+    for (const instance of listProjectInstances(project)) {
+      const runtime = this.getPendingRuntimeSnapshot(projectName, instance.agentType, instance.instanceId);
+      if (runtime.pendingDepth <= 0) continue;
+      const oldestAgeMs = runtime.oldestAgeMs;
+      if (typeof oldestAgeMs !== 'number' || !Number.isFinite(oldestAgeMs) || oldestAgeMs < staleThresholdMs) {
+        continue;
+      }
+      this.clearPendingForInstance(projectName, instance.agentType, instance.instanceId);
+      clearedInstanceIds.push(instance.instanceId);
+    }
+    return clearedInstanceIds;
+  }
+
+  private runMappingRecovery(params: {
+    projectName: string;
+    project: ReturnType<typeof normalizeProjectState>;
+    requireReload: boolean;
+    clearStalePending: boolean;
+  }): { ok: true; summary: MappingRecoverySummary } | { ok: false; errorMessage: string } {
+    let mappingReloaded = false;
+    if (typeof this.deps.reloadChannelMappings === 'function') {
+      try {
+        this.deps.reloadChannelMappings();
+        mappingReloaded = true;
+      } catch (error) {
+        return {
+          ok: false,
+          errorMessage: `⚠️ Failed to reload channel mappings: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    } else if (params.requireReload) {
+      return {
+        ok: false,
+        errorMessage: '⚠️ Mapping reload is not available in this runtime.',
+      };
+    }
+
+    this.forgetRoutesForProject(params.projectName);
+    const clearedTurnRouteEntries = this.clearTurnRoutesForProject(params.projectName);
+    const stalePendingClearedInstanceIds = params.clearStalePending
+      ? this.clearStalePendingForProject(params.projectName, params.project)
+      : [];
+
+    return {
+      ok: true,
+      summary: {
+        mappingReloaded,
+        clearedTurnRouteEntries,
+        stalePendingClearedInstanceIds,
+      },
+    };
+  }
+
   private async safePendingUpdate(action: string, operation: () => Promise<void>): Promise<void> {
     try {
       await operation();
@@ -3670,6 +4442,39 @@ export class BridgeMessageRouter {
         `Pending tracker update failed (${action}): ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+  }
+
+  private shouldDeferDispatchingLifecycleToEvents(params: {
+    normalizedProject: ReturnType<typeof normalizeProjectState>;
+    agentType: string;
+    instanceId?: string;
+  }): boolean {
+    if (params.agentType !== 'codex') return false;
+    if (!this.deps.eventHookClient?.enabled) return false;
+    const instance = params.instanceId
+      ? getProjectInstance(params.normalizedProject, params.instanceId)
+      : undefined;
+    if (!instance) return false;
+    return instance.eventHook !== false;
+  }
+
+  private rememberTurnRoute(params: {
+    projectName: string;
+    agentType: string;
+    instanceId?: string;
+    turnId?: string;
+    channelId?: string;
+  }): void {
+    const turnId = params.turnId?.trim();
+    const channelId = params.channelId?.trim();
+    if (!turnId || !channelId) return;
+    this.deps.turnRouteLedger?.upsert({
+      turnId,
+      projectName: params.projectName,
+      agentType: params.agentType,
+      ...(params.instanceId ? { instanceId: params.instanceId } : {}),
+      channelId,
+    });
   }
 
   private async safeEmitCodexStartEvent(params: {
@@ -3743,6 +4548,13 @@ export class BridgeMessageRouter {
     let instanceRemoved = false;
 
     if (params.messageId) {
+      this.rememberTurnRoute({
+        projectName: params.projectName,
+        agentType: params.agentType,
+        instanceId: params.instanceId,
+        turnId: params.messageId,
+        channelId: params.channelId,
+      });
       await this.safePendingUpdate('session-control:markPending', () =>
         this.deps.pendingTracker.markPending(
           params.projectName,
@@ -3854,11 +4666,37 @@ export class BridgeMessageRouter {
     const { messaging } = this.deps;
 
     messaging.onMessage(async (agentType, content, projectName, channelId, messageId, mappedInstanceId, attachments, context) => {
-      console.log(
-        `📨 [${projectName}/${agentType}${mappedInstanceId ? `#${mappedInstanceId}` : ''}] ${content.substring(0, 50)}...`,
-      );
+      const stopMessageLatencyTimer = perfMetrics.startTimer('router_message_latency_ms');
+      let messageLatencyRecorded = false;
+      const recordMessageLatency = () => {
+        if (messageLatencyRecorded) return;
+        messageLatencyRecorded = true;
+        stopMessageLatencyTimer();
+      };
 
-      const project = this.deps.stateManager.getProject(projectName);
+      try {
+        console.log(
+          `📨 [${projectName}/${agentType}${mappedInstanceId ? `#${mappedInstanceId}` : ''}] ${content.substring(0, 50)}...`,
+        );
+
+      if (
+        this.shouldSkipDuplicateInboundDispatch({
+          projectName,
+          agentType,
+          channelId,
+          content,
+          messageId,
+          instanceId: mappedInstanceId,
+          context,
+        })
+      ) {
+        console.warn(
+          `↪️ [${projectName}/${agentType}${mappedInstanceId ? `#${mappedInstanceId}` : ''}] duplicate inbound dispatch skipped`,
+        );
+        return;
+      }
+
+      let project = this.deps.stateManager.getProject(projectName);
       if (!project) {
         console.warn(`Project ${projectName} not found in state`);
         await messaging.sendToChannel(channelId, `⚠️ Project "${projectName}" not found in state`);
@@ -3867,49 +4705,66 @@ export class BridgeMessageRouter {
 
       let normalizedProject = normalizeProjectState(project);
       const routeChannelId = context?.routeChannelId || channelId;
-      const fromMappedId = mappedInstanceId ? getProjectInstance(normalizedProject, mappedInstanceId) : undefined;
-      const fromReply = this.resolveRememberedRoute(
-        normalizedProject,
-        context?.replyToMessageId ? this.routeByMessageId.get(context.replyToMessageId) : undefined,
-      );
-      const fromConversation = this.resolveRememberedRoute(
-        normalizedProject,
-        context?.conversationKey ? this.routeByConversationKey.get(context.conversationKey) : undefined,
-      );
-      const fromChannel = findProjectInstanceByChannel(normalizedProject, routeChannelId);
-      const fromPrimary = getPrimaryInstanceForAgent(normalizedProject, agentType);
+      const resolveRoute = (currentProject: ReturnType<typeof normalizeProjectState>) => {
+        const fromMappedId = mappedInstanceId ? getProjectInstance(currentProject, mappedInstanceId) : undefined;
+        const fromReply = this.resolveRememberedRoute(
+          currentProject,
+          context?.replyToMessageId ? this.routeByMessageId.get(context.replyToMessageId) : undefined,
+        );
+        const fromConversation = this.resolveRememberedRoute(
+          currentProject,
+          context?.conversationKey ? this.routeByConversationKey.get(context.conversationKey) : undefined,
+        );
+        const fromChannel = findProjectInstanceByChannel(currentProject, routeChannelId);
+        const fromPrimary = getPrimaryInstanceForAgent(currentProject, agentType);
+        const mappedInstance = fromMappedId || fromReply || fromConversation || fromChannel || fromPrimary;
+        const routeSource: RouteResolutionSource = fromMappedId
+          ? 'mapped'
+          : fromReply
+            ? 'reply'
+            : fromConversation
+              ? 'conversation'
+              : fromChannel
+                ? 'channel'
+                : 'primary';
 
-      const mappedInstance = fromMappedId || fromReply || fromConversation || fromChannel || fromPrimary;
-      const routeSource: RouteResolutionSource = fromMappedId
-        ? 'mapped'
-        : fromReply
-          ? 'reply'
-          : fromConversation
-            ? 'conversation'
-            : fromChannel
-              ? 'channel'
-              : 'primary';
+        return { mappedInstance, routeSource };
+      };
+
+      let { mappedInstance, routeSource } = resolveRoute(normalizedProject);
+
+      if (!mappedInstance) {
+        console.warn(
+          `♻️ [${projectName}/${agentType}${mappedInstanceId ? `#${mappedInstanceId}` : ''}] unresolved route; triggering one-time mapping auto-reload`,
+        );
+        try {
+          this.deps.reloadChannelMappings?.();
+        } catch (error) {
+          console.warn(
+            `Channel mapping auto-reload failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+
+        const refreshedProject = this.deps.stateManager.getProject(projectName);
+        if (refreshedProject) {
+          project = refreshedProject;
+          normalizedProject = normalizeProjectState(project);
+          ({ mappedInstance, routeSource } = resolveRoute(normalizedProject));
+        }
+      }
 
       if (!mappedInstance) {
         await messaging.sendToChannel(channelId, '⚠️ Agent instance mapping not found for this channel');
         return;
       }
 
-      const resolvedAgentType = mappedInstance.agentType;
-      const instanceKey = mappedInstance.instanceId;
-      const windowName = mappedInstance.tmuxWindow || instanceKey;
-      const routeMemory = this.buildRouteMemory(projectName, instanceKey, resolvedAgentType);
-      const commandChannelId = mappedInstance.channelId || routeChannelId || channelId;
+      let routedInstance = mappedInstance;
+      let resolvedAgentType = routedInstance.agentType;
+      let instanceKey = routedInstance.instanceId;
+      let windowName = routedInstance.tmuxWindow || instanceKey;
+      let routeMemory = this.buildRouteMemory(projectName, instanceKey, resolvedAgentType);
+      let commandChannelId = routeChannelId || routedInstance.channelId || channelId;
       const isSlashCommandMessage = content.trim().startsWith('/');
-
-      if (!isSlashCommandMessage) {
-        normalizedProject = this.maybeAutoEnableOrchestrator({
-          projectName,
-          normalizedProject,
-          resolvedAgentType,
-          currentInstanceId: instanceKey,
-        });
-      }
 
       const sessionControlCommand = this.parseSessionControlCommand(content);
       if (sessionControlCommand) {
@@ -3927,7 +4782,32 @@ export class BridgeMessageRouter {
         return;
       }
 
-      const utilityCommand = this.parseUtilityCommand(content);
+      const helpCommand = this.parseRuntimeHelpCommand(content);
+      if (helpCommand.kind === 'invalid') {
+        await messaging.sendToChannel(commandChannelId, helpCommand.message);
+        return;
+      }
+      if (helpCommand.kind === 'show') {
+        await messaging.sendToChannel(commandChannelId, this.buildRuntimeCommandGuide(helpCommand.includeAll));
+        return;
+      }
+
+      const sendCommand = this.parseSendCommand(content);
+      if (sendCommand.kind === 'invalid') {
+        await messaging.sendToChannel(commandChannelId, sendCommand.message);
+        return;
+      }
+
+      if (!isSlashCommandMessage || sendCommand.kind === 'command') {
+        normalizedProject = this.maybeAutoEnableOrchestrator({
+          projectName,
+          normalizedProject,
+          resolvedAgentType,
+          currentInstanceId: instanceKey,
+        });
+      }
+
+      const utilityCommand = sendCommand.kind === 'command' ? undefined : this.parseUtilityCommand(content);
       if (utilityCommand === 'health') {
         await this.sendHealthSummary({
           channelId: commandChannelId,
@@ -3958,7 +4838,7 @@ export class BridgeMessageRouter {
         return;
       }
 
-      const maintenanceCommand = this.parseMaintenanceCommand(content);
+      const maintenanceCommand = sendCommand.kind === 'command' ? undefined : this.parseMaintenanceCommand(content);
       if (maintenanceCommand) {
         await this.handleMaintenanceCommand({
           command: maintenanceCommand,
@@ -3969,6 +4849,31 @@ export class BridgeMessageRouter {
           instanceId: instanceKey,
         });
         return;
+      }
+
+      if (resolvedAgentType === 'gemini') {
+        const preflightRoute = await this.resolveExecutionInstanceWithGeminiPreflight({
+          projectName,
+          normalizedProject,
+          sourceChannelId: channelId,
+          routeChannelId,
+          mappedInstance: routedInstance,
+        });
+        if (preflightRoute.guidanceMessage) {
+          await messaging.sendToChannel(channelId, preflightRoute.guidanceMessage);
+          return;
+        }
+        if (preflightRoute.noticeMessage) {
+          await messaging.sendToChannel(channelId, preflightRoute.noticeMessage);
+        }
+        if (preflightRoute.instance.instanceId !== routedInstance.instanceId) {
+          routedInstance = preflightRoute.instance;
+          resolvedAgentType = routedInstance.agentType;
+          instanceKey = routedInstance.instanceId;
+          windowName = routedInstance.tmuxWindow || instanceKey;
+          commandChannelId = routeChannelId || routedInstance.channelId || channelId;
+          routeMemory = this.buildRouteMemory(projectName, instanceKey, resolvedAgentType);
+        }
       }
 
       let promptToSend: string | null = null;
@@ -3982,6 +4887,7 @@ export class BridgeMessageRouter {
       }> = [];
       let autoOrchestratorNotices: string[] = [];
       let autoPlannerUsed = false;
+      const explicitSendPrompt = sendCommand.kind === 'command' ? sendCommand.text : undefined;
       const isRetryCommand = utilityCommand === 'retry';
       if (isRetryCommand) {
         const remembered = this.getRememberedPrompt(projectName, instanceKey);
@@ -3994,22 +4900,26 @@ export class BridgeMessageRouter {
         }
         promptToSend = remembered;
       } else {
-        const keyCommand = this.parseSpecialKeyCommand(content);
-        if (keyCommand.kind === 'invalid') {
-          await messaging.sendToChannel(channelId, keyCommand.message);
-          return;
+        if (explicitSendPrompt === undefined) {
+          const keyCommand = this.parseSpecialKeyCommand(content);
+          if (keyCommand.kind === 'invalid') {
+            await messaging.sendToChannel(channelId, keyCommand.message);
+            return;
+          }
+
+          if (keyCommand.kind === 'valid') {
+            specialKeyCommand = keyCommand.command;
+          }
         }
 
-        if (keyCommand.kind === 'valid') {
-          specialKeyCommand = keyCommand.command;
-        } else {
-          let enrichedContent = content;
+        if (!specialKeyCommand) {
+          let enrichedContent = explicitSendPrompt ?? content;
           if (attachments && attachments.length > 0) {
             try {
               const downloaded = await downloadFileAttachments(attachments, project.projectPath, attachments[0]?.authHeaders);
               if (downloaded.length > 0) {
                 const markers = buildFileMarkers(downloaded);
-                enrichedContent = content + markers;
+                enrichedContent = enrichedContent + markers;
                 downloadedAttachmentCount = downloaded.length;
                 console.log(`📎 [${projectName}/${agentType}] ${downloaded.length} file(s) attached`);
               }
@@ -4131,6 +5041,13 @@ export class BridgeMessageRouter {
       }
 
       if (messageId) {
+        this.rememberTurnRoute({
+          projectName,
+          agentType: resolvedAgentType,
+          instanceId: instanceKey,
+          turnId: messageId,
+          channelId: commandChannelId,
+        });
         await this.safePendingUpdate('message:markPending', () =>
           this.deps.pendingTracker.markPending(
             projectName,
@@ -4154,9 +5071,16 @@ export class BridgeMessageRouter {
             this.deps.pendingTracker.markHasAttachments(projectName, resolvedAgentType, instanceKey),
           );
         }
-        await this.safePendingUpdate('message:markDispatching', () =>
-          this.deps.pendingTracker.markDispatching(projectName, resolvedAgentType, instanceKey),
-        );
+        const deferDispatchingToEvents = this.shouldDeferDispatchingLifecycleToEvents({
+          normalizedProject,
+          agentType: resolvedAgentType,
+          instanceId: instanceKey,
+        });
+        if (!deferDispatchingToEvents) {
+          await this.safePendingUpdate('message:markDispatching', () =>
+            this.deps.pendingTracker.markDispatching(projectName, resolvedAgentType, instanceKey),
+          );
+        }
       }
 
       let delivered = false;
@@ -4204,6 +5128,36 @@ export class BridgeMessageRouter {
         }
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
+        let deferredEnqueueResult: DeferredTmuxEnqueueResult = 'none';
+        if (
+          !specialKeyCommand &&
+          (promptToSend || '').trim().length > 0 &&
+          this.isMissingTmuxTargetError(error)
+        ) {
+          deferredEnqueueResult = this.enqueueDeferredTmuxDelivery({
+            projectName,
+            agentType: resolvedAgentType,
+            instanceId: instanceKey,
+            tmuxSession: normalizedProject.tmuxSession,
+            windowName,
+            prompt: promptToSend || '',
+            notifyChannelId: channelId,
+            commandChannelId,
+            ...(messageId ? { turnId: messageId } : {}),
+          });
+        }
+        if (deferredEnqueueResult !== 'none') {
+          await this.safePendingUpdate('message:markRetry', () =>
+            this.deps.pendingTracker.markRetry(projectName, resolvedAgentType, instanceKey, 'tail'),
+          );
+          if (deferredEnqueueResult === 'new') {
+            await messaging.sendToChannel(
+              channelId,
+              '⚠️ Agent tmux window is unavailable right now. I queued your message for automatic retry while the session recovers.',
+            );
+          }
+          return;
+        }
         if (resolvedAgentType === 'codex') {
           this.deps.ioTracker?.recordTurnFailed({
             projectName,
@@ -4224,7 +5178,6 @@ export class BridgeMessageRouter {
         );
         await messaging.sendToChannel(channelId, this.buildDeliveryFailureGuidance(projectName, error));
       }
-
       if (delivered) {
         if (!specialKeyCommand && promptToSend && promptToSend.trim().length > 0) {
           this.rememberPrompt(projectName, instanceKey, promptToSend);
@@ -4299,7 +5252,247 @@ export class BridgeMessageRouter {
         }
       }
       this.deps.stateManager.updateLastActive(projectName);
+      } finally {
+        recordMessageLatency();
+      }
     });
+  }
+
+  private resolveGeminiPreflightEnabled(): boolean {
+    return this.getEnvBool('AGENT_DISCORD_GEMINI_PREFLIGHT_ENABLED', true);
+  }
+
+  private resolveGeminiPreflightModel(): string {
+    const raw = (process.env.AGENT_DISCORD_GEMINI_PREFLIGHT_MODEL || '').trim();
+    return raw.length > 0 ? raw : 'pro 3.1';
+  }
+
+  private resolveGeminiPreflightCacheTtlMs(): number {
+    const value = this.getEnvInt('AGENT_DISCORD_GEMINI_PREFLIGHT_CACHE_TTL_MS', 60_000);
+    return Math.max(0, Math.min(10 * 60 * 1000, value));
+  }
+
+  private summarizeGeminiModelProbeFailure(params: {
+    stdout: string;
+    stderr: string;
+    code: number | null;
+    signal: NodeJS.Signals | null;
+    timeoutMs: number;
+    timedOut: boolean;
+  }): string {
+    if (params.timedOut) {
+      return `probe timed out after ${params.timeoutMs}ms`;
+    }
+
+    const exitInfo = `probe exit ${params.code ?? 'null'}${params.signal ? ` (${params.signal})` : ''}`;
+    const raw = `${params.stderr}\n${params.stdout}`;
+    const lines = raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .filter((line) => line.toLowerCase() !== 'loaded cached credentials.')
+      .filter((line) => line !== '{' && line !== '}')
+      .filter((line) => line !== '"session_id":' && line !== '"error":');
+
+    const preferred =
+      lines.find((line) => /modelnotfounderror/i.test(line)) ||
+      lines.find((line) => /(model|entity).*(not found|unavailable)/i.test(line)) ||
+      lines.find((line) => /(invalid|unsupported).*(model)/i.test(line));
+    const candidate = preferred || lines[0];
+    if (!candidate) return exitInfo;
+    const summarized = candidate.replace(/\s+/g, ' ').slice(0, 220);
+    return `${exitInfo}: ${summarized}`;
+  }
+
+  private async executeGeminiModelProbe(model: string): Promise<GeminiModelProbeResult> {
+    if (this.deps.geminiModelProbe) {
+      return this.deps.geminiModelProbe(model);
+    }
+
+    const timeoutMs = 15_000;
+    return new Promise((resolve) => {
+      const child = spawn(
+        'gemini',
+        [
+          '--model',
+          model,
+          '--prompt',
+          'Respond with: ok',
+          '--output-format',
+          'json',
+        ],
+        {
+          cwd: process.cwd(),
+          env: process.env,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+
+      let stdout = '';
+      let stderr = '';
+      let settled = false;
+      let timedOut = false;
+      const maxCaptureChars = 24_000;
+
+      const finish = (result: GeminiModelProbeResult): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
+      };
+
+      const timer = setTimeout(() => {
+        timedOut = true;
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          // Ignore kill errors in timeout path.
+        }
+      }, timeoutMs);
+      timer.unref();
+
+      child.stdout?.on('data', (chunk: Buffer | string) => {
+        if (stdout.length >= maxCaptureChars) return;
+        const text = String(chunk);
+        stdout = (stdout + text).slice(-maxCaptureChars);
+      });
+      child.stderr?.on('data', (chunk: Buffer | string) => {
+        if (stderr.length >= maxCaptureChars) return;
+        const text = String(chunk);
+        stderr = (stderr + text).slice(-maxCaptureChars);
+      });
+
+      child.on('error', (error) => {
+        finish({ ok: false, reason: error instanceof Error ? error.message : String(error) });
+      });
+
+      child.on('close', (code, signal) => {
+        if (code === 0 && !timedOut) {
+          finish({ ok: true });
+          return;
+        }
+        finish({
+          ok: false,
+          reason: this.summarizeGeminiModelProbeFailure({
+            stdout,
+            stderr,
+            code,
+            signal,
+            timeoutMs,
+            timedOut,
+          }),
+        });
+      });
+    });
+  }
+
+  private async checkGeminiModelPreflight(model: string): Promise<GeminiModelProbeResult> {
+    const nowMs = Date.now();
+    const cached = this.geminiModelPreflightCacheByModel.get(model);
+    if (cached && cached.expiresAtMs > nowMs) {
+      return { ok: cached.ok, reason: cached.reason };
+    }
+
+    const inFlight = this.geminiModelPreflightInFlightByModel.get(model);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const ttlMs = this.resolveGeminiPreflightCacheTtlMs();
+    const probePromise = this.executeGeminiModelProbe(model)
+      .then((result) => {
+        const checkedAtMs = Date.now();
+        if (ttlMs > 0) {
+          this.geminiModelPreflightCacheByModel.set(model, {
+            ok: result.ok,
+            reason: result.reason,
+            checkedAtMs,
+            expiresAtMs: checkedAtMs + ttlMs,
+          });
+        } else {
+          this.geminiModelPreflightCacheByModel.delete(model);
+        }
+        return result;
+      })
+      .catch((error) => {
+        const failure: GeminiModelProbeResult = {
+          ok: false,
+          reason: error instanceof Error ? error.message : String(error),
+        };
+        const checkedAtMs = Date.now();
+        if (ttlMs > 0) {
+          this.geminiModelPreflightCacheByModel.set(model, {
+            ok: false,
+            reason: failure.reason,
+            checkedAtMs,
+            expiresAtMs: checkedAtMs + ttlMs,
+          });
+        } else {
+          this.geminiModelPreflightCacheByModel.delete(model);
+        }
+        return failure;
+      })
+      .finally(() => {
+        this.geminiModelPreflightInFlightByModel.delete(model);
+      });
+
+    this.geminiModelPreflightInFlightByModel.set(model, probePromise);
+    return probePromise;
+  }
+
+  private async resolveExecutionInstanceWithGeminiPreflight(params: {
+    projectName: string;
+    normalizedProject: ReturnType<typeof normalizeProjectState>;
+    sourceChannelId: string;
+    routeChannelId: string;
+    mappedInstance: ProjectInstanceState;
+  }): Promise<{
+    instance: ProjectInstanceState;
+    noticeMessage?: string;
+    guidanceMessage?: string;
+  }> {
+    if (params.mappedInstance.agentType !== 'gemini') {
+      return { instance: params.mappedInstance };
+    }
+    if (!this.resolveGeminiPreflightEnabled()) {
+      return { instance: params.mappedInstance };
+    }
+
+    const model = this.resolveGeminiPreflightModel();
+    const preflight = await this.checkGeminiModelPreflight(model);
+    if (preflight.ok) {
+      return { instance: params.mappedInstance };
+    }
+
+    const reasonSuffix = preflight.reason ? ` (${preflight.reason})` : '';
+    const fallbackCodex = getPrimaryInstanceForAgent(params.normalizedProject, 'codex');
+    if (!fallbackCodex) {
+      return {
+        instance: params.mappedInstance,
+        guidanceMessage: [
+          `⚠️ Gemini preflight failed for model \`${model}\`${reasonSuffix}.`,
+          'No codex instance is available in this project, so automatic fallback cannot proceed.',
+          `Start or resume codex in this project, then retry: \`mudcode new codex --name ${params.projectName}\``,
+        ].join('\n'),
+      };
+    }
+
+    const lines = [
+      `⚠️ Gemini preflight failed for model \`${model}\`${reasonSuffix}.`,
+      `↪️ Routed this turn to codex instance \`${fallbackCodex.instanceId}\` automatically.`,
+    ];
+    if (
+      fallbackCodex.channelId &&
+      fallbackCodex.channelId !== params.sourceChannelId &&
+      fallbackCodex.channelId !== params.routeChannelId
+    ) {
+      lines.push(`ℹ️ Follow-up output will use codex channel \`${fallbackCodex.channelId}\`.`);
+    }
+
+    return {
+      instance: fallbackCodex,
+      noticeMessage: lines.join('\n'),
+    };
   }
 
   private getEnvInt(name: string, defaultValue: number): number {

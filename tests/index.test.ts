@@ -383,6 +383,47 @@ describe('AgentBridge', () => {
       expect(mockMessaging.onMessage).toHaveBeenCalledWith(expect.any(Function));
     });
 
+    it('wires /repair mapping reload through project bootstrap dependency chain', async () => {
+      const projects: ProjectState[] = [
+        {
+          projectName: 'test-project',
+          projectPath: '/test',
+          tmuxSession: 'agent-test',
+          discordChannels: { claude: 'ch-123' },
+          agents: { claude: true },
+          createdAt: new Date(),
+          lastActive: new Date(),
+        },
+      ];
+      mockStateManager.listProjects.mockReturnValue(projects);
+      mockStateManager.getProject.mockReturnValue(projects[0]);
+
+      await bridge.start();
+      const cb = mockMessaging.onMessage.mock.calls[0][0];
+
+      mockStateManager.reload.mockClear();
+      mockStateManager.listProjects.mockClear();
+      mockMessaging.registerChannelMappings.mockClear();
+
+      await cb('claude', '/repair mapping', 'test-project', 'ch-123', 'msg-repair-map', 'claude');
+
+      expect(mockStateManager.reload).toHaveBeenCalledOnce();
+      expect(mockStateManager.listProjects).toHaveBeenCalledOnce();
+      expect(mockMessaging.registerChannelMappings).toHaveBeenCalledWith([
+        { channelId: 'ch-123', projectName: 'test-project', agentType: 'claude', instanceId: 'claude' },
+      ]);
+      expect(mockMessaging.sendToChannel).toHaveBeenCalledWith(
+        'ch-123',
+        '✅ Reloaded channel mappings from state (`/repair mapping`).',
+      );
+
+      const reloadOrder = mockStateManager.reload.mock.invocationCallOrder[0];
+      const listOrder = mockStateManager.listProjects.mock.invocationCallOrder[0];
+      const registerOrder = mockMessaging.registerChannelMappings.mock.invocationCallOrder[0];
+      expect(reloadOrder).toBeLessThan(listOrder);
+      expect(listOrder).toBeLessThan(registerOrder);
+    });
+
     it('marks claude projects as event-hook driven after plugin install', async () => {
       const projects: ProjectState[] = [
         {
@@ -494,7 +535,7 @@ describe('AgentBridge', () => {
       expect(mockTmux.sendKeysToWindow).not.toHaveBeenCalled();
     });
 
-    it('shows English recovery guidance when tmux window is missing', async () => {
+    it('queues automatic retry when tmux window is missing', async () => {
       process.env.AGENT_DISCORD_OPENCODE_SUBMIT_DELAY_MS = '0';
 
       const mockTmux = createMockTmux();
@@ -527,9 +568,7 @@ describe('AgentBridge', () => {
       await cb('opencode', 'hi', 'mudcode', 'ch-123');
 
       const lastNotice = String(mockMessaging.sendToChannel.mock.calls.at(-1)?.[1] ?? '');
-      expect(lastNotice).toContain('agent tmux window is not running');
-      expect(lastNotice).toContain('mudcode new --name mudcode');
-      expect(lastNotice).toContain('mudcode attach mudcode');
+      expect(lastNotice).toContain('queued your message for automatic retry');
       expect(lastNotice).not.toContain("can't find window");
     });
 

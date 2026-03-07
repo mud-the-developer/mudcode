@@ -1,11 +1,27 @@
 use regex::Regex;
 use std::collections::HashSet;
+use std::sync::LazyLock;
 
 pub const DISCORD_MAX_MESSAGE_LENGTH: usize = 2000;
+
+static FILE_PATH_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?i)(?:^|[\s`"'(\[])(/[^\s`"')\]]+\.(?:png|jpg|jpeg|gif|webp|svg|bmp|pdf|docx|pptx|xlsx|csv|json|txt))(?:$|[\s`"')\].,;:!?])"#,
+    )
+    .expect("valid file path regex")
+});
+static COLLAPSE_BLANK_LINES_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"\n{3,}"#).expect("valid newline regex"));
+static BLANK_WS_LINE_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?m)^[ \t]+$"#).expect("valid blank ws regex"));
 
 /// Split a message into chunks that respect Discord's 2000-character limit.
 /// Tries to split at newline/space boundaries before hard splits.
 pub fn split_message_for_discord(message: &str) -> Vec<String> {
+    if message.is_ascii() {
+        return split_ascii_message_for_discord(message);
+    }
+
     if message.chars().count() <= DISCORD_MAX_MESSAGE_LENGTH {
         return vec![message.to_string()];
     }
@@ -44,21 +60,56 @@ pub fn split_message_for_discord(message: &str) -> Vec<String> {
     chunks
 }
 
+fn split_ascii_message_for_discord(message: &str) -> Vec<String> {
+    if message.len() <= DISCORD_MAX_MESSAGE_LENGTH {
+        return vec![message.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut cursor = 0;
+
+    while cursor < message.len() {
+        let hard_split = usize::min(cursor + DISCORD_MAX_MESSAGE_LENGTH, message.len());
+        let chunk_end = if hard_split == message.len() {
+            hard_split
+        } else {
+            let search_area = &message[cursor..hard_split];
+            if let Some(pos) = search_area.rfind('\n') {
+                if pos >= DISCORD_MAX_MESSAGE_LENGTH / 2 {
+                    cursor + pos + 1
+                } else {
+                    search_area
+                        .rfind(' ')
+                        .map_or(hard_split, |space| cursor + space + 1)
+                }
+            } else if let Some(pos) = search_area.rfind(' ') {
+                cursor + pos + 1
+            } else {
+                hard_split
+            }
+        };
+
+        chunks.push(message[cursor..chunk_end].to_string());
+        cursor = chunk_end;
+    }
+
+    chunks
+}
+
 pub fn split_for_discord(message: &str) -> Vec<String> {
     split_message_for_discord(message)
 }
 
 /// Extract absolute file paths with supported extensions.
 pub fn extract_file_paths(text: &str) -> Vec<String> {
-    let path_re = Regex::new(
-        r#"(?i)(?:^|[\s`"'(\[])(/[^\s`"')\]]+\.(?:png|jpg|jpeg|gif|webp|svg|bmp|pdf|docx|pptx|xlsx|csv|json|txt))(?:$|[\s`"')\].,;:!?])"#,
-    )
-    .expect("valid file path regex");
+    if !text.contains('/') {
+        return Vec::new();
+    }
 
     let mut seen = HashSet::new();
     let mut paths = Vec::new();
 
-    for caps in path_re.captures_iter(text) {
+    for caps in FILE_PATH_REGEX.captures_iter(text) {
         let Some(path) = caps.get(1) else {
             continue;
         };
@@ -76,25 +127,33 @@ pub fn extract_file_paths(text: &str) -> Vec<String> {
 pub fn strip_file_paths(text: &str, file_paths: &[String]) -> String {
     let mut result = text.to_string();
 
-    for path in file_paths {
-        let escaped = regex::escape(path);
+    let mut escaped_paths: Vec<String> = file_paths
+        .iter()
+        .map(|path| path.trim())
+        .filter(|path| !path.is_empty())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .map(regex::escape)
+        .collect();
 
+    escaped_paths.sort_by(|a, b| b.len().cmp(&a.len()));
+
+    if !escaped_paths.is_empty() {
+        let alternation = escaped_paths.join("|");
         let image_re =
-            Regex::new(&format!(r#"!\[[^\]]*\]\({escaped}\)"#)).expect("valid image regex");
+            Regex::new(&format!(r#"!\[[^\]]*\]\((?:{alternation})\)"#)).expect("valid image regex");
+        let tick_re = Regex::new(&format!(r#"`(?:{alternation})`"#)).expect("valid backtick regex");
+        let path_re = Regex::new(&format!(r#"(?:{alternation})"#)).expect("valid path regex");
+
         result = image_re.replace_all(&result, "").to_string();
-
-        let tick_re = Regex::new(&format!(r#"`{escaped}`"#)).expect("valid backtick regex");
         result = tick_re.replace_all(&result, "").to_string();
-
-        let path_re = Regex::new(&escaped).expect("valid path regex");
         result = path_re.replace_all(&result, "").to_string();
     }
 
-    let newline_re = Regex::new(r#"\n{3,}"#).expect("valid newline regex");
-    let blank_ws_line = Regex::new(r#"(?m)^[ \t]+$"#).expect("valid blank ws regex");
-
-    result = newline_re.replace_all(&result, "\n\n").to_string();
-    blank_ws_line.replace_all(&result, "").to_string()
+    result = COLLAPSE_BLANK_LINES_REGEX
+        .replace_all(&result, "\n\n")
+        .to_string();
+    BLANK_WS_LINE_REGEX.replace_all(&result, "").to_string()
 }
 
 #[cfg(test)]

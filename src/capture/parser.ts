@@ -5,6 +5,9 @@
 
 const ANSI_REGEX = /\x1B(?:\[[0-9;]*[A-Za-z]|\].*?(?:\x07|\x1B\\)|\([A-Z])/g;
 const DISCORD_MAX_MESSAGE_LENGTH = 2000;
+const CODE_FENCE_TOKEN = '```';
+const COLLAPSE_BLANK_LINES_REGEX = /\n{3,}/g;
+const BLANK_WHITESPACE_LINE_REGEX = /^[ \t]+$/gm;
 
 /**
  * Strip ANSI escape codes from terminal output
@@ -83,6 +86,11 @@ export function splitMessages(text: string, maxLen: number = 1900): string[] {
   const stripped = stripOuterCodeblock(text);
   if (stripped.length <= normalizedMaxLen) return [stripped];
 
+  // Hot path: most outputs do not contain code fences.
+  if (!stripped.includes(CODE_FENCE_TOKEN)) {
+    return splitRawText(stripped, normalizedMaxLen);
+  }
+
   // Reserve room for codeblock re-open/close wrappers so post-processing stays
   // within max length while preserving all content.
   const codeFenceOverhead = estimateCodeFenceOverhead(stripped);
@@ -155,6 +163,15 @@ function estimateCodeFenceOverhead(text: string): number {
 function splitRawText(text: string, maxLen: number): string[] {
   if (text.length <= maxLen) return [text];
 
+  // Fast path for single-line payloads: avoid repeated newline scans.
+  if (!text.includes('\n')) {
+    const chunks: string[] = [];
+    for (let cursor = 0; cursor < text.length; cursor += maxLen) {
+      chunks.push(text.slice(cursor, Math.min(cursor + maxLen, text.length)));
+    }
+    return chunks;
+  }
+
   const chunks: string[] = [];
   let cursor = 0;
 
@@ -220,23 +237,29 @@ const FILE_PATH_REGEX = new RegExp(
  */
 export function stripFilePaths(text: string, filePaths: string[]): string {
   let result = text;
-  for (const p of filePaths) {
-    const escaped = p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escapedPaths = [...new Set(filePaths.map((path) => path.trim()).filter((path) => path.length > 0))]
+    .sort((a, b) => b.length - a.length)
+    .map((path) => path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+
+  if (escapedPaths.length > 0) {
+    const alternation = escapedPaths.join('|');
     // Markdown image: ![any alt text](path)
-    result = result.replace(new RegExp(`!\\[[^\\]]*\\]\\(${escaped}\\)`, 'g'), '');
+    result = result.replace(new RegExp(`!\\[[^\\]]*\\]\\((?:${alternation})\\)`, 'g'), '');
     // Backtick-wrapped: `path`
-    result = result.replace(new RegExp('`' + escaped + '`', 'g'), '');
+    result = result.replace(new RegExp('`(?:' + alternation + ')`', 'g'), '');
     // Standalone path (possibly with surrounding whitespace on the line)
-    result = result.replace(new RegExp(escaped, 'g'), '');
+    result = result.replace(new RegExp('(?:' + alternation + ')', 'g'), '');
   }
   // Collapse 3+ consecutive newlines into 2
-  result = result.replace(/\n{3,}/g, '\n\n');
+  result = result.replace(COLLAPSE_BLANK_LINES_REGEX, '\n\n');
   // Trim trailing whitespace on each line left empty by removal
-  result = result.replace(/^[ \t]+$/gm, '');
+  result = result.replace(BLANK_WHITESPACE_LINE_REGEX, '');
   return result;
 }
 
 export function extractFilePaths(text: string): string[] {
+  if (!text.includes('/')) return [];
+
   const paths: string[] = [];
   const seen = new Set<string>();
 

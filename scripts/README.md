@@ -42,6 +42,8 @@ Scripts are grouped by intent.
 - `ops:doctor`: run doctor report.
 - `ops:doctor:fix`: run doctor with safe auto-fixes.
 - `ops:daemon:restart`: restart daemon via CLI.
+- `ops:update:explain`: print resolved update mode/commands without executing.
+- `ops:align:explain`: print resolved version-align mode/commands without executing.
 - `ops:self-heal`: build + `repair deep` (doctor fix + daemon restart + health verify).
 - `ops:verify:fast`: quick regression set for config/capture/router/index hot paths.
 - `ops:verify:gepa`: GEPA/prompt-refiner regression set (typecheck + TS/Python/Rust checks + help smokes).

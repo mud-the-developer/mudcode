@@ -559,10 +559,6 @@
   - `MessagingClient.sendToProgressThreadWithFiles` optional 확장
   - Discord 구현에서 progress thread target 재사용 + 파일 첨부 전송
   - `hook-server` worker visibility=`thread`에서 파일 릴레이 활성화
-- ✅ strict event-only fallback 제어 추가
-  - `AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK=0`이면
-    codex event-only에서 lifecycle stale fallback capture 비활성화
-  - `/doctor`에 strict parity 경고(`event-only-capture-fallback-enabled`) 추가
 - ✅ auto orchestration fanout 옵션 추가
   - `AGENT_DISCORD_ORCHESTRATOR_AUTO_DISPATCH_MAX_WORKERS` (기본값 `1`)
   - 조건 충족 시 다중 worker까지 자동 dispatch/queue 처리
@@ -573,9 +569,7 @@
   - non-strict 모드에서는 기존 완화 휴리스틱 허용
 - ✅ 테스트 보강
   - worker thread file relay 테스트 추가
-  - strict event-only fallback off 테스트 추가
   - auto fanout dispatch 테스트 추가
-  - doctor strict parity warning 테스트 추가
 
 ### CP33 - 동적 worker spawn/teardown 런타임 경로 추가(진행 중)
 
@@ -619,8 +613,7 @@
 - ✅ codex event-only 기본값 ON 전환
   - `capture-poller`: `AGENT_DISCORD_CODEX_EVENT_ONLY` 미설정 시 `true`
   - `hook-server`: event-only progress gate를 기본 활성으로 적용
-- ✅ strict parity 기본값 정렬
-  - `AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK` 기본값 `0`
+- ✅ strict lifecycle 기본값 정렬
   - `AGENT_DISCORD_EVENT_LIFECYCLE_STRICT_MODE` 기본값 `warn`
   - `/doctor`의 기본 진단 기준도 동일 기본값으로 동기화
 - ✅ 회귀 테스트 정렬

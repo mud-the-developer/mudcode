@@ -22,10 +22,12 @@
   - 관련 회귀 테스트 추가
 - [x] capture 휴리스틱 추가 축소 (event hook lifecycle 중심)
   - eventHook 캡처 경로에서 prompt-echo 과다 suppression 시 raw delta fallback 기본 차단
-  - env: `AGENT_DISCORD_CAPTURE_PROMPT_ECHO_FALLBACK_EVENT_HOOK` (기본 off)
-  - strict event-only에서 중간 텍스트 노출 리스크 완화
+  - codex event-driven 런타임에서 중간 텍스트 노출 리스크 완화
 - [x] OpenClaw 스타일 `/subagents` alias 추가 (오케스트레이터 매핑)
   - `list`, `spawn`, `send`, `kill`, `kill all`
+- [x] `/snapshot` + `/subagents log` raw 출력 가드레일 추가
+  - tmux raw dump를 Discord 전송 전 line/char budget으로 제한
+  - 과다 출력 시 `...[truncated by ... guardrail: ...]` 마커로 누락/절단 정보를 명시
 - [x] `/subagents list` 실행 메타 강화
   - worker index(` #1 -> instanceId`) 표기
   - worker runtime 세부 상태(활성/큐/stage) 확장
@@ -35,8 +37,11 @@
   - capture-poller의 codex progress hook 송신에서도 orchestrator progress policy(`byChannel/byInstance/byAgentType`) 적용
   - mode/block(window/chars)/streaming 플래그를 hook payload에 일관 반영
 - [x] 운영 점검 규칙 확장
-  - `doctor`: event-only + prompt-echo raw fallback/eventHook stale grace 고위험 설정 경고
-  - `health`: event-only fallback knob 경고(캡처 fallback on, raw-delta fallback on, stale grace 과다)
+  - `doctor`: codex runtime + eventHook stale grace 고위험 설정 경고
+  - `health`: codex runtime fallback stale grace 과다 경고
+- [x] turn-route ledger 운영 env 문서화
+  - `AGENT_DISCORD_TURN_ROUTE_RETENTION_MS`
+  - `AGENT_DISCORD_TURN_ROUTE_MAX`
 - [x] 회귀 테스트/문서 갱신
 
 ## 다음 Phase 권장 작업

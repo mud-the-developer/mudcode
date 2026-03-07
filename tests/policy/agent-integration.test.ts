@@ -50,13 +50,11 @@ describe('agent integration policy', () => {
     expect(result.warningMessages).toContain('Could not reinstall Gemini CLI hook: permission denied');
   });
 
-  it('returns no hook and guidance message for codex', () => {
+  it('returns codex no-op integration result', () => {
     const result = installAgentIntegration('codex', '/project', 'install');
 
     expect(result.eventHookInstalled).toBe(false);
-    expect(result.infoMessages).toContain(
-      'ℹ️ Codex integration uses tmux capture fallback (no native hook available yet)',
-    );
+    expect(result.infoMessages).toHaveLength(0);
     expect(result.warningMessages).toHaveLength(0);
   });
 });

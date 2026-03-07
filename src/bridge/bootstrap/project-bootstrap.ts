@@ -87,11 +87,21 @@ export class BridgeProjectBootstrap {
 
       for (const instance of listProjectInstances(project)) {
         const shouldEnableHook = !!integrationByAgent.get(instance.agentType)?.eventHookInstalled;
+        const shouldDisableCodexHook =
+          instance.agentType === 'codex' &&
+          shouldEnableHook === false &&
+          instance.eventHook === true;
 
         if (shouldEnableHook && !instance.eventHook) {
           nextInstances[instance.instanceId] = {
             ...instance,
             eventHook: true,
+          };
+          changed = true;
+        } else if (shouldDisableCodexHook) {
+          nextInstances[instance.instanceId] = {
+            ...instance,
+            eventHook: false,
           };
           changed = true;
         }

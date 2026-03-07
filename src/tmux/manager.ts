@@ -6,6 +6,7 @@ import type { TmuxSession } from '../types/index.js';
 import type { ICommandExecutor } from '../types/interfaces.js';
 import { ShellCommandExecutor } from '../infra/shell.js';
 import { escapeShellArg } from '../infra/shell-escape.js';
+import { perfMetrics } from '../observability/perf-metrics.js';
 
 const TUI_PANE_TITLE = 'mudcode-tui';
 const TUI_PANE_COMMAND_MARKERS = ['mudcode.js tui', 'mudcode.js tui', 'mudcode tui', 'mudcode tui'];
@@ -51,9 +52,25 @@ export class TmuxManager {
     }
   }
 
+  private resolveTmuxOpType(command: string): string {
+    const matched = command.match(/\btmux\s+([a-z-]+)/i);
+    if (!matched || !matched[1]) return 'unknown';
+    return matched[1].toLowerCase().replace(/-/g, '_');
+  }
+
+  private execTmux(command: string): string {
+    perfMetrics.incrementTmuxExec(this.resolveTmuxOpType(command));
+    return this.executor.exec(command);
+  }
+
+  private execTmuxVoid(command: string, options?: { stdio?: any }): void {
+    perfMetrics.incrementTmuxExec(this.resolveTmuxOpType(command));
+    this.executor.execVoid(command, options);
+  }
+
   listSessions(): TmuxSession[] {
     try {
-      const output = this.executor.exec('tmux list-sessions -F "#{session_name}|#{session_attached}|#{session_windows}|#{session_created}"');
+      const output = this.execTmux('tmux list-sessions -F "#{session_name}|#{session_attached}|#{session_windows}|#{session_created}"');
 
       return output
         .trim()
@@ -77,7 +94,7 @@ export class TmuxManager {
   getCurrentSession(paneTarget?: string): string | null {
     if (paneTarget) {
       try {
-        const output = this.executor.exec(
+        const output = this.execTmux(
           `tmux display-message -p -t ${escapeShellArg(paneTarget)} "#{session_name}"`,
         );
         const sessionName = output.trim();
@@ -88,7 +105,7 @@ export class TmuxManager {
     }
 
     try {
-      const output = this.executor.exec('tmux display-message -p "#{session_name}"');
+      const output = this.execTmux('tmux display-message -p "#{session_name}"');
       const sessionName = output.trim();
       return sessionName.length > 0 ? sessionName : null;
     } catch {
@@ -99,7 +116,7 @@ export class TmuxManager {
   getCurrentWindow(paneTarget?: string): string | null {
     if (paneTarget) {
       try {
-        const output = this.executor.exec(
+        const output = this.execTmux(
           `tmux display-message -p -t ${escapeShellArg(paneTarget)} "#{window_name}"`,
         );
         const windowName = output.trim();
@@ -109,7 +126,7 @@ export class TmuxManager {
       }
 
       try {
-        const output = this.executor.exec('tmux list-panes -a -F "#{pane_id}|#{window_name}"');
+        const output = this.execTmux('tmux list-panes -a -F "#{pane_id}|#{window_name}"');
         const matched = output
           .trim()
           .split('\n')
@@ -123,7 +140,7 @@ export class TmuxManager {
     }
 
     try {
-      const output = this.executor.exec('tmux display-message -p "#{window_name}"');
+      const output = this.execTmux('tmux display-message -p "#{window_name}"');
       const windowName = output.trim();
       return windowName.length > 0 ? windowName : null;
     } catch {
@@ -135,29 +152,29 @@ export class TmuxManager {
     const escapedName = escapeShellArg(`${this.sessionPrefix}${name}`);
     if (firstWindowName) {
       const escapedWindowName = escapeShellArg(firstWindowName);
-      this.executor.exec(`tmux new-session -d -s ${escapedName} -n ${escapedWindowName}`);
+      this.execTmux(`tmux new-session -d -s ${escapedName} -n ${escapedWindowName}`);
       return;
     }
-    this.executor.exec(`tmux new-session -d -s ${escapedName}`);
+    this.execTmux(`tmux new-session -d -s ${escapedName}`);
   }
 
   sendKeys(sessionName: string, keys: string): void {
     const escapedTarget = escapeShellArg(`${this.sessionPrefix}${sessionName}`);
     const escapedKeys = escapeShellArg(keys);
-    this.executor.exec(`tmux send-keys -t ${escapedTarget} ${escapedKeys}`);
-    this.executor.exec(`tmux send-keys -t ${escapedTarget} Enter`);
+    this.execTmux(`tmux send-keys -t ${escapedTarget} ${escapedKeys}`);
+    this.execTmux(`tmux send-keys -t ${escapedTarget} Enter`);
   }
 
   capturePane(sessionName: string): string {
     const escapedTarget = escapeShellArg(`${this.sessionPrefix}${sessionName}`);
     const captureStartLine = this.resolveCaptureStartLine();
-    return this.executor.exec(`tmux capture-pane -t ${escapedTarget} -p -S ${captureStartLine}`);
+    return this.execTmux(`tmux capture-pane -t ${escapedTarget} -p -S ${captureStartLine}`);
   }
 
   sessionExists(name: string): boolean {
     try {
       const escapedTarget = escapeShellArg(`${this.sessionPrefix}${name}`);
-      this.executor.execVoid(`tmux has-session -t ${escapedTarget}`, {
+      this.execTmuxVoid(`tmux has-session -t ${escapedTarget}`, {
         stdio: 'ignore',
       });
       return true;
@@ -173,7 +190,7 @@ export class TmuxManager {
   sessionExistsFull(fullSessionName: string): boolean {
     try {
       const escapedTarget = escapeShellArg(fullSessionName);
-      this.executor.execVoid(`tmux has-session -t ${escapedTarget}`, { stdio: 'ignore' });
+      this.execTmuxVoid(`tmux has-session -t ${escapedTarget}`, { stdio: 'ignore' });
       return true;
     } catch {
       return false;
@@ -208,7 +225,7 @@ export class TmuxManager {
     const commandSuffix = initialCommand ? ` ${escapeShellArg(initialCommand)}` : '';
 
     try {
-      this.executor.exec(`tmux new-window -t ${escapedSession} -n ${escapedWindowName}${commandSuffix}`);
+      this.execTmux(`tmux new-window -t ${escapedSession} -n ${escapedWindowName}${commandSuffix}`);
     } catch (error) {
       throw new Error(`Failed to create window '${windowName}' in session '${sessionName}': ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -222,7 +239,7 @@ export class TmuxManager {
     const escapedWindowName = escapeShellArg(windowName);
 
     try {
-      this.executor.exec(`tmux new-window -d -t ${escapedTarget} -n ${escapedWindowName}`);
+      this.execTmux(`tmux new-window -d -t ${escapedTarget} -n ${escapedWindowName}`);
       return;
     } catch (error) {
       if (this.windowExists(sessionName, indexName)) return;
@@ -239,7 +256,7 @@ export class TmuxManager {
   listWindows(sessionName: string): string[] {
     try {
       const escapedSession = escapeShellArg(sessionName);
-      const output = this.executor.exec(`tmux list-windows -t ${escapedSession} -F "#{window_name}"`);
+      const output = this.execTmux(`tmux list-windows -t ${escapedSession} -F "#{window_name}"`);
 
       return output
         .trim()
@@ -253,7 +270,7 @@ export class TmuxManager {
   windowExists(sessionName: string, windowName: string): boolean {
     try {
       const escapedTarget = escapeShellArg(`${sessionName}:${windowName}`);
-      this.executor.execVoid(`tmux list-panes -t ${escapedTarget}`, { stdio: 'ignore' });
+      this.execTmuxVoid(`tmux list-panes -t ${escapedTarget}`, { stdio: 'ignore' });
       return true;
     } catch {
       return false;
@@ -330,7 +347,7 @@ export class TmuxManager {
   private listPaneMetadata(sessionName: string, windowName: string): PaneMetadata[] {
     const baseTarget = `${sessionName}:${windowName}`;
     const escapedBaseTarget = escapeShellArg(baseTarget);
-      const output = this.executor.exec(
+      const output = this.execTmux(
       `tmux list-panes -t ${escapedBaseTarget} -F "#{pane_index}\t#{pane_title}\t#{pane_start_command}"`,
     );
 
@@ -384,7 +401,7 @@ export class TmuxManager {
 
   private getWindowWidth(target: string): number | undefined {
     try {
-      const output = this.executor.exec(`tmux display-message -p -t ${escapeShellArg(target)} "#{window_width}"`);
+      const output = this.execTmux(`tmux display-message -p -t ${escapeShellArg(target)} "#{window_width}"`);
       const width = parseInt(output.trim(), 10);
       return Number.isFinite(width) ? width : undefined;
     } catch {
@@ -405,7 +422,7 @@ export class TmuxManager {
 
   private resizePaneWidth(target: string, width: number): void {
     try {
-      this.executor.exec(`tmux resize-pane -t ${escapeShellArg(target)} -x ${width}`);
+      this.execTmux(`tmux resize-pane -t ${escapeShellArg(target)} -x ${width}`);
     } catch {
       // Best effort.
     }
@@ -417,7 +434,7 @@ export class TmuxManager {
     const paneCount = this.listPaneMetadata(sessionName, windowName).length;
 
     try {
-      this.executor.exec(`tmux set-window-option -t ${escapeShellArg(windowTarget)} window-size latest`);
+      this.execTmux(`tmux set-window-option -t ${escapeShellArg(windowTarget)} window-size latest`);
     } catch {
       // Best effort.
     }
@@ -425,12 +442,12 @@ export class TmuxManager {
     if (windowWidth !== undefined && paneCount === 2) {
       const mainPaneWidth = Math.max(1, windowWidth - width - 1);
       try {
-        this.executor.exec(`tmux select-layout -t ${escapeShellArg(windowTarget)} main-vertical`);
+        this.execTmux(`tmux select-layout -t ${escapeShellArg(windowTarget)} main-vertical`);
       } catch {
         // Best effort.
       }
       try {
-        this.executor.exec(`tmux set-window-option -t ${escapeShellArg(windowTarget)} main-pane-width ${mainPaneWidth}`);
+        this.execTmux(`tmux set-window-option -t ${escapeShellArg(windowTarget)} main-pane-width ${mainPaneWidth}`);
       } catch {
         // Best effort.
       }
@@ -445,7 +462,7 @@ export class TmuxManager {
       `tmux resize-pane -t ${escapeShellArg(tuiTarget)} -x ${width} >/dev/null 2>&1; ` +
       `true`;
     try {
-      this.executor.exec(`tmux run-shell -b ${escapeShellArg(delayedScript)}`);
+      this.execTmux(`tmux run-shell -b ${escapeShellArg(delayedScript)}`);
     } catch {
       // Best effort.
     }
@@ -463,7 +480,7 @@ export class TmuxManager {
       const [primaryTarget, ...duplicateTargets] = existingTuiTargets;
       for (const duplicateTarget of duplicateTargets) {
         try {
-          this.executor.exec(`tmux kill-pane -t ${escapeShellArg(duplicateTarget)}`);
+          this.execTmux(`tmux kill-pane -t ${escapeShellArg(duplicateTarget)}`);
         } catch {
           // Keep going if cleanup fails for a stale pane target.
         }
@@ -473,17 +490,17 @@ export class TmuxManager {
     }
 
     const activeTarget = this.resolveWindowTarget(sessionName, windowName);
-    const paneIndexOutput = this.executor.exec(
+    const paneIndexOutput = this.execTmux(
       `tmux split-window -P -F "#{pane_index}" -t ${escapeShellArg(activeTarget)} -h -l ${splitWidth} ${escapedTuiCommand}`,
     );
     const paneIndex = paneIndexOutput.trim();
     if (/^\d+$/.test(paneIndex)) {
       const tuiTarget = `${baseTarget}.${paneIndex}`;
-      this.executor.exec(`tmux select-pane -t ${escapeShellArg(tuiTarget)} -T ${escapeShellArg(TUI_PANE_TITLE)}`);
+      this.execTmux(`tmux select-pane -t ${escapeShellArg(tuiTarget)} -T ${escapeShellArg(TUI_PANE_TITLE)}`);
       this.forceTuiPaneWidth(sessionName, windowName, tuiTarget, splitWidth);
     }
 
-    this.executor.exec(`tmux select-pane -t ${escapeShellArg(activeTarget)}`);
+    this.execTmux(`tmux select-pane -t ${escapeShellArg(activeTarget)}`);
   }
 
   /**
@@ -497,7 +514,7 @@ export class TmuxManager {
     try {
       // Send keys and Enter separately for reliability
       this.sendTextChunksToTarget(escapedTarget, keys);
-      this.executor.exec(`tmux send-keys -t ${escapedTarget} Enter`);
+      this.execTmux(`tmux send-keys -t ${escapedTarget} Enter`);
     } catch (error) {
       throw new Error(`Failed to send keys to window '${windowName}' in session '${sessionName}': ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -523,7 +540,7 @@ export class TmuxManager {
     for (let start = 0; start < keys.length; start += TMUX_SEND_KEYS_CHUNK_SIZE) {
       const chunk = keys.slice(start, start + TMUX_SEND_KEYS_CHUNK_SIZE);
       const escapedChunk = escapeShellArg(chunk);
-      this.executor.exec(`tmux send-keys -t ${escapedTarget} ${escapedChunk}`);
+      this.execTmux(`tmux send-keys -t ${escapedTarget} ${escapedChunk}`);
     }
   }
 
@@ -535,7 +552,7 @@ export class TmuxManager {
     const target = this.resolveWindowTarget(sessionName, windowName, paneHint);
     const escapedTarget = escapeShellArg(target);
     try {
-      this.executor.exec(`tmux send-keys -t ${escapedTarget} Enter`);
+      this.execTmux(`tmux send-keys -t ${escapedTarget} Enter`);
     } catch (error) {
       throw new Error(`Failed to send Enter to window '${windowName}' in session '${sessionName}': ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -554,7 +571,7 @@ export class TmuxManager {
     }
 
     try {
-      this.executor.exec(`tmux send-keys -t ${escapedTarget} ${normalized}`);
+      this.execTmux(`tmux send-keys -t ${escapedTarget} ${normalized}`);
     } catch (error) {
       throw new Error(
         `Failed to send key '${normalized}' to window '${windowName}' in session '${sessionName}': ${error instanceof Error ? error.message : String(error)}`,
@@ -572,7 +589,7 @@ export class TmuxManager {
     const escapedCommand = escapeShellArg(command);
 
     try {
-      this.executor.exec(`tmux respawn-pane -k -t ${escapedTarget} ${escapedCommand}`);
+      this.execTmux(`tmux respawn-pane -k -t ${escapedTarget} ${escapedCommand}`);
     } catch (error) {
       throw new Error(
         `Failed to respawn pane for window '${windowName}' in session '${sessionName}': ${error instanceof Error ? error.message : String(error)}`,
@@ -588,7 +605,7 @@ export class TmuxManager {
     const target = this.resolveWindowTarget(sessionName, windowName, paneHint);
     const escapedTarget = escapeShellArg(target);
     try {
-      return this.executor.exec(`tmux display-message -p -t ${escapedTarget} "#{pane_current_command}"`).trim();
+      return this.execTmux(`tmux display-message -p -t ${escapedTarget} "#{pane_current_command}"`).trim();
     } catch (error) {
       throw new Error(
         `Failed to read current command for window '${windowName}' in session '${sessionName}': ${error instanceof Error ? error.message : String(error)}`,
@@ -611,7 +628,7 @@ export class TmuxManager {
     const captureStartLine = this.resolveCaptureStartLine(historyLinesOverride);
 
     try {
-      return this.executor.exec(`tmux capture-pane -t ${escapedTarget} -p -S ${captureStartLine}`);
+      return this.execTmux(`tmux capture-pane -t ${escapedTarget} -p -S ${captureStartLine}`);
     } catch (error) {
       throw new Error(`Failed to capture pane from window '${windowName}' in session '${sessionName}': ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -685,7 +702,7 @@ export class TmuxManager {
     const escapedValue = escapeShellArg(value);
 
     try {
-      this.executor.exec(`tmux set-environment -t ${escapedSession} ${escapedKey} ${escapedValue}`);
+      this.execTmux(`tmux set-environment -t ${escapedSession} ${escapedKey} ${escapedValue}`);
     } catch (error) {
       throw new Error(
         `Failed to set env ${key} on session '${sessionName}': ${error instanceof Error ? error.message : String(error)}`
@@ -699,7 +716,7 @@ export class TmuxManager {
   killWindow(sessionName: string, windowName: string): void {
     const target = `${sessionName}:${windowName}`;
     const escapedTarget = escapeShellArg(target);
-    this.executor.execVoid(`tmux kill-window -t ${escapedTarget}`, { stdio: 'ignore' });
+    this.execTmuxVoid(`tmux kill-window -t ${escapedTarget}`, { stdio: 'ignore' });
   }
 
   /**
@@ -707,7 +724,7 @@ export class TmuxManager {
    */
   killSession(sessionName: string): void {
     const escapedTarget = escapeShellArg(sessionName);
-    this.executor.execVoid(`tmux kill-session -t ${escapedTarget}`, { stdio: 'ignore' });
+    this.execTmuxVoid(`tmux kill-session -t ${escapedTarget}`, { stdio: 'ignore' });
   }
 
   /**

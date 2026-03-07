@@ -4,7 +4,7 @@ import { getProjectInstance, listProjectInstances, normalizeProjectState } from 
 import { TmuxManager } from '../../tmux/manager.js';
 import type { IStateManager } from '../../types/interfaces.js';
 import type { ProjectState } from '../../types/index.js';
-import { PendingMessageTracker } from './pending-message-tracker.js';
+import { PendingMessageTracker, type PendingRouteSnapshot } from './pending-message-tracker.js';
 import { formatDiscordOutput, wrapDiscordCodeblock } from '../formatting/discord-output-formatter.js';
 import type { CodexIoV2Tracker } from '../events/codex-io-v2.js';
 import type { AgentEventHookClient } from '../events/agent-event-hook.js';
@@ -12,11 +12,28 @@ import {
   resolveOrchestratorWorkerVisibility,
   resolveProgressPolicyDirective,
 } from './orchestrator-progress-policy.js';
+import { perfMetrics } from '../../observability/perf-metrics.js';
 
 type ProgressOutputVisibility = 'off' | 'thread' | 'channel';
 type EventProgressMode = 'off' | 'thread' | 'channel';
 type OutputEventType = 'progress' | 'final';
 type DeltaDeliveryResult = { observedOutput: boolean; emittedOutput: boolean };
+type ProgressBatchEntry = {
+  text: string;
+  channelId?: string;
+  outputVisibility?: ProgressOutputVisibility;
+  agentType: string;
+};
+type ProgressHookBurstState = {
+  turnId?: string;
+  emittedCount: number;
+  suppressedCount: number;
+  updatedAtMs: number;
+};
+type RawCaptureSnapshot = {
+  raw: string;
+  cleaned: string;
+};
 
 const LONG_OUTPUT_THREAD_THRESHOLD_MIN = 1200;
 const LONG_OUTPUT_THREAD_THRESHOLD_MAX = 20000;
@@ -24,6 +41,10 @@ const LEGACY_LONG_OUTPUT_THREAD_THRESHOLD_MAX = 100000;
 const FINAL_ONLY_BUFFER_MAX_CHARS_MIN = 4000;
 const FINAL_ONLY_BUFFER_MAX_CHARS_MAX = 500000;
 const DEFAULT_FINAL_ONLY_BUFFER_MAX_CHARS = 120000;
+const DEFAULT_DEAD_WORKER_MISSING_POLL_THRESHOLD = 6;
+const DISCORD_OUTPUT_MAX_CHUNKS_DEFAULT = 4;
+const DISCORD_OUTPUT_MAX_CHUNKS_MIN = 1;
+const DISCORD_OUTPUT_MAX_CHUNKS_MAX = 40;
 
 export interface BridgeCapturePollerDeps {
   messaging: MessagingClient;
@@ -52,27 +73,36 @@ export class BridgeCapturePoller {
   private readonly quietPendingPollThreshold: number;
   private readonly codexInitialQuietPendingPollThreshold: number;
   private readonly codexFinalOnlyModeEnabled: boolean;
-  private readonly codexEventOnlyModeEnabled: boolean;
-  private readonly codexEventOnlyCaptureFallbackEnabled: boolean;
+  private readonly codexForceEventOutputEnabled: boolean;
   private readonly longOutputThreadThreshold: number;
   private readonly stalePendingAlertMs: number;
+  private readonly stalePendingAutoRecoverEnabled: boolean;
   private readonly promptEchoFilterEnabled: boolean;
   private readonly promptEchoSuppressionMaxPolls: number;
-  private readonly promptEchoFallbackRawDeltaOnEventHookCaptureEnabled: boolean;
   private readonly redrawFallbackTailLines: number;
   private readonly progressOutputVisibility: ProgressOutputVisibility;
   private readonly codexProgressHookMinIntervalMs: number;
+  private readonly codexProgressHookMaxMessagesPerTurn: number;
   private readonly finalOnlyBufferMaxChars: number;
+  private readonly progressDuplicateWindowMs: number;
+  private readonly progressBatchEnabled: boolean;
+  private readonly progressBatchMaxChars: number;
   private readonly eventHookCaptureFallbackStaleGraceMs: number;
+  private readonly eventHookCaptureOutputEnabled: boolean;
   private readonly codexEventProgressMode?: EventProgressMode;
   private readonly codexEventProgressBlockStreaming?: boolean;
   private readonly codexEventProgressBlockWindowMs?: number;
   private readonly codexEventProgressBlockMaxChars?: number;
+  private readonly idleRefreshPolls: number;
+  private readonly idleRefreshMaxPolls: number;
+  private readonly idleRefreshBackoffMaxSteps: number;
+  private readonly deadWorkerMissingPollThreshold: number;
   private timer?: ReturnType<typeof setInterval>;
   private running = false;
   private snapshotsByInstance = new Map<string, string>();
   private lastCaptureMutationAtByInstance = new Map<string, number>();
   private stalePendingAlertStageByInstance = new Map<string, number>();
+  private stalePendingAutoRecoveredBaselineByInstance = new Map<string, number>();
   private completionCandidatesByInstance = new Map<
     string,
     { projectName: string; agentType: string; instanceId: string }
@@ -89,8 +119,16 @@ export class BridgeCapturePoller {
   private supervisorFinalFormatRetryStateByInstance = new Map<string, { count: number; lastTurnId?: string }>();
   private progressHookHeartbeatByInstance = new Map<string, { atMs: number; turnId?: string }>();
   private progressHookInFlightByInstance = new Set<string>();
+  private progressHookBurstByInstance = new Map<string, ProgressHookBurstState>();
+  private codexFinalHookTurnByInstance = new Map<string, string>();
   private eventHookFallbackActiveByInstance = new Set<string>();
   private eventHookStaleSinceByInstance = new Map<string, number>();
+  private idleSkipPollsByInstance = new Map<string, number>();
+  private idleSkipBackoffByInstance = new Map<string, number>();
+  private rawCaptureSnapshotByInstance = new Map<string, RawCaptureSnapshot>();
+  private missingWorkerWindowPollsByInstance = new Map<string, number>();
+  private lastProgressOutputByRoute = new Map<string, { text: string; atMs: number }>();
+  private progressBatchByInstance = new Map<string, ProgressBatchEntry>();
 
   constructor(private deps: BridgeCapturePollerDeps) {
     this.intervalMs = this.resolveIntervalMs(deps.intervalMs);
@@ -99,25 +137,32 @@ export class BridgeCapturePoller {
       deps.codexInitialQuietPendingPollThreshold,
     );
     this.codexFinalOnlyModeEnabled = this.resolveCodexFinalOnlyModeEnabled(deps.codexFinalOnlyModeEnabled);
-    this.codexEventOnlyModeEnabled = this.resolveCodexEventOnlyModeEnabled();
-    this.codexEventOnlyCaptureFallbackEnabled = this.resolveCodexEventOnlyCaptureFallbackEnabled();
+    this.codexForceEventOutputEnabled = this.resolveCodexForceEventOutputEnabled();
     this.longOutputThreadThreshold = this.resolveLongOutputThreadThreshold(deps.longOutputThreadThreshold);
     this.stalePendingAlertMs = this.resolveStalePendingAlertMs(deps.stalePendingAlertMs);
+    this.stalePendingAutoRecoverEnabled = this.resolveStalePendingAutoRecoverEnabled();
     this.promptEchoFilterEnabled = this.resolvePromptEchoFilterEnabled(deps.promptEchoFilterEnabled);
     this.promptEchoSuppressionMaxPolls = this.resolvePromptEchoSuppressionMaxPolls(deps.promptEchoSuppressionMaxPolls);
-    this.promptEchoFallbackRawDeltaOnEventHookCaptureEnabled =
-      this.resolvePromptEchoFallbackRawDeltaOnEventHookCaptureEnabled();
     this.redrawFallbackTailLines = this.resolveRedrawFallbackTailLines(deps.redrawFallbackTailLines);
     this.progressOutputVisibility = this.resolveProgressOutputVisibility(deps.progressOutputVisibility);
     this.codexProgressHookMinIntervalMs = this.resolveCodexProgressHookMinIntervalMs(
       deps.codexProgressHookMinIntervalMs,
     );
+    this.codexProgressHookMaxMessagesPerTurn = this.resolveCodexProgressHookMaxMessagesPerTurn();
     this.finalOnlyBufferMaxChars = this.resolveFinalOnlyBufferMaxChars(deps.finalOnlyBufferMaxChars);
+    this.progressDuplicateWindowMs = this.resolveProgressDuplicateWindowMs();
+    this.progressBatchEnabled = this.resolveProgressBatchEnabled();
+    this.progressBatchMaxChars = this.resolveProgressBatchMaxChars();
     this.eventHookCaptureFallbackStaleGraceMs = this.resolveEventHookCaptureFallbackStaleGraceMs();
+    this.eventHookCaptureOutputEnabled = this.resolveEventHookCaptureOutputEnabled();
     this.codexEventProgressMode = this.resolveCodexEventProgressMode();
     this.codexEventProgressBlockStreaming = this.resolveCodexEventProgressBlockStreaming();
     this.codexEventProgressBlockWindowMs = this.resolveCodexEventProgressBlockWindowMs();
     this.codexEventProgressBlockMaxChars = this.resolveCodexEventProgressBlockMaxChars();
+    this.idleRefreshPolls = this.resolveIdleRefreshPolls();
+    this.idleRefreshMaxPolls = this.resolveIdleRefreshMaxPolls();
+    this.idleRefreshBackoffMaxSteps = this.resolveIdleRefreshBackoffMaxSteps();
+    this.deadWorkerMissingPollThreshold = this.resolveDeadWorkerMissingPollThreshold();
   }
 
   start(): void {
@@ -138,6 +183,7 @@ export class BridgeCapturePoller {
     this.running = false;
     this.lastCaptureMutationAtByInstance.clear();
     this.stalePendingAlertStageByInstance.clear();
+    this.stalePendingAutoRecoveredBaselineByInstance.clear();
     this.completionCandidatesByInstance.clear();
     this.quietPendingPollsByInstance.clear();
     this.finalOnlyQuietFlushPollsByInstance.clear();
@@ -148,8 +194,16 @@ export class BridgeCapturePoller {
     this.supervisorFinalFormatRetryStateByInstance.clear();
     this.progressHookHeartbeatByInstance.clear();
     this.progressHookInFlightByInstance.clear();
+    this.progressHookBurstByInstance.clear();
+    this.codexFinalHookTurnByInstance.clear();
     this.eventHookFallbackActiveByInstance.clear();
     this.eventHookStaleSinceByInstance.clear();
+    this.idleSkipPollsByInstance.clear();
+    this.idleSkipBackoffByInstance.clear();
+    this.rawCaptureSnapshotByInstance.clear();
+    this.missingWorkerWindowPollsByInstance.clear();
+    this.lastProgressOutputByRoute.clear();
+    this.progressBatchByInstance.clear();
   }
 
   private resolveIntervalMs(configured?: number): number {
@@ -199,8 +253,8 @@ export class BridgeCapturePoller {
     return true;
   }
 
-  private resolveCodexEventOnlyModeEnabled(): boolean {
-    const raw = process.env.AGENT_DISCORD_CODEX_EVENT_ONLY;
+  private resolveCodexForceEventOutputEnabled(): boolean {
+    const raw = process.env.AGENT_DISCORD_CODEX_FORCE_EVENT_OUTPUT;
     if (!raw) return true;
     const normalized = raw.trim().toLowerCase();
     if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
@@ -208,17 +262,49 @@ export class BridgeCapturePoller {
     return true;
   }
 
-  private resolveCodexEventOnlyCaptureFallbackEnabled(): boolean {
-    const raw = process.env.AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK;
-    if (!raw) return false;
+  private resolveProgressDuplicateWindowMs(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_CAPTURE_PROGRESS_DEDUPE_WINDOW_MS || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 0 && fromEnv <= 60_000) {
+      return Math.trunc(fromEnv);
+    }
+    return 2500;
+  }
+
+  private resolveProgressBatchEnabled(): boolean {
+    const raw = process.env.AGENT_DISCORD_CAPTURE_PROGRESS_BATCH_ENABLED;
+    if (!raw) return true;
     const normalized = raw.trim().toLowerCase();
     if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
     if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
-    return false;
+    return true;
+  }
+
+  private resolveProgressBatchMaxChars(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_CAPTURE_PROGRESS_BATCH_MAX_CHARS || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 400 && fromEnv <= 20_000) {
+      return Math.trunc(fromEnv);
+    }
+    return 2600;
   }
 
   private isCodexEventOnlyActive(agentType: string): boolean {
-    return agentType === 'codex' && this.codexEventOnlyModeEnabled && this.deps.eventHookClient?.enabled === true;
+    if (agentType !== 'codex') return false;
+    if (this.deps.eventHookClient?.enabled !== true) return false;
+    // Stage B: codex lifecycle is enforced event-only whenever hook bridge is active.
+    return true;
+  }
+
+  private isCodexEventOutputAuthoritative(agentType: string): boolean {
+    if (agentType !== 'codex') return false;
+    if (this.deps.eventHookClient?.enabled !== true) return false;
+    return this.codexForceEventOutputEnabled;
+  }
+
+  private isEventHookDrivenInstance(agentType: string, persistedEventHook?: boolean): boolean {
+    // Codex still derives lifecycle events from tmux capture and posts them via local event-hook bridge.
+    // Keep capture polling enabled for codex regardless of persisted eventHook state.
+    if (agentType === 'codex') return false;
+    return persistedEventHook === true;
   }
 
   private resolveLongOutputThreadThreshold(configured?: number): number {
@@ -235,7 +321,7 @@ export class BridgeCapturePoller {
       if (normalized <= LEGACY_LONG_OUTPUT_THREAD_THRESHOLD_MAX) return LONG_OUTPUT_THREAD_THRESHOLD_MAX;
       return LONG_OUTPUT_THREAD_THRESHOLD_MAX;
     }
-    return 2000;
+    return 1600;
   }
 
   private resolveStalePendingAlertMs(configured?: number): number {
@@ -247,6 +333,15 @@ export class BridgeCapturePoller {
       return Math.trunc(fromEnv);
     }
     return 60000;
+  }
+
+  private resolveStalePendingAutoRecoverEnabled(): boolean {
+    const raw = process.env.AGENT_DISCORD_CAPTURE_STALE_AUTO_RECOVER;
+    if (!raw) return true;
+    const normalized = raw.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+    return true;
   }
 
   private resolvePromptEchoFilterEnabled(configured?: boolean): boolean {
@@ -268,21 +363,6 @@ export class BridgeCapturePoller {
       return Math.trunc(fromEnv);
     }
     return 4;
-  }
-
-  private resolvePromptEchoFallbackRawDeltaOnEventHookCaptureEnabled(): boolean {
-    const raw = process.env.AGENT_DISCORD_CAPTURE_PROMPT_ECHO_FALLBACK_EVENT_HOOK;
-    if (!raw) return false;
-    const normalized = raw.trim().toLowerCase();
-    if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
-    if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
-    return false;
-  }
-
-  private shouldDeliverPromptEchoFallbackRawDelta(agentType: string, eventHookCapture: boolean): boolean {
-    if (agentType !== 'codex') return true;
-    if (!eventHookCapture) return true;
-    return this.promptEchoFallbackRawDeltaOnEventHookCaptureEnabled;
   }
 
   private resolveRedrawFallbackTailLines(configured?: number): number {
@@ -320,6 +400,14 @@ export class BridgeCapturePoller {
     return 5000;
   }
 
+  private resolveCodexProgressHookMaxMessagesPerTurn(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_EVENT_PROGRESS_MAX_MESSAGES_PER_TURN || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 0 && fromEnv <= 200) {
+      return Math.trunc(fromEnv);
+    }
+    return 6;
+  }
+
   private resolveFinalOnlyBufferMaxChars(configured?: number): number {
     if (typeof configured === 'number' && Number.isFinite(configured)) {
       const normalized = Math.trunc(configured);
@@ -345,6 +433,65 @@ export class BridgeCapturePoller {
       return Math.trunc(fromEnv);
     }
     return 10_000;
+  }
+
+  private resolveEventHookCaptureOutputEnabled(): boolean {
+    const fromEnv = this.parseBoolean(process.env.AGENT_DISCORD_EVENT_HOOK_CAPTURE_OUTPUT);
+    if (fromEnv !== undefined) return fromEnv;
+    return false;
+  }
+
+  private resolveIdleRefreshPolls(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_CAPTURE_IDLE_REFRESH_POLLS || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 0 && fromEnv <= 20) {
+      return Math.trunc(fromEnv);
+    }
+    return 2;
+  }
+
+  private resolveIdleRefreshMaxPolls(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_CAPTURE_IDLE_REFRESH_MAX_POLLS || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 0 && fromEnv <= 120) {
+      return Math.trunc(fromEnv);
+    }
+    return 8;
+  }
+
+  private resolveIdleRefreshBackoffMaxSteps(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_CAPTURE_IDLE_REFRESH_BACKOFF_MAX_STEPS || '');
+    if (Number.isFinite(fromEnv) && fromEnv >= 0 && fromEnv <= 60) {
+      return Math.trunc(fromEnv);
+    }
+    return 6;
+  }
+
+  private resolveIdleSkipThreshold(key: string): number {
+    if (this.idleRefreshPolls <= 0) return 0;
+    const backoff = this.idleSkipBackoffByInstance.get(key) || 0;
+    const threshold = this.idleRefreshPolls + Math.max(0, backoff);
+    return Math.max(this.idleRefreshPolls, Math.min(this.idleRefreshMaxPolls, threshold));
+  }
+
+  private bumpIdleSkipBackoff(key: string): void {
+    if (this.idleRefreshBackoffMaxSteps <= 0) return;
+    const current = this.idleSkipBackoffByInstance.get(key) || 0;
+    const next = Math.min(this.idleRefreshBackoffMaxSteps, current + 1);
+    if (next <= 0) {
+      this.idleSkipBackoffByInstance.delete(key);
+      return;
+    }
+    this.idleSkipBackoffByInstance.set(key, next);
+  }
+
+  private resolveDeadWorkerMissingPollThreshold(): number {
+    const raw = process.env.AGENT_DISCORD_ORCHESTRATOR_DEAD_WORKER_MISSING_POLLS;
+    if (raw && raw.trim().length > 0) {
+      const fromEnv = Number(raw);
+      if (Number.isFinite(fromEnv) && fromEnv >= 0 && fromEnv <= 120) {
+        return Math.trunc(fromEnv);
+      }
+    }
+    return DEFAULT_DEAD_WORKER_MISSING_POLL_THRESHOLD;
   }
 
   private parseBoolean(raw: string | undefined): boolean | undefined {
@@ -418,12 +565,14 @@ export class BridgeCapturePoller {
   private markCaptureMutation(key: string, now: number): void {
     this.lastCaptureMutationAtByInstance.set(key, now);
     this.stalePendingAlertStageByInstance.delete(key);
+    this.stalePendingAutoRecoveredBaselineByInstance.delete(key);
     this.finalOnlyQuietFlushPollsByInstance.delete(key);
   }
 
   private clearStalePendingAlertState(key: string): void {
     this.lastCaptureMutationAtByInstance.delete(key);
     this.stalePendingAlertStageByInstance.delete(key);
+    this.stalePendingAutoRecoveredBaselineByInstance.delete(key);
   }
 
   private resolveNextStalePendingAlertStage(elapsedMs: number, currentStage: number): number {
@@ -473,14 +622,68 @@ export class BridgeCapturePoller {
       .sendToChannel(params.channelId, alertMessage)
       .catch(() => undefined);
     this.stalePendingAlertStageByInstance.set(params.key, nextStage);
+    await this.maybeAutoRecoverStalePending({
+      key: params.key,
+      stage: nextStage,
+      baselineMs: baseline,
+      pendingDepth: params.pendingDepth,
+      channelId: params.channelId,
+      projectName: params.projectName,
+      agentType: params.agentType,
+      instanceId: params.instanceId,
+    });
+  }
+
+  private async maybeAutoRecoverStalePending(params: {
+    key: string;
+    stage: number;
+    baselineMs: number;
+    pendingDepth: number;
+    channelId?: string;
+    projectName: string;
+    agentType: string;
+    instanceId: string;
+  }): Promise<void> {
+    if (!this.stalePendingAutoRecoverEnabled) return;
+    if (params.stage < 2) return;
+    if (params.pendingDepth <= 0) return;
+    if (this.stalePendingAutoRecoveredBaselineByInstance.get(params.key) === params.baselineMs) return;
+
+    const tracker = this.deps.pendingTracker as unknown as {
+      markRetry?: (projectName: string, agentType: string, instanceId?: string, target?: 'head' | 'tail') => Promise<void>;
+    };
+    if (typeof tracker.markRetry !== 'function') return;
+
+    await tracker.markRetry(params.projectName, params.agentType, params.instanceId).catch(() => undefined);
+    this.stalePendingAutoRecoveredBaselineByInstance.set(params.key, params.baselineMs);
+    this.quietPendingPollsByInstance.delete(params.key);
+    this.completionCandidatesByInstance.delete(params.key);
+
+    if (params.channelId) {
+      await this.deps.messaging
+        .sendToChannel(
+          params.channelId,
+          `🔁 Auto-recover triggered for \`${params.projectName}/${params.instanceId}\`: stale pending was marked as retry.`,
+        )
+        .catch(() => undefined);
+    }
   }
 
   private shouldUseThreadedLongOutput(text: string): boolean {
-    return (
-      this.deps.messaging.platform === 'discord' &&
-      text.length >= this.longOutputThreadThreshold &&
-      typeof this.deps.messaging.sendLongOutput === 'function'
-    );
+    if (
+      this.deps.messaging.platform !== 'discord' ||
+      typeof this.deps.messaging.sendLongOutput !== 'function'
+    ) {
+      return false;
+    }
+    if (text.length >= this.longOutputThreadThreshold) {
+      return true;
+    }
+    const nonEmptyLines = text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    return text.length >= 600 && nonEmptyLines.length >= 12;
   }
 
   private async sendProgressChunk(
@@ -505,11 +708,60 @@ export class BridgeCapturePoller {
     return true;
   }
 
+  private shouldSkipDuplicateProgressOutput(
+    channelId: string,
+    outputVisibility: ProgressOutputVisibility,
+    text: string,
+  ): boolean {
+    if (this.progressDuplicateWindowMs <= 0) return false;
+    const routeKey = `${channelId}:${outputVisibility}`;
+    const now = Date.now();
+    const previous = this.lastProgressOutputByRoute.get(routeKey);
+    if (previous && previous.text === text && now - previous.atMs < this.progressDuplicateWindowMs) {
+      return true;
+    }
+    this.lastProgressOutputByRoute.set(routeKey, { text, atMs: now });
+    while (this.lastProgressOutputByRoute.size > 2000) {
+      const oldest = this.lastProgressOutputByRoute.keys().next();
+      if (oldest.done) break;
+      this.lastProgressOutputByRoute.delete(oldest.value);
+    }
+    return false;
+  }
+
+  private resolveDiscordOutputMaxChunks(): number {
+    const fromEnv = Number(process.env.AGENT_DISCORD_OUTPUT_MAX_CHUNKS || '');
+    if (
+      Number.isFinite(fromEnv) &&
+      fromEnv >= DISCORD_OUTPUT_MAX_CHUNKS_MIN &&
+      fromEnv <= DISCORD_OUTPUT_MAX_CHUNKS_MAX
+    ) {
+      return Math.trunc(fromEnv);
+    }
+    return DISCORD_OUTPUT_MAX_CHUNKS_DEFAULT;
+  }
+
+  private capDiscordOutputChunks(chunks: string[]): string[] {
+    if (this.deps.messaging.platform !== 'discord') return chunks;
+    const maxChunks = this.resolveDiscordOutputMaxChunks();
+    if (chunks.length <= maxChunks) return chunks;
+    if (maxChunks <= 1) {
+      return ['⚠️ Output truncated to reduce Discord flood.'];
+    }
+    const keepCount = Math.max(1, maxChunks - 1);
+    const omitted = Math.max(0, chunks.length - keepCount);
+    return [
+      ...chunks.slice(0, keepCount),
+      `⚠️ Output truncated to reduce Discord flood: omitted ${omitted}/${chunks.length} chunks.`,
+    ];
+  }
+
   private async sendOutput(
     channelId: string,
     text: string,
     eventType: OutputEventType,
     outputVisibilityOverride?: ProgressOutputVisibility,
+    agentType?: string,
   ): Promise<boolean> {
     const outputVisibility =
       outputVisibilityOverride || (eventType === 'progress' ? this.progressOutputVisibility : 'channel');
@@ -523,6 +775,19 @@ export class BridgeCapturePoller {
         : { text, useCodeblock: false, language: 'text' };
     const content = discordFormatted.text;
     if (content.trim().length === 0) return false;
+    if (
+      eventType === 'progress' &&
+      this.shouldSkipDuplicateProgressOutput(channelId, outputVisibility, content.trim())
+    ) {
+      return false;
+    }
+    if (
+      eventType !== 'progress' &&
+      agentType &&
+      this.isCodexEventOutputAuthoritative(agentType)
+    ) {
+      return false;
+    }
 
     const shouldUseLongOutputThread =
       this.shouldUseThreadedLongOutput(content) &&
@@ -534,11 +799,16 @@ export class BridgeCapturePoller {
     }
 
     const split = this.deps.messaging.platform === 'slack' ? splitForSlack : splitForDiscord;
+    const cappedChunks = this.capDiscordOutputChunks(
+      split(content).filter((chunk) => chunk.trim().length > 0),
+    );
+    if (cappedChunks.length === 0) return false;
     let sentAnyChunk = false;
-    for (const chunk of split(content)) {
-      if (chunk.trim().length === 0) continue;
+    for (const chunk of cappedChunks) {
       const payload =
-        this.deps.messaging.platform === 'discord' && discordFormatted.useCodeblock
+        this.deps.messaging.platform === 'discord' &&
+        discordFormatted.useCodeblock &&
+        !chunk.startsWith('⚠️ Output truncated')
           ? wrapDiscordCodeblock(chunk, discordFormatted.language)
           : chunk;
       if (eventType === 'progress') {
@@ -554,6 +824,95 @@ export class BridgeCapturePoller {
       }
     }
     return sentAnyChunk;
+  }
+
+  private shouldBatchProgressDelta(agentType: string, pendingDepth: number): boolean {
+    if (!this.progressBatchEnabled) return false;
+    if (pendingDepth <= 0) return false;
+    if (agentType === 'codex') return false;
+    if (this.codexFinalOnlyModeEnabled && agentType === 'codex') return false;
+    if (this.isCodexEventOutputAuthoritative(agentType)) return false;
+    return true;
+  }
+
+  private appendProgressBatch(params: {
+    key: string;
+    text: string;
+    channelId?: string;
+    outputVisibility?: ProgressOutputVisibility;
+    agentType: string;
+  }): boolean {
+    const trimmed = params.text.trim();
+    if (trimmed.length === 0) return false;
+
+    const existing = this.progressBatchByInstance.get(params.key);
+    if (!existing) {
+      this.progressBatchByInstance.set(params.key, {
+        text: trimmed,
+        channelId: params.channelId,
+        outputVisibility: params.outputVisibility,
+        agentType: params.agentType,
+      });
+      return trimmed.length >= this.progressBatchMaxChars;
+    }
+
+    const merged = this.mergeBufferedOutput(existing.text, trimmed, params.agentType);
+    this.progressBatchByInstance.set(params.key, {
+      text: merged,
+      channelId: params.channelId || existing.channelId,
+      outputVisibility: params.outputVisibility || existing.outputVisibility,
+      agentType: params.agentType || existing.agentType,
+    });
+    return merged.length >= this.progressBatchMaxChars;
+  }
+
+  private async maybeFlushProgressBatch(params: {
+    key: string;
+    fallbackChannelId?: string;
+    fallbackVisibility?: ProgressOutputVisibility;
+    quietEvent?: boolean;
+    force?: boolean;
+  }): Promise<boolean> {
+    const existing = this.progressBatchByInstance.get(params.key);
+    if (!existing) return false;
+
+    const normalized: ProgressBatchEntry = {
+      ...existing,
+      channelId: existing.channelId || params.fallbackChannelId,
+      outputVisibility: existing.outputVisibility || params.fallbackVisibility,
+    };
+    const shouldFlush =
+      params.force === true ||
+      normalized.text.length >= this.progressBatchMaxChars ||
+      params.quietEvent === true;
+
+    if (!shouldFlush) {
+      this.progressBatchByInstance.set(params.key, normalized);
+      return false;
+    }
+
+    if (!normalized.channelId) {
+      if (params.force) {
+        this.progressBatchByInstance.delete(params.key);
+      } else {
+        this.progressBatchByInstance.set(params.key, normalized);
+      }
+      return false;
+    }
+
+    const sent = await this.sendOutput(
+      normalized.channelId,
+      normalized.text,
+      'progress',
+      normalized.outputVisibility,
+      normalized.agentType,
+    );
+    if (sent || params.force) {
+      this.progressBatchByInstance.delete(params.key);
+    } else {
+      this.progressBatchByInstance.set(params.key, normalized);
+    }
+    return sent;
   }
 
   private shouldBufferUntilCompletion(key: string, agentType: string, pendingDepth: number): boolean {
@@ -709,16 +1068,32 @@ export class BridgeCapturePoller {
   }
 
   private async safeEmitCodexFinalEvent(params: {
+    key: string;
     projectName: string;
     instanceId: string;
     turnId?: string;
     channelId?: string;
     text: string;
   }): Promise<boolean> {
+    const normalizedTurnId = params.turnId?.trim();
+    if (normalizedTurnId && this.codexFinalHookTurnByInstance.get(params.key) === normalizedTurnId) {
+      // Event-only mode: one terminal final emit per turn from capture path.
+      return true;
+    }
     const hookClient = this.deps.eventHookClient;
     if (!hookClient?.enabled) return false;
     try {
-      return await hookClient.emitCodexFinal(params);
+      const emitted = await hookClient.emitCodexFinal({
+        projectName: params.projectName,
+        instanceId: params.instanceId,
+        turnId: params.turnId,
+        channelId: params.channelId,
+        text: params.text,
+      });
+      if (emitted && normalizedTurnId) {
+        this.codexFinalHookTurnByInstance.set(params.key, normalizedTurnId);
+      }
+      return emitted;
     } catch (error) {
       console.warn(
         `Codex final hook emit failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -886,6 +1261,7 @@ export class BridgeCapturePoller {
     channelId: string;
     turnId: string;
     prompt: string;
+    deferDispatchingToEvents?: boolean;
   }): Promise<void> {
     const tracker = this.deps.pendingTracker as unknown as {
       markPending?: (
@@ -917,7 +1293,7 @@ export class BridgeCapturePoller {
     if (typeof tracker.markRouteResolved === 'function') {
       await tracker.markRouteResolved(params.projectName, params.agentType, params.instanceId, 'memory');
     }
-    if (typeof tracker.markDispatching === 'function') {
+    if (!params.deferDispatchingToEvents && typeof tracker.markDispatching === 'function') {
       await tracker.markDispatching(params.projectName, params.agentType, params.instanceId);
     }
   }
@@ -937,6 +1313,10 @@ export class BridgeCapturePoller {
       projectName: params.projectName,
       instanceId: params.instanceId,
     });
+    const instance = getProjectInstance(params.normalizedProject, params.instanceId);
+    const deferDispatchingToEvents = Boolean(
+      this.deps.eventHookClient?.enabled && instance && instance.agentType === 'codex' && instance.eventHook !== false,
+    );
 
     try {
       await this.safeTrackSupervisorFormatRetryPending({
@@ -946,6 +1326,7 @@ export class BridgeCapturePoller {
         channelId: params.channelId,
         turnId,
         prompt,
+        deferDispatchingToEvents,
       });
       this.lastPendingTurnIdByInstance.set(params.key, turnId);
       this.progressHookInFlightByInstance.delete(params.key);
@@ -1069,6 +1450,9 @@ export class BridgeCapturePoller {
     ) {
       return;
     }
+    if (this.shouldSuppressCodexProgressBurst({ key: params.key, turnId })) {
+      return;
+    }
 
     const progressConfig = this.resolveCodexProgressHookEventConfig({
       projectName: params.projectName,
@@ -1112,7 +1496,6 @@ export class BridgeCapturePoller {
     outputVisibility?: ProgressOutputVisibility;
   }): Promise<boolean> {
     const { key, channelId, agentType, projectName, instanceId } = params;
-    const codexEventOnlyActive = this.isCodexEventOnlyActive(agentType);
     const buffered = this.bufferedOutputByInstance.get(key);
     if (!buffered || buffered.trim().length === 0) {
       this.bufferedOutputByInstance.delete(key);
@@ -1120,6 +1503,7 @@ export class BridgeCapturePoller {
       this.supervisorFinalFormatRetryStateByInstance.delete(key);
       this.progressHookHeartbeatByInstance.delete(key);
       this.progressHookInFlightByInstance.delete(key);
+      this.progressHookBurstByInstance.delete(key);
       return false;
     }
     const targetChannelId = this.bufferedOutputChannelByInstance.get(key) || channelId;
@@ -1135,6 +1519,7 @@ export class BridgeCapturePoller {
       this.supervisorFinalFormatRetryStateByInstance.delete(key);
       this.progressHookHeartbeatByInstance.delete(key);
       this.progressHookInFlightByInstance.delete(key);
+      this.progressHookBurstByInstance.delete(key);
       return true;
     }
     const output = prepared.trim().length > 0 ? prepared : buffered.trim();
@@ -1182,53 +1567,149 @@ export class BridgeCapturePoller {
       }
     }
     if (agentType === 'codex') {
+      const turnId = this.lastPendingTurnIdByInstance.get(key);
+      if (this.isCodexEventOnlyActive(agentType) && (!turnId || turnId.trim().length === 0)) {
+        // Event-driven final delivery is turn-scoped; avoid emitting no-turn finals
+        // that can bypass lifecycle dedupe and fan out duplicates.
+        return false;
+      }
       const emitted = await this.safeEmitCodexFinalEvent({
+        key,
         projectName,
         instanceId,
-        turnId: this.lastPendingTurnIdByInstance.get(key),
+        turnId,
         channelId: targetChannelId,
         text: output,
       });
       if (emitted) {
         this.bufferedOutputByInstance.delete(key);
         this.bufferedOutputChannelByInstance.delete(key);
-        this.lastPendingTurnIdByInstance.delete(key);
         this.supervisorFinalFormatRetryStateByInstance.delete(key);
         this.progressHookHeartbeatByInstance.delete(key);
         this.progressHookInFlightByInstance.delete(key);
+        this.progressHookBurstByInstance.delete(key);
         return true;
-      }
-      if (codexEventOnlyActive) {
-        return false;
       }
     }
     if (params.outputVisibility === 'off') {
       this.bufferedOutputByInstance.delete(key);
       this.bufferedOutputChannelByInstance.delete(key);
-      this.lastPendingTurnIdByInstance.delete(key);
       this.supervisorFinalFormatRetryStateByInstance.delete(key);
       this.progressHookHeartbeatByInstance.delete(key);
       this.progressHookInFlightByInstance.delete(key);
+      this.progressHookBurstByInstance.delete(key);
       return true;
     }
-    const sent = await this.sendOutput(targetChannelId, output, 'final', params.outputVisibility);
+    if (agentType === 'codex' && this.deps.eventHookClient?.enabled) {
+      // Codex output delivery is event-driven; never fall back to direct capture flush.
+      return false;
+    }
+    const sent = await this.sendOutput(
+      targetChannelId,
+      output,
+      'final',
+      params.outputVisibility,
+      agentType,
+    );
     if (!sent) return false;
 
     this.bufferedOutputByInstance.delete(key);
     this.bufferedOutputChannelByInstance.delete(key);
-    this.lastPendingTurnIdByInstance.delete(key);
     this.supervisorFinalFormatRetryStateByInstance.delete(key);
     this.progressHookHeartbeatByInstance.delete(key);
     this.progressHookInFlightByInstance.delete(key);
+    this.progressHookBurstByInstance.delete(key);
     return sent;
   }
 
-  private getPendingTurnId(projectName: string, agentType: string, instanceId?: string): string | undefined {
+  private shouldSuppressCodexProgressBurst(params: { key: string; turnId?: string }): boolean {
+    const limit = this.codexProgressHookMaxMessagesPerTurn;
+    if (limit < 1) return false;
+
+    const normalizedTurnId = params.turnId?.trim();
+    if (!normalizedTurnId) return false;
+
+    const now = Date.now();
+    const previous = this.progressHookBurstByInstance.get(params.key);
+    const current: ProgressHookBurstState =
+      previous && previous.turnId === normalizedTurnId
+        ? previous
+        : { turnId: normalizedTurnId, emittedCount: 0, suppressedCount: 0, updatedAtMs: now };
+
+    current.updatedAtMs = now;
+    if (current.emittedCount >= limit) {
+      current.suppressedCount += 1;
+      this.progressHookBurstByInstance.set(params.key, current);
+      return true;
+    }
+    current.emittedCount += 1;
+    this.progressHookBurstByInstance.set(params.key, current);
+    return false;
+  }
+
+  private pruneProgressHookBurstStates(activeCaptureKeys: Set<string>): void {
+    if (this.progressHookBurstByInstance.size === 0) return;
+    for (const key of this.progressHookBurstByInstance.keys()) {
+      if (!activeCaptureKeys.has(key)) {
+        this.progressHookBurstByInstance.delete(key);
+      }
+    }
+  }
+
+  private resolvePendingRouteSnapshot(
+    projectName: string,
+    agentType: string,
+    instanceId?: string,
+  ): PendingRouteSnapshot {
     const pendingTracker = this.deps.pendingTracker as unknown as {
+      getPendingRouteSnapshot?: (projectName: string, agentType: string, instanceId?: string) => PendingRouteSnapshot;
+      getPendingChannel?: (projectName: string, agentType: string, instanceId?: string) => string | undefined;
+      getPendingDepth?: (projectName: string, agentType: string, instanceId?: string) => number;
       getPendingMessageId?: (projectName: string, agentType: string, instanceId?: string) => string | undefined;
+      getPendingPromptTails?: (projectName: string, agentType: string, instanceId?: string) => string[];
+      getPendingPromptTail?: (projectName: string, agentType: string, instanceId?: string) => string | undefined;
     };
-    if (typeof pendingTracker.getPendingMessageId !== 'function') return undefined;
-    return pendingTracker.getPendingMessageId(projectName, agentType, instanceId);
+
+    if (typeof pendingTracker.getPendingRouteSnapshot === 'function') {
+      const snapshot = pendingTracker.getPendingRouteSnapshot(projectName, agentType, instanceId);
+      return {
+        channelId: snapshot.channelId,
+        pendingDepth: Math.max(0, Math.trunc(snapshot.pendingDepth || 0)),
+        messageId: snapshot.messageId,
+        promptTails: (snapshot.promptTails || []).filter((tail) => tail.trim().length > 0),
+      };
+    }
+
+    const channelId =
+      typeof pendingTracker.getPendingChannel === 'function'
+        ? pendingTracker.getPendingChannel(projectName, agentType, instanceId)
+        : undefined;
+    const pendingDepth =
+      typeof pendingTracker.getPendingDepth === 'function'
+        ? pendingTracker.getPendingDepth(projectName, agentType, instanceId)
+        : channelId
+          ? 1
+          : 0;
+    const messageId =
+      typeof pendingTracker.getPendingMessageId === 'function'
+        ? pendingTracker.getPendingMessageId(projectName, agentType, instanceId)
+        : undefined;
+    const promptTails =
+      typeof pendingTracker.getPendingPromptTails === 'function'
+        ? pendingTracker.getPendingPromptTails(projectName, agentType, instanceId)
+        : typeof pendingTracker.getPendingPromptTail === 'function'
+          ? (() => {
+              const tail = pendingTracker.getPendingPromptTail(projectName, agentType, instanceId);
+              return tail ? [tail] : [];
+            })()
+          : [];
+
+    return {
+      channelId,
+      pendingDepth: Math.max(0, Math.trunc(pendingDepth || 0)),
+      messageId,
+      promptTails: promptTails.filter((tail) => tail.trim().length > 0),
+    };
   }
 
   private shouldCaptureEventHookInstance(
@@ -1238,15 +1719,6 @@ export class BridgeCapturePoller {
     key: string,
     pendingActive: boolean,
   ): boolean {
-    if (
-      agentType === 'codex' &&
-      this.codexEventOnlyModeEnabled &&
-      !this.codexEventOnlyCaptureFallbackEnabled
-    ) {
-      this.eventHookFallbackActiveByInstance.delete(key);
-      this.eventHookStaleSinceByInstance.delete(key);
-      return false;
-    }
     if (typeof this.deps.eventLifecycleStaleChecker !== 'function') {
       this.eventHookFallbackActiveByInstance.delete(key);
       this.eventHookStaleSinceByInstance.delete(key);
@@ -1288,6 +1760,143 @@ export class BridgeCapturePoller {
     return stale && (pendingActive || wasActive);
   }
 
+  private hasActiveCaptureState(key: string): boolean {
+    return (
+      this.bufferedOutputByInstance.has(key) ||
+      this.bufferedOutputChannelByInstance.has(key) ||
+      this.completionCandidatesByInstance.has(key) ||
+      this.quietPendingPollsByInstance.has(key) ||
+      this.finalOnlyQuietFlushPollsByInstance.has(key) ||
+      this.promptEchoSuppressedPollsByInstance.has(key) ||
+      this.lastPendingTurnIdByInstance.has(key) ||
+      this.progressHookHeartbeatByInstance.has(key) ||
+      this.progressHookInFlightByInstance.has(key) ||
+      this.progressBatchByInstance.has(key)
+    );
+  }
+
+  private shouldApplyIdleSkip(agentType: string, outputVisibility?: ProgressOutputVisibility): boolean {
+    if (agentType === 'codex') return true;
+    return outputVisibility === 'off';
+  }
+
+  private clearCaptureStateForKey(key: string): void {
+    this.snapshotsByInstance.delete(key);
+    this.rawCaptureSnapshotByInstance.delete(key);
+    this.lastCaptureMutationAtByInstance.delete(key);
+    this.stalePendingAlertStageByInstance.delete(key);
+    this.stalePendingAutoRecoveredBaselineByInstance.delete(key);
+    this.completionCandidatesByInstance.delete(key);
+    this.quietPendingPollsByInstance.delete(key);
+    this.finalOnlyQuietFlushPollsByInstance.delete(key);
+    this.promptEchoSuppressedPollsByInstance.delete(key);
+    this.bufferedOutputByInstance.delete(key);
+    this.bufferedOutputChannelByInstance.delete(key);
+    this.lastPendingTurnIdByInstance.delete(key);
+    this.supervisorFinalFormatRetryStateByInstance.delete(key);
+    this.progressHookHeartbeatByInstance.delete(key);
+    this.progressHookInFlightByInstance.delete(key);
+    this.progressHookBurstByInstance.delete(key);
+    this.codexFinalHookTurnByInstance.delete(key);
+    this.eventHookFallbackActiveByInstance.delete(key);
+    this.eventHookStaleSinceByInstance.delete(key);
+    this.idleSkipPollsByInstance.delete(key);
+    this.idleSkipBackoffByInstance.delete(key);
+    this.progressBatchByInstance.delete(key);
+    this.missingWorkerWindowPollsByInstance.delete(key);
+  }
+
+  private pruneMissingWorkerWindowPolls(activeInstanceKeys: Set<string>): void {
+    if (this.missingWorkerWindowPollsByInstance.size === 0) return;
+    for (const key of this.missingWorkerWindowPollsByInstance.keys()) {
+      if (activeInstanceKeys.has(key)) continue;
+      this.missingWorkerWindowPollsByInstance.delete(key);
+    }
+  }
+
+  private async maybeReconcileDeadWorkerInstance(params: {
+    project: ProjectState;
+    instanceId: string;
+    agentType: string;
+    key: string;
+    targetWindow: string;
+  }): Promise<boolean> {
+    if (this.deadWorkerMissingPollThreshold <= 0) return false;
+    if (typeof this.deps.tmux.windowExists !== 'function') return false;
+    const orchestrator = params.project.orchestrator;
+    if (!orchestrator?.enabled) {
+      this.missingWorkerWindowPollsByInstance.delete(params.key);
+      return false;
+    }
+    if (orchestrator.supervisorInstanceId === params.instanceId) {
+      this.missingWorkerWindowPollsByInstance.delete(params.key);
+      return false;
+    }
+    if (!(orchestrator.workerInstanceIds || []).includes(params.instanceId)) {
+      this.missingWorkerWindowPollsByInstance.delete(params.key);
+      return false;
+    }
+    const windowExists = this.deps.tmux.windowExists(params.project.tmuxSession, params.targetWindow);
+    if (windowExists) {
+      this.missingWorkerWindowPollsByInstance.delete(params.key);
+      return false;
+    }
+
+    const nextCount = (this.missingWorkerWindowPollsByInstance.get(params.key) || 0) + 1;
+    this.missingWorkerWindowPollsByInstance.set(params.key, nextCount);
+    if (nextCount < this.deadWorkerMissingPollThreshold) {
+      return true;
+    }
+
+    this.missingWorkerWindowPollsByInstance.delete(params.key);
+    const latestRaw = this.deps.stateManager.getProject(params.project.projectName);
+    if (!latestRaw) return true;
+    const latest = normalizeProjectState(latestRaw);
+    const latestOrchestrator = latest.orchestrator;
+    if (!latestOrchestrator?.enabled) return true;
+    if (!(latestOrchestrator.workerInstanceIds || []).includes(params.instanceId)) return true;
+
+    const worker = getProjectInstance(latest, params.instanceId);
+    if (!worker) return true;
+    const latestTargetWindow = worker.tmuxWindow || worker.instanceId;
+    if (latestTargetWindow && this.deps.tmux.windowExists(latest.tmuxSession, latestTargetWindow)) {
+      return true;
+    }
+
+    const nextInstances = { ...(latest.instances || {}) };
+    delete nextInstances[params.instanceId];
+    const nextWorkerIds = (latestOrchestrator.workerInstanceIds || []).filter((id) => id !== params.instanceId);
+    this.deps.stateManager.setProject(
+      normalizeProjectState({
+        ...latest,
+        instances: nextInstances,
+        orchestrator: {
+          ...latestOrchestrator,
+          enabled: true,
+          workerInstanceIds: nextWorkerIds,
+        },
+        lastActive: new Date(),
+      }),
+    );
+
+    this.deps.pendingTracker.clearPendingForInstance(params.project.projectName, params.agentType, params.instanceId);
+    this.clearCaptureStateForKey(params.key);
+
+    const supervisorChannelId = latestOrchestrator.supervisorInstanceId
+      ? getProjectInstance(latest, latestOrchestrator.supervisorInstanceId)?.channelId
+      : undefined;
+    const notifyChannel = supervisorChannelId || worker.channelId;
+    if (notifyChannel) {
+      await this.deps.messaging
+        .sendToChannel(
+          notifyChannel,
+          `🧹 Removed stale worker \`${params.instanceId}\` from orchestrator state (tmux window missing for ${this.deadWorkerMissingPollThreshold} polls).`,
+        )
+        .catch(() => undefined);
+    }
+    return true;
+  }
+
   private async deliverDelta(params: {
     projectName: string;
     instanceId: string;
@@ -1295,13 +1904,13 @@ export class BridgeCapturePoller {
     agentType: string;
     pendingDepth: number;
     codexWorkingHint?: boolean;
+    eventHookCapture: boolean;
     channelId?: string;
     outputVisibility?: ProgressOutputVisibility;
     deltaText: string;
   }): Promise<DeltaDeliveryResult> {
     const trimmed = params.deltaText.trim();
     if (trimmed.length === 0) return { observedOutput: false, emittedOutput: false };
-    const codexEventOnlyActive = this.isCodexEventOnlyActive(params.agentType);
     if (params.agentType === 'codex') {
       this.deps.ioTracker?.recordOutputDelta({
         projectName: params.projectName,
@@ -1325,7 +1934,9 @@ export class BridgeCapturePoller {
       this.finalOnlyQuietFlushPollsByInstance.delete(params.key);
     }
 
+    const codexAuthoritative = this.isCodexEventOutputAuthoritative(params.agentType);
     const shouldBuffer =
+      codexAuthoritative ||
       (
         this.codexFinalOnlyModeEnabled &&
         params.agentType === 'codex'
@@ -1341,21 +1952,54 @@ export class BridgeCapturePoller {
       return { observedOutput: true, emittedOutput: false };
     }
 
-    if (codexEventOnlyActive) {
-      // Event-only mode keeps tmux session input path but routes output exclusively via hook events.
+    if (this.isCodexEventOnlyActive(params.agentType)) {
+      // Codex output remains event-driven while local hook bridge is enabled.
       return { observedOutput: true, emittedOutput: false };
     }
 
+    if (params.eventHookCapture && !this.eventHookCaptureOutputEnabled) {
+      // During event-hook stale fallback, keep capture for state/quiet observation unless explicitly opted in.
+      return { observedOutput: true, emittedOutput: false };
+    }
+
+    if (this.shouldBatchProgressDelta(params.agentType, params.pendingDepth)) {
+      const shouldFlushNow = this.appendProgressBatch({
+        key: params.key,
+        text: trimmed,
+        channelId: params.channelId,
+        outputVisibility: params.outputVisibility,
+        agentType: params.agentType,
+      });
+      const flushed = shouldFlushNow
+        ? await this.maybeFlushProgressBatch({
+            key: params.key,
+            fallbackChannelId: params.channelId,
+            fallbackVisibility: params.outputVisibility,
+            force: true,
+          })
+        : false;
+      return { observedOutput: true, emittedOutput: flushed };
+    }
+
     if (!params.channelId) return { observedOutput: true, emittedOutput: false };
-    const sent = await this.sendOutput(params.channelId, trimmed, 'progress', params.outputVisibility);
+    const sent = await this.sendOutput(
+      params.channelId,
+      trimmed,
+      'progress',
+      params.outputVisibility,
+      params.agentType,
+    );
     return { observedOutput: true, emittedOutput: sent };
   }
 
   private async pollOnce(): Promise<void> {
     if (this.running) return;
     this.running = true;
+    const stopPollIterationTimer = perfMetrics.startTimer('capture_poll_iteration_ms');
 
     try {
+      const activeCaptureKeys = new Set<string>();
+      const activeInstanceKeys = new Set<string>();
       const projects = this.deps.stateManager.listProjects();
       for (const rawProject of projects) {
         const project = rawProject as ReturnType<typeof normalizeProjectState>;
@@ -1363,29 +2007,34 @@ export class BridgeCapturePoller {
 
         for (const instance of instances) {
           const key = this.captureKey(project.projectName, instance.instanceId);
-          if (!instance.channelId) continue;
-          const workerOutputVisibility = this.resolveWorkerOutputVisibility({
+          activeInstanceKeys.add(key);
+          const targetWindow = instance.tmuxWindow || instance.instanceId;
+          if (!targetWindow) continue;
+          const reconciledMissingWorker = await this.maybeReconcileDeadWorkerInstance({
             project,
-            agentType: instance.agentType,
             instanceId: instance.instanceId,
+            agentType: instance.agentType,
+            key,
+            targetWindow,
           });
+          if (reconciledMissingWorker) continue;
 
+          const pendingRouteSnapshot = this.resolvePendingRouteSnapshot(
+            project.projectName,
+            instance.agentType,
+            instance.instanceId,
+          );
           const routeInfo = this.resolveOutputRoute(
             instance.channelId,
-            project.projectName,
-            instance.agentType,
-            instance.instanceId,
+            pendingRouteSnapshot,
           );
-          const pendingTurnId = this.getPendingTurnId(
-            project.projectName,
-            instance.agentType,
-            instance.instanceId,
-          );
+          const pendingTurnId = pendingRouteSnapshot.messageId;
           const previousPendingTurnId = this.lastPendingTurnIdByInstance.get(key);
           if (pendingTurnId) {
             this.lastPendingTurnIdByInstance.set(key, pendingTurnId);
             if (previousPendingTurnId && previousPendingTurnId !== pendingTurnId) {
               this.progressHookInFlightByInstance.delete(key);
+              this.codexFinalHookTurnByInstance.delete(key);
               const retryState = this.supervisorFinalFormatRetryStateByInstance.get(key);
               if (!retryState || retryState.lastTurnId !== pendingTurnId) {
                 this.supervisorFinalFormatRetryStateByInstance.delete(key);
@@ -1393,8 +2042,41 @@ export class BridgeCapturePoller {
             }
           }
           const pendingActive = routeInfo.pendingDepth > 0 || typeof pendingTurnId === 'string';
+          if (!instance.channelId && !routeInfo.channelId && !pendingActive && !this.hasActiveCaptureState(key)) {
+            // Hidden/worker instances may not have an instance channel mapping.
+            // Still capture when pending route state exists, otherwise skip idle windows.
+            continue;
+          }
+          activeCaptureKeys.add(key);
+          const eventHookDriven = this.isEventHookDrivenInstance(instance.agentType, instance.eventHook);
+          let eventHookCapture = false;
+          const workerOutputVisibility = this.resolveWorkerOutputVisibility({
+            project,
+            agentType: instance.agentType,
+            instanceId: instance.instanceId,
+          });
 
-          if (instance.eventHook) {
+          if (
+            this.shouldApplyIdleSkip(instance.agentType, workerOutputVisibility) &&
+            this.idleRefreshPolls > 0 &&
+            !pendingActive &&
+            !this.hasActiveCaptureState(key) &&
+            this.snapshotsByInstance.has(key)
+          ) {
+            const idleSkipThreshold = this.resolveIdleSkipThreshold(key);
+            const idleSkips = (this.idleSkipPollsByInstance.get(key) || 0) + 1;
+            if (idleSkips <= idleSkipThreshold) {
+              this.idleSkipPollsByInstance.set(key, idleSkips);
+              continue;
+            }
+            this.idleSkipPollsByInstance.set(key, 0);
+            this.bumpIdleSkipBackoff(key);
+          } else {
+            this.idleSkipPollsByInstance.delete(key);
+            this.idleSkipBackoffByInstance.delete(key);
+          }
+
+          if (eventHookDriven) {
             const fallback = this.shouldCaptureEventHookInstance(
               project.projectName,
               instance.instanceId,
@@ -1403,15 +2085,13 @@ export class BridgeCapturePoller {
               pendingActive,
             );
             if (!fallback) continue;
+            eventHookCapture = true;
           } else {
             this.eventHookFallbackActiveByInstance.delete(key);
             this.eventHookStaleSinceByInstance.delete(key);
           }
 
           const now = Date.now();
-
-          const targetWindow = instance.tmuxWindow || instance.instanceId;
-          if (!targetWindow) continue;
 
           let captureRaw: string;
           try {
@@ -1425,7 +2105,37 @@ export class BridgeCapturePoller {
           }
 
           if (typeof captureRaw !== 'string') continue;
+          const previousRawSnapshot = this.rawCaptureSnapshotByInstance.get(key);
+          if (previousRawSnapshot && previousRawSnapshot.raw === captureRaw) {
+            const unchangedSnapshot = previousRawSnapshot.cleaned;
+            this.promptEchoSuppressedPollsByInstance.delete(key);
+            await this.handleQuietPending(
+              key,
+              routeInfo.pendingDepth,
+              project.projectName,
+              instance.agentType,
+              instance.instanceId,
+              routeInfo.channelId || instance.channelId,
+              unchangedSnapshot,
+              workerOutputVisibility,
+            );
+            await this.maybeSendStalePendingAlert({
+              key,
+              pendingDepth: routeInfo.pendingDepth,
+              channelId: routeInfo.channelId || instance.channelId,
+              projectName: project.projectName,
+              agentType: instance.agentType,
+              instanceId: instance.instanceId,
+              now,
+            });
+            continue;
+          }
+
           const current = cleanCapture(captureRaw);
+          this.rawCaptureSnapshotByInstance.set(key, {
+            raw: captureRaw,
+            cleaned: current,
+          });
           if (!current || current.trim().length === 0) {
             this.promptEchoSuppressedPollsByInstance.delete(key);
             await this.handleQuietPending(
@@ -1515,11 +2225,10 @@ export class BridgeCapturePoller {
             instance.agentType === 'codex' && this.hasCodexWorkingMarker(current);
           const normalizedForPendingPrompt = this.promptEchoFilterEnabled
             ? this.stripPendingPromptEcho(
-                project.projectName,
                 instance.agentType,
-                instance.instanceId,
                 routeInfo.pendingDepth,
                 delta,
+                pendingRouteSnapshot.promptTails,
               )
             : delta;
           const trimmedDelta = normalizedForPendingPrompt.trim();
@@ -1539,11 +2248,7 @@ export class BridgeCapturePoller {
               // Failsafe: after repeated suppressions, stop swallowing deltas.
               // This avoids "typing forever" when filtering is too aggressive.
               this.promptEchoSuppressedPollsByInstance.delete(key);
-              const allowRawDeltaFallback = this.shouldDeliverPromptEchoFallbackRawDelta(
-                instance.agentType,
-                instance.eventHook === true,
-              );
-              if (!allowRawDeltaFallback) {
+              if (instance.agentType === 'codex' && eventHookCapture) {
                 await this.handleQuietPending(
                   key,
                   routeInfo.pendingDepth,
@@ -1599,6 +2304,7 @@ export class BridgeCapturePoller {
                 agentType: instance.agentType,
                 pendingDepth: routeInfo.pendingDepth,
                 codexWorkingHint,
+                eventHookCapture,
                 channelId: outputChannelId,
                 outputVisibility: workerOutputVisibility,
                 deltaText: delta,
@@ -1673,6 +2379,7 @@ export class BridgeCapturePoller {
             agentType: instance.agentType,
             pendingDepth: routeInfo.pendingDepth,
             codexWorkingHint,
+            eventHookCapture,
             channelId: outputChannelId,
             outputVisibility: workerOutputVisibility,
             deltaText: trimmedDelta,
@@ -1722,9 +2429,12 @@ export class BridgeCapturePoller {
           }
         }
       }
+      this.pruneProgressHookBurstStates(activeCaptureKeys);
+      this.pruneMissingWorkerWindowPolls(activeInstanceKeys);
     } catch (error) {
       console.warn(`Capture poller iteration failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
+      stopPollIterationTimer();
       this.running = false;
     }
   }
@@ -1739,6 +2449,14 @@ export class BridgeCapturePoller {
     captureSnapshot?: string,
     outputVisibility?: ProgressOutputVisibility,
   ): Promise<void> {
+    await this.maybeFlushProgressBatch({
+      key,
+      fallbackChannelId: channelId,
+      fallbackVisibility: outputVisibility,
+      quietEvent: true,
+      force: pendingDepth <= 0,
+    });
+
     if (pendingDepth <= 0) {
       this.quietPendingPollsByInstance.delete(key);
       this.completionCandidatesByInstance.delete(key);
@@ -1764,10 +2482,25 @@ export class BridgeCapturePoller {
         const hasBufferedOutput = this.bufferedOutputByInstance.has(key);
         if (!hasBufferedOutput) {
           this.finalOnlyQuietFlushPollsByInstance.delete(key);
-          this.lastPendingTurnIdByInstance.delete(key);
           this.supervisorFinalFormatRetryStateByInstance.delete(key);
           this.progressHookHeartbeatByInstance.delete(key);
           this.progressHookInFlightByInstance.delete(key);
+          this.progressHookBurstByInstance.delete(key);
+          return;
+        }
+
+        if (this.isCodexEventOnlyActive(agentType)) {
+          const emitted = await this.flushBufferedOutput({
+            key,
+            channelId,
+            agentType,
+            projectName,
+            instanceId,
+            outputVisibility,
+          });
+          if (emitted) {
+            this.finalOnlyQuietFlushPollsByInstance.delete(key);
+          }
           return;
         }
 
@@ -1793,6 +2526,7 @@ export class BridgeCapturePoller {
         const turnId = this.lastPendingTurnIdByInstance.get(key);
         if (turnId) {
           const emitted = await this.safeEmitCodexFinalEvent({
+            key,
             projectName,
             instanceId,
             turnId,
@@ -1806,7 +2540,7 @@ export class BridgeCapturePoller {
       }
       this.progressHookHeartbeatByInstance.delete(key);
       this.progressHookInFlightByInstance.delete(key);
-      this.lastPendingTurnIdByInstance.delete(key);
+      this.progressHookBurstByInstance.delete(key);
       this.supervisorFinalFormatRetryStateByInstance.delete(key);
       return;
     }
@@ -1832,22 +2566,43 @@ export class BridgeCapturePoller {
       return;
     }
     if (
-      !this.codexFinalOnlyModeEnabled &&
       agentType === 'codex' &&
       hasOutputCandidate &&
       typeof captureSnapshot === 'string' &&
       this.isLikelyCodexReadyForInput(captureSnapshot)
     ) {
-      await this.deps.pendingTracker.markCompleted(projectName, agentType, instanceId).catch(() => undefined);
-      this.deps.ioTracker?.recordTurnCompleted({
-        projectName,
-        instanceId,
-        channelId,
-        reason: 'input-ready-marker',
-      });
-      this.quietPendingPollsByInstance.delete(key);
-      this.completionCandidatesByInstance.delete(key);
-      return;
+      if (this.isCodexEventOnlyActive(agentType)) {
+        const emitted = await this.flushBufferedOutput({
+          key,
+          channelId,
+          agentType,
+          projectName,
+          instanceId,
+          outputVisibility,
+        });
+        if (emitted) {
+          this.deps.ioTracker?.recordTurnCompleted({
+            projectName,
+            instanceId,
+            channelId,
+            reason: 'input-ready-event-final',
+          });
+          this.quietPendingPollsByInstance.delete(key);
+          this.completionCandidatesByInstance.delete(key);
+          return;
+        }
+      } else if (!this.codexFinalOnlyModeEnabled) {
+        await this.deps.pendingTracker.markCompleted(projectName, agentType, instanceId).catch(() => undefined);
+        this.deps.ioTracker?.recordTurnCompleted({
+          projectName,
+          instanceId,
+          channelId,
+          reason: 'input-ready-marker',
+        });
+        this.quietPendingPollsByInstance.delete(key);
+        this.completionCandidatesByInstance.delete(key);
+        return;
+      }
     }
 
     const quietThreshold = this.resolveQuietCompletionThreshold(hasOutputCandidate, agentType);
@@ -1859,6 +2614,35 @@ export class BridgeCapturePoller {
     const current = this.quietPendingPollsByInstance.get(key);
     const nextCount = (current?.count || 0) + 1;
     if (nextCount >= quietThreshold) {
+      if (agentType === 'codex' && this.isCodexEventOnlyActive(agentType) && hasOutputCandidate) {
+        const emitted = await this.flushBufferedOutput({
+          key,
+          channelId,
+          agentType,
+          projectName,
+          instanceId,
+          outputVisibility,
+        });
+        if (emitted) {
+          this.deps.ioTracker?.recordTurnCompleted({
+            projectName,
+            instanceId,
+            channelId,
+            reason: 'event-final-quiet-threshold',
+          });
+          this.quietPendingPollsByInstance.delete(key);
+          this.completionCandidatesByInstance.delete(key);
+          return;
+        }
+        this.quietPendingPollsByInstance.set(key, {
+          count: quietThreshold,
+          projectName,
+          agentType,
+          instanceId,
+        });
+        return;
+      }
+
       await this.deps.pendingTracker.markCompleted(projectName, agentType, instanceId).catch(() => undefined);
       if (agentType === 'codex') {
         this.deps.ioTracker?.recordTurnCompleted({
@@ -1882,6 +2666,11 @@ export class BridgeCapturePoller {
   }
 
   private resolveQuietCompletionThreshold(hasOutputCandidate: boolean, agentType: string): number {
+    if (agentType === 'codex' && this.isCodexEventOnlyActive(agentType)) {
+      // In event-driven mode, never auto-complete without output; emit final hook
+      // after quiet stabilization when output exists.
+      return hasOutputCandidate ? this.quietPendingPollThreshold : 0;
+    }
     if (hasOutputCandidate) {
       return this.quietPendingPollThreshold;
     }
@@ -1913,24 +2702,10 @@ export class BridgeCapturePoller {
 
   private resolveOutputRoute(
     defaultChannelId: string | undefined,
-    projectName: string,
-    agentType: string,
-    instanceId?: string,
+    pendingSnapshot: PendingRouteSnapshot,
   ): { channelId: string | undefined; pendingDepth: number } {
-    const pendingTracker = this.deps.pendingTracker as unknown as {
-      getPendingChannel?: (projectName: string, agentType: string, instanceId?: string) => string | undefined;
-      getPendingDepth?: (projectName: string, agentType: string, instanceId?: string) => number;
-    };
-    const pendingChannel =
-      typeof pendingTracker.getPendingChannel === 'function'
-        ? pendingTracker.getPendingChannel(projectName, agentType, instanceId)
-        : undefined;
-    const pendingDepth =
-      typeof pendingTracker.getPendingDepth === 'function'
-        ? pendingTracker.getPendingDepth(projectName, agentType, instanceId)
-        : pendingChannel
-          ? 1
-          : 0;
+    const pendingChannel = pendingSnapshot.channelId;
+    const pendingDepth = pendingSnapshot.pendingDepth;
 
     if (pendingDepth > 1) {
       return { channelId: defaultChannelId || pendingChannel, pendingDepth };
@@ -1940,16 +2715,15 @@ export class BridgeCapturePoller {
   }
 
   private stripPendingPromptEcho(
-    projectName: string,
     agentType: string,
-    instanceId: string,
     pendingDepth: number,
     delta: string,
+    pendingPromptTails?: string[],
   ): string {
     if (pendingDepth <= 0) return delta;
     if (agentType !== 'codex') return delta;
 
-    const promptNorms = this.getPendingPromptTails(projectName, agentType, instanceId)
+    const promptNorms = (pendingPromptTails || [])
       .map((tail) => this.normalizePromptFragment(tail))
       .filter((tail) => tail.length > 0);
     if (promptNorms.length === 0) return delta;
@@ -2025,24 +2799,6 @@ export class BridgeCapturePoller {
       if (normalizedLine === promptNorm) return true;
       return promptNorm.includes(normalizedLine);
     });
-  }
-
-  private getPendingPromptTails(projectName: string, agentType: string, instanceId?: string): string[] {
-    const pendingTracker = this.deps.pendingTracker as unknown as {
-      getPendingPromptTails?: (projectName: string, agentType: string, instanceId?: string) => string[];
-      getPendingPromptTail?: (projectName: string, agentType: string, instanceId?: string) => string | undefined;
-    };
-
-    if (typeof pendingTracker.getPendingPromptTails === 'function') {
-      return pendingTracker.getPendingPromptTails(projectName, agentType, instanceId).filter((tail) => tail.trim().length > 0);
-    }
-
-    if (typeof pendingTracker.getPendingPromptTail === 'function') {
-      const tail = pendingTracker.getPendingPromptTail(projectName, agentType, instanceId);
-      return tail && tail.trim().length > 0 ? [tail] : [];
-    }
-
-    return [];
   }
 
   private extractDelta(agentType: string, previous: string, current: string): string {

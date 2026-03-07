@@ -3,6 +3,9 @@ import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import { config, getConfigPath, getConfigValue, saveConfig, validateConfig } from '../../config/index.js';
+import { stateManager } from '../../state/index.js';
+import { listProjectInstances, normalizeProjectState } from '../../state/instances.js';
+import { resolveOrchestratorRole } from '../../bridge/runtime/orchestrator-progress-policy.js';
 
 const LONG_OUTPUT_THREAD_THRESHOLD_MIN = 1200;
 const LONG_OUTPUT_THREAD_THRESHOLD_MAX = 20000;
@@ -55,9 +58,12 @@ export type DoctorResult = {
     runtimeOrchestratorWorkerHiddenModeLeakCount?: number;
     runtimeOrchestratorWorkerThreadChannelMismatchCount?: number;
     runtimeOrchestratorSupervisorFinalFormatEnforceCount?: number;
+    stateMappingTotalInstances?: number;
+    stateMappingMappedInstances?: number;
+    stateMappingRequiredMissingCount?: number;
+    stateMappingOptionalWorkerMissingCount?: number;
+    stateMappingDuplicateChannelCount?: number;
     eventHookCaptureFallbackStaleGraceMs?: number;
-    eventOnlyCaptureFallbackEnabled?: boolean;
-    eventOnlyPromptEchoFallbackEventHookEnabled?: boolean;
     promptRefinerMode?: string;
     promptRefinerPolicyPath?: string;
     promptRefinerPolicyPathExists?: boolean;
@@ -99,6 +105,14 @@ type RuntimeContractSnapshot = {
     channel: number;
     unknown: number;
   };
+};
+
+type ChannelMappingAudit = {
+  totalInstances: number;
+  mappedInstances: number;
+  requiredMissingCount: number;
+  optionalWorkerMissingCount: number;
+  duplicateChannels: Array<{ channelId: string; owners: string[] }>;
 };
 
 export function classifyLongOutputThreadThreshold(raw: unknown): ThresholdState {
@@ -230,14 +244,6 @@ function buildIssues(storedRaw: unknown, envRaw: string | undefined): DoctorIssu
   }
 
   return issues;
-}
-
-function parseBoolEnv(raw: string | undefined, fallback: boolean): boolean {
-  if (!raw) return fallback;
-  const normalized = raw.trim().toLowerCase();
-  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
-  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
-  return fallback;
 }
 
 function parseIntEnv(raw: string | undefined, min: number, max: number): number | undefined {
@@ -385,17 +391,10 @@ function printHumanResult(result: DoctorResult): void {
       ),
     );
   }
-  if (
-    typeof result.summary.eventOnlyCaptureFallbackEnabled === 'boolean' ||
-    typeof result.summary.eventOnlyPromptEchoFallbackEventHookEnabled === 'boolean' ||
-    typeof result.summary.eventHookCaptureFallbackStaleGraceMs === 'number'
-  ) {
+  if (typeof result.summary.eventHookCaptureFallbackStaleGraceMs === 'number') {
     console.log(
       chalk.gray(
-        `   Event-only fallback knobs: ` +
-        `captureFallback=${result.summary.eventOnlyCaptureFallbackEnabled === undefined ? '(unknown)' : result.summary.eventOnlyCaptureFallbackEnabled ? 'on' : 'off'}, ` +
-        `promptEchoRawDeltaOnEventHook=${result.summary.eventOnlyPromptEchoFallbackEventHookEnabled === undefined ? '(unknown)' : result.summary.eventOnlyPromptEchoFallbackEventHookEnabled ? 'on' : 'off'}, ` +
-        `staleGraceMs=${result.summary.eventHookCaptureFallbackStaleGraceMs ?? '(default)'}`,
+        `   Event-hook fallback staleGraceMs: ${result.summary.eventHookCaptureFallbackStaleGraceMs}`,
       ),
     );
   }
@@ -439,6 +438,21 @@ function printHumanResult(result: DoctorResult): void {
       ),
     );
   }
+  if (
+    typeof result.summary.stateMappingTotalInstances === 'number' ||
+    typeof result.summary.stateMappingDuplicateChannelCount === 'number'
+  ) {
+    console.log(
+      chalk.gray(
+        `   State mapping audit: ` +
+        `total=${result.summary.stateMappingTotalInstances ?? 0}, ` +
+        `mapped=${result.summary.stateMappingMappedInstances ?? 0}, ` +
+        `required-missing=${result.summary.stateMappingRequiredMissingCount ?? 0}, ` +
+        `worker-optional-missing=${result.summary.stateMappingOptionalWorkerMissingCount ?? 0}, ` +
+        `duplicate-channel-ids=${result.summary.stateMappingDuplicateChannelCount ?? 0}`,
+      ),
+    );
+  }
 
   if (result.issues.length === 0) {
     console.log(chalk.green('\n✅ No config/env conflicts found.'));
@@ -471,6 +485,50 @@ function safeErrorMessage(error: unknown): string {
   return String(error);
 }
 
+function auditChannelMappingsFromState(): ChannelMappingAudit {
+  const channelOwners = new Map<string, string[]>();
+  let totalInstances = 0;
+  let mappedInstances = 0;
+  let requiredMissingCount = 0;
+  let optionalWorkerMissingCount = 0;
+
+  for (const rawProject of stateManager.listProjects()) {
+    const project = normalizeProjectState(rawProject);
+    for (const instance of listProjectInstances(project)) {
+      totalInstances += 1;
+      const role = resolveOrchestratorRole({
+        project,
+        instanceId: instance.instanceId,
+        agentType: instance.agentType,
+      });
+      const channelId = instance.channelId?.trim();
+      if (channelId) {
+        mappedInstances += 1;
+        const owner = `${project.projectName}/${instance.instanceId}`;
+        const owners = channelOwners.get(channelId) || [];
+        owners.push(owner);
+        channelOwners.set(channelId, owners);
+      } else if (role === 'worker') {
+        optionalWorkerMissingCount += 1;
+      } else {
+        requiredMissingCount += 1;
+      }
+    }
+  }
+
+  const duplicateChannels = [...channelOwners.entries()]
+    .filter(([, owners]) => owners.length > 1)
+    .map(([channelId, owners]) => ({ channelId, owners }));
+
+  return {
+    totalInstances,
+    mappedInstances,
+    requiredMissingCount,
+    optionalWorkerMissingCount,
+    duplicateChannels,
+  };
+}
+
 export async function doctorCommand(options: DoctorCommandOptions = {}): Promise<void> {
   const result = await runDoctor(options);
 
@@ -494,42 +552,17 @@ export async function runDoctor(options: { fix?: boolean } = {}): Promise<Doctor
   const issues = buildIssues(storedRaw, envRaw);
   const fixes: DoctorFix[] = [];
   const strictLifecycleMode = resolveStrictLifecycleMode();
-  const codexEventOnly = parseBoolEnv(process.env.AGENT_DISCORD_CODEX_EVENT_ONLY, true);
-  const codexEventOnlyCaptureFallback = parseBoolEnv(
-    process.env.AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK,
-    false,
-  );
-  const promptEchoFallbackEventHookEnabled = parseBoolEnv(
-    process.env.AGENT_DISCORD_CAPTURE_PROMPT_ECHO_FALLBACK_EVENT_HOOK,
-    false,
-  );
   const eventHookCaptureFallbackStaleGraceMs =
     parseIntEnv(process.env.AGENT_DISCORD_EVENT_HOOK_CAPTURE_FALLBACK_STALE_GRACE_MS, 0, 5 * 60 * 1000) ?? 10_000;
-  if (codexEventOnly && strictLifecycleMode === 'off') {
+  if (strictLifecycleMode === 'off') {
     issues.push({
       level: 'warn',
       code: 'event-contract-strict-off',
       message:
-        'AGENT_DISCORD_CODEX_EVENT_ONLY is enabled, but AGENT_DISCORD_EVENT_LIFECYCLE_STRICT_MODE=off. Consider warn/reject to catch missing start/final contracts.',
+        'Codex runtime relies on start/final event contracts, but AGENT_DISCORD_EVENT_LIFECYCLE_STRICT_MODE=off. Consider warn/reject to catch missing lifecycle contracts.',
     });
   }
-  if (codexEventOnly && codexEventOnlyCaptureFallback) {
-    issues.push({
-      level: 'warn',
-      code: 'event-only-capture-fallback-enabled',
-      message:
-        'AGENT_DISCORD_CODEX_EVENT_ONLY is enabled, but AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK is also enabled. Set it to 0 for strict event-only parity.',
-    });
-  }
-  if (codexEventOnly && promptEchoFallbackEventHookEnabled) {
-    issues.push({
-      level: 'warn',
-      code: 'event-only-prompt-echo-fallback-event-hook-enabled',
-      message:
-        'AGENT_DISCORD_CAPTURE_PROMPT_ECHO_FALLBACK_EVENT_HOOK is enabled while codex event-only is active. This can leak intermediary prompt-echo deltas during event-hook capture fallback.',
-    });
-  }
-  if (codexEventOnly && codexEventOnlyCaptureFallback && eventHookCaptureFallbackStaleGraceMs > 30_000) {
+  if (eventHookCaptureFallbackStaleGraceMs > 30_000) {
     issues.push({
       level: 'warn',
       code: 'event-only-capture-fallback-grace-high',
@@ -606,6 +639,29 @@ export async function runDoctor(options: { fix?: boolean } = {}): Promise<Doctor
 
   const resultIssues = [...issues];
   const runtimeContract = await fetchRuntimeContractSnapshot(config.hookServerPort || 18470);
+  const mappingAudit = auditChannelMappingsFromState();
+  if (mappingAudit.requiredMissingCount > 0) {
+    resultIssues.push({
+      level: 'fail',
+      code: 'mapping-required-channel-missing',
+      message:
+        `Detected ${mappingAudit.requiredMissingCount} non-worker instance(s)` +
+        ' without channel mapping in state.',
+    });
+  }
+  if (mappingAudit.duplicateChannels.length > 0) {
+    const example = mappingAudit.duplicateChannels[0];
+    const exampleText = example
+      ? ` (e.g. \`${example.channelId}\` -> ${example.owners.join(', ')})`
+      : '';
+    resultIssues.push({
+      level: 'fail',
+      code: 'mapping-duplicate-channel-id',
+      message:
+        `Detected ${mappingAudit.duplicateChannels.length} duplicate channel mapping(s)` +
+        ` across instances${exampleText}.`,
+    });
+  }
   if (runtimeContract && runtimeContract.rejectedCount > 0) {
     resultIssues.push({
       level: strictLifecycleMode === 'reject' ? 'fail' : 'warn',
@@ -615,13 +671,13 @@ export async function runDoctor(options: { fix?: boolean } = {}): Promise<Doctor
         ` across ${runtimeContract.rejectedInstances} instance(s) from /runtime-status.`,
     });
   }
-  if (codexEventOnly && runtimeContract && runtimeContract.codexChannelProgressInstances > 0) {
+  if (runtimeContract && runtimeContract.codexChannelProgressInstances > 0) {
     resultIssues.push({
       level: 'warn',
       code: 'event-contract-progress-channel',
       message:
-        `AGENT_DISCORD_CODEX_EVENT_ONLY is enabled, but ${runtimeContract.codexChannelProgressInstances}` +
-        ` codex instance(s) currently report runtime progressMode=channel.`,
+        `${runtimeContract.codexChannelProgressInstances}` +
+        ' codex instance(s) currently report runtime progressMode=channel; use thread/off to avoid intermediary channel output.',
     });
   }
   if (runtimeContract && runtimeContract.orchestratorWorkerHiddenModeLeakCount > 0) {
@@ -674,9 +730,12 @@ export async function runDoctor(options: { fix?: boolean } = {}): Promise<Doctor
         runtimeContract?.orchestratorWorkerThreadChannelMismatchCount,
       runtimeOrchestratorSupervisorFinalFormatEnforceCount:
         runtimeContract?.orchestratorSupervisorFinalFormatEnforceCount,
+      stateMappingTotalInstances: mappingAudit.totalInstances,
+      stateMappingMappedInstances: mappingAudit.mappedInstances,
+      stateMappingRequiredMissingCount: mappingAudit.requiredMissingCount,
+      stateMappingOptionalWorkerMissingCount: mappingAudit.optionalWorkerMissingCount,
+      stateMappingDuplicateChannelCount: mappingAudit.duplicateChannels.length,
       eventHookCaptureFallbackStaleGraceMs,
-      eventOnlyCaptureFallbackEnabled: codexEventOnlyCaptureFallback,
-      eventOnlyPromptEchoFallbackEventHookEnabled: promptEchoFallbackEventHookEnabled,
       promptRefinerMode,
       promptRefinerPolicyPath: promptRefinerPolicyPath || undefined,
       promptRefinerPolicyPathExists: promptRefinerPolicyPath ? promptRefinerPolicyPathExists : undefined,

@@ -13,7 +13,6 @@ interface PendingMessageState {
   updatedAtMs: number;
   promptTail?: string;
   stopTypingIndicator?: () => void;
-  stuckAlertTimer?: ReturnType<typeof setTimeout>;
 }
 
 type PendingQueueTarget = 'head' | 'tail';
@@ -36,17 +35,21 @@ interface PendingTerminalSnapshot {
   atMs: number;
 }
 
+export interface PendingRouteSnapshot {
+  channelId?: string;
+  pendingDepth: number;
+  messageId?: string;
+  promptTails: string[];
+}
+
 export class PendingMessageTracker {
   private static readonly PROMPT_TAIL_MAX = 240;
   private static readonly MAX_TERMINAL_SNAPSHOTS = 4000;
   private pendingMessageByInstance: Map<string, PendingMessageState[]> = new Map();
   private lastTerminalByInstance: Map<string, PendingTerminalSnapshot> = new Map();
   private operationQueueByKey = new Map<string, Promise<void>>();
-  private readonly pendingStuckAlertMs: number;
 
-  constructor(private messaging: MessagingClient) {
-    this.pendingStuckAlertMs = this.resolvePendingStuckAlertMs();
-  }
+  constructor(private messaging: MessagingClient) {}
 
   private pendingKey(projectName: string, instanceKey: string): string {
     return `${projectName}:${instanceKey}`;
@@ -89,6 +92,26 @@ export class PendingMessageTracker {
     const key = this.pendingKey(projectName, instanceId || agentType);
     const queue = this.pendingMessageByInstance.get(key);
     return queue && queue.length > 0 ? queue[0]!.messageId : undefined;
+  }
+
+  getPendingRouteSnapshot(projectName: string, agentType: string, instanceId?: string): PendingRouteSnapshot {
+    const key = this.pendingKey(projectName, instanceId || agentType);
+    const queue = this.pendingMessageByInstance.get(key);
+    if (!queue || queue.length === 0) {
+      return {
+        pendingDepth: 0,
+        promptTails: [],
+      };
+    }
+
+    return {
+      channelId: queue[0]!.channelId,
+      pendingDepth: queue.length,
+      messageId: queue[0]!.messageId,
+      promptTails: queue
+        .map((item) => item.promptTail)
+        .filter((tail): tail is string => typeof tail === 'string' && tail.trim().length > 0),
+    };
   }
 
   getRuntimeSnapshot(projectName: string, agentType: string, instanceId?: string): PendingRuntimeSnapshot {
@@ -215,10 +238,6 @@ export class PendingMessageTracker {
   }
 
   private stopTypingIndicator(pending: PendingMessageState): void {
-    if (pending.stuckAlertTimer) {
-      clearTimeout(pending.stuckAlertTimer);
-      pending.stuckAlertTimer = undefined;
-    }
     if (!pending.stopTypingIndicator) return;
     try {
       pending.stopTypingIndicator();
@@ -228,44 +247,24 @@ export class PendingMessageTracker {
     pending.stopTypingIndicator = undefined;
   }
 
-  private resolvePendingStuckAlertMs(): number {
-    const fromEnv = Number(process.env.AGENT_DISCORD_PENDING_ALERT_MS || '');
-    if (Number.isFinite(fromEnv) && fromEnv >= 5000) {
-      return Math.trunc(fromEnv);
-    }
-    return 45000;
-  }
-
-  private scheduleStuckAlert(key: string, pending: PendingMessageState): void {
-    if (this.pendingStuckAlertMs <= 0) return;
-
-    pending.stuckAlertTimer = setTimeout(() => {
-      const queue = this.pendingMessageByInstance.get(key);
-      if (!queue || !queue.includes(pending)) return;
-      pending.stuckAlertTimer = undefined;
-
-      if (!pending.stopTypingIndicator && typeof this.messaging.startTypingIndicator === 'function') {
-        void this.messaging
-          .startTypingIndicator(pending.channelId)
-          .then((stopTypingIndicator) => {
-            const latestQueue = this.pendingMessageByInstance.get(key);
-            if (!latestQueue || !latestQueue.includes(pending)) {
-              try {
-                stopTypingIndicator();
-              } catch {
-                // Best-effort cleanup.
-              }
-              return;
-            }
-            pending.stopTypingIndicator = stopTypingIndicator;
-          })
-          .catch(() => undefined);
+  private async ensureTypingIndicator(key: string, pending: PendingMessageState): Promise<void> {
+    if (pending.stopTypingIndicator) return;
+    if (typeof this.messaging.startTypingIndicator !== 'function') return;
+    try {
+      const stopTypingIndicator = await this.messaging.startTypingIndicator(pending.channelId);
+      const latestQueue = this.pendingMessageByInstance.get(key);
+      if (!latestQueue || !latestQueue.includes(pending)) {
+        try {
+          stopTypingIndicator();
+        } catch {
+          // Best-effort cleanup.
+        }
+        return;
       }
-
-      // Continue keepalive checks while pending remains unresolved.
-      this.scheduleStuckAlert(key, pending);
-    }, this.pendingStuckAlertMs);
-    pending.stuckAlertTimer.unref?.();
+      pending.stopTypingIndicator = stopTypingIndicator;
+    } catch {
+      // Non-critical.
+    }
   }
 
   private async transitionByKey(
@@ -291,6 +290,9 @@ export class PendingMessageTracker {
 
       pending.stage = stage;
       pending.updatedAtMs = Date.now();
+      if (stage === 'processing') {
+        await this.ensureTypingIndicator(key, pending);
+      }
 
       if (removeAfter) {
         if (stage === 'completed' || stage === 'error' || stage === 'retry') {
@@ -327,6 +329,9 @@ export class PendingMessageTracker {
 
       pending.stage = stage;
       pending.updatedAtMs = Date.now();
+      if (stage === 'processing') {
+        await this.ensureTypingIndicator(key, pending);
+      }
 
       if (removeAfter) {
         if (stage === 'completed' || stage === 'error' || stage === 'retry') {
@@ -360,15 +365,14 @@ export class PendingMessageTracker {
     await this.enqueueByKey(key, async () => {
       const statusEmoji = this.emojiForStage('received');
       const now = Date.now();
-      let stopTypingIndicator: (() => void) | undefined;
-      if (typeof this.messaging.startTypingIndicator === 'function') {
-        try {
-          stopTypingIndicator = await this.messaging.startTypingIndicator(channelId);
-        } catch {
-          // Non-critical.
-        }
-      }
       const queue = this.pendingMessageByInstance.get(key) || [];
+      const existing = queue.find((candidate) => candidate.messageId === messageId);
+      if (existing) {
+        existing.updatedAtMs = now;
+        existing.channelId = channelId;
+        existing.promptTail = this.buildPromptTail(prompt);
+        return;
+      }
       const pendingState: PendingMessageState = {
         channelId,
         messageId,
@@ -377,11 +381,9 @@ export class PendingMessageTracker {
         createdAtMs: now,
         updatedAtMs: now,
         promptTail: this.buildPromptTail(prompt),
-        stopTypingIndicator,
       };
       queue.push(pendingState);
       this.pendingMessageByInstance.set(key, queue);
-      this.scheduleStuckAlert(key, pendingState);
       await this.messaging.addReactionToMessage(channelId, messageId, statusEmoji);
     });
   }
@@ -409,6 +411,16 @@ export class PendingMessageTracker {
   async markDispatching(projectName: string, agentType: string, instanceId?: string): Promise<void> {
     const key = this.pendingKey(projectName, instanceId || agentType);
     await this.transitionByKey(key, 'processing');
+  }
+
+  async markDispatchingByMessageId(
+    projectName: string,
+    agentType: string,
+    messageId: string,
+    instanceId?: string,
+  ): Promise<void> {
+    const key = this.pendingKey(projectName, instanceId || agentType);
+    await this.transitionByMessageId(key, messageId, 'processing');
   }
 
   async markHasAttachments(projectName: string, agentType: string, instanceId?: string): Promise<void> {

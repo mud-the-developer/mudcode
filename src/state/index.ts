@@ -8,7 +8,8 @@ import { homedir } from 'os';
 import type { IStorage, IStateManager } from '../types/interfaces.js';
 import type { ProjectState as SharedProjectState } from '../types/index.js';
 import { FileStorage } from '../infra/storage.js';
-import { findProjectInstanceByChannel, normalizeProjectState } from './instances.js';
+import { listProjectInstances, normalizeProjectState } from './instances.js';
+import { perfMetrics } from '../observability/perf-metrics.js';
 
 export type ProjectState = SharedProjectState;
 
@@ -25,12 +26,15 @@ export class StateManager implements IStateManager {
   private stateDir: string;
   private stateFile: string;
   private pendingLastActiveSaveTimer?: ReturnType<typeof setTimeout>;
+  private serializedStateCache = '';
+  private channelLookupCache?: Map<string, { project: ProjectState; agentType: string }>;
 
   constructor(storage?: IStorage, stateDir?: string, stateFile?: string) {
     this.storage = storage || new FileStorage();
     this.stateDir = stateDir || join(homedir(), '.mudcode');
     this.stateFile = stateFile || join(this.stateDir, 'state.json');
     this.state = this.loadState();
+    this.serializedStateCache = this.serializeState(this.state);
   }
 
   private loadState(): BridgeState {
@@ -54,11 +58,45 @@ export class StateManager implements IStateManager {
     }
   }
 
-  private saveState(): void {
-    if (!this.storage.exists(this.stateDir)) {
-      this.storage.mkdirp(this.stateDir);
+  private serializeState(state: BridgeState): string {
+    return JSON.stringify(state, null, 2);
+  }
+
+  private invalidateChannelLookupCache(): void {
+    this.channelLookupCache = undefined;
+  }
+
+  private getChannelLookupCache(): Map<string, { project: ProjectState; agentType: string }> {
+    if (this.channelLookupCache) return this.channelLookupCache;
+
+    const lookup = new Map<string, { project: ProjectState; agentType: string }>();
+    for (const project of Object.values(this.state.projects)) {
+      for (const instance of listProjectInstances(project)) {
+        const channelId = instance.channelId;
+        if (!channelId || lookup.has(channelId)) continue;
+        lookup.set(channelId, { project, agentType: instance.agentType });
+      }
     }
-    this.storage.writeFile(this.stateFile, JSON.stringify(this.state, null, 2));
+    this.channelLookupCache = lookup;
+    return lookup;
+  }
+
+  private saveState(): void {
+    const nextSerialized = this.serializeState(this.state);
+    if (nextSerialized === this.serializedStateCache) {
+      return;
+    }
+
+    const stopStateSaveTimer = perfMetrics.startTimer('state_save_ms');
+    try {
+      if (!this.storage.exists(this.stateDir)) {
+        this.storage.mkdirp(this.stateDir);
+      }
+      this.storage.writeFile(this.stateFile, nextSerialized);
+      this.serializedStateCache = nextSerialized;
+    } finally {
+      stopStateSaveTimer();
+    }
   }
 
   private resolveLastActiveSaveDebounceMs(): number {
@@ -89,6 +127,8 @@ export class StateManager implements IStateManager {
   reload(): void {
     this.clearPendingLastActiveSave();
     this.state = this.loadState();
+    this.serializedStateCache = this.serializeState(this.state);
+    this.invalidateChannelLookupCache();
   }
 
   getProject(projectName: string): ProjectState | undefined {
@@ -97,12 +137,14 @@ export class StateManager implements IStateManager {
 
   setProject(project: ProjectState): void {
     this.state.projects[project.projectName] = normalizeProjectState(project);
+    this.invalidateChannelLookupCache();
     this.clearPendingLastActiveSave();
     this.saveState();
   }
 
   removeProject(projectName: string): void {
     delete this.state.projects[projectName];
+    this.invalidateChannelLookupCache();
     this.clearPendingLastActiveSave();
     this.saveState();
   }
@@ -139,15 +181,11 @@ export class StateManager implements IStateManager {
   }
 
   findProjectByChannel(channelId: string): ProjectState | undefined {
-    return Object.values(this.state.projects).find((project) => !!findProjectInstanceByChannel(project, channelId));
+    return this.getChannelLookupCache().get(channelId)?.project;
   }
 
   getAgentTypeByChannel(channelId: string): string | undefined {
-    for (const project of Object.values(this.state.projects)) {
-      const instance = findProjectInstanceByChannel(project, channelId);
-      if (instance) return instance.agentType;
-    }
-    return undefined;
+    return this.getChannelLookupCache().get(channelId)?.agentType;
   }
 }
 

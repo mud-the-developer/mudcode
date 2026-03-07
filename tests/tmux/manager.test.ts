@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { TmuxManager } from '../../src/tmux/manager.js';
 import type { ICommandExecutor } from '../../src/types/interfaces.js';
+import { perfMetrics } from '../../src/observability/perf-metrics.js';
 
 class MockExecutor implements ICommandExecutor {
   calls: { method: string; command: string }[] = [];
@@ -55,6 +56,7 @@ describe('TmuxManager', () => {
   let tmux: TmuxManager;
 
   beforeEach(() => {
+    perfMetrics.resetForTests();
     executor = new MockExecutor();
     tmux = new TmuxManager('agent-', executor);
   });
@@ -334,6 +336,15 @@ describe('TmuxManager', () => {
       expect(above[0].command).toContain(`'${'b'.repeat(2000)}'`);
       expect(above[1].command).toContain(`'b'`);
       expect(executor.calls[executor.calls.length - 1].command).toContain("tmux send-keys -t 'agent-session:window1.1' Enter");
+    });
+
+    it('records tmux exec counts by op type', () => {
+      executor.nextResult = '1\n';
+      tmux.sendKeysToWindow('agent-session', 'window1', 'hello');
+
+      const snapshot = perfMetrics.snapshot();
+      expect(snapshot.counters.tmux_exec_count.byOp.list_panes).toBe(1);
+      expect(snapshot.counters.tmux_exec_count.byOp.send_keys).toBe(2);
     });
 
   });

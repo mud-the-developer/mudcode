@@ -41,5 +41,6 @@ This is a practical follow-up list after current stabilization work.
   - `/repair restart-only`
   - `/repair verify`
 
-3. Install mode visibility
-- `mudcode update --explain` to print exact mode (git/registry), install path, and dedupe outcome before running.
+3. Install mode visibility (completed)
+- Added `mudcode update --explain` and `mudcode align-version --explain`.
+- It prints exact mode (git/registry), install path/command, and dedupe behavior before execution.

@@ -175,6 +175,25 @@ describe('normalizeProjectState', () => {
     expect(normalized.discordChannels).toEqual({});
   });
 
+  it('does not fall back to legacy maps when explicit instances map is empty', () => {
+    const project: ProjectState = {
+      projectName: 'explicit-empty',
+      projectPath: '/tmp/explicit-empty',
+      tmuxSession: 'bridge',
+      agents: { codex: true },
+      discordChannels: { codex: 'ch-legacy' },
+      tmuxWindows: { codex: 'legacy-codex-window' },
+      createdAt: new Date(),
+      lastActive: new Date(),
+      instances: {},
+    };
+
+    const normalized = normalizeProjectState(project);
+    expect(Object.keys(normalized.instances || {})).toHaveLength(0);
+    expect(normalized.discordChannels).toEqual({});
+    expect(normalized.tmuxWindows).toBeUndefined();
+  });
+
   it('normalizes multi-instance project with different agents', () => {
     const project: ProjectState = {
       projectName: 'multi',

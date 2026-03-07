@@ -35,7 +35,7 @@ vi.mock('discord.js', () => {
       addComponents = vi.fn().mockReturnThis();
     },
     ComponentType: { Button: 2 },
-    ApplicationCommandOptionType: { Integer: 4 },
+    ApplicationCommandOptionType: { String: 3, Integer: 4 },
     EmbedBuilder: class MockEmbedBuilder {
       setTitle = vi.fn().mockReturnThis();
       setDescription = vi.fn().mockReturnThis();
@@ -60,6 +60,11 @@ function createTestRegistry(): AgentRegistry {
 describe('DiscordClient', () => {
   beforeEach(() => {
     mockClientInstances.length = 0;
+    delete process.env.AGENT_DISCORD_ROUTE_CHANNEL_NAME_FALLBACK;
+    delete process.env.AGENT_DISCORD_REACTION_SUPPRESS_TTL_MS;
+    delete process.env.AGENT_DISCORD_OUTPUT_DEDUPE_WINDOW_MS;
+    delete process.env.AGENT_DISCORD_OUTPUT_MAX_CHUNKS;
+    delete process.env.AGENT_DISCORD_LONG_OUTPUT_THREAD_MAX_CHUNKS;
   });
 
   function getMockClient() {
@@ -160,6 +165,46 @@ describe('DiscordClient', () => {
       expect(callback).not.toHaveBeenCalled();
     });
 
+    it('forwards plain text messages by default', async () => {
+      const client = new DiscordClient('test-token');
+      const callback = vi.fn();
+      client.onMessage(callback);
+      client.registerChannelMappings([
+        { channelId: 'ch-1', projectName: 'proj', agentType: 'claude', instanceId: 'claude' },
+      ]);
+
+      const mockClient = getMockClient();
+      const messageCreateHandler = mockClient.on.mock.calls.find(
+        (call: any[]) => call[0] === 'messageCreate',
+      )?.[1];
+
+      await messageCreateHandler({
+        author: { bot: false, id: 'u-1' },
+        channel: { isTextBased: () => true },
+        channelId: 'ch-1',
+        id: 'm-1',
+        content: 'hello there',
+        attachments: { map: () => [] },
+      });
+
+      expect(callback).toHaveBeenCalledWith(
+        'claude',
+        'hello there',
+        'proj',
+        'ch-1',
+        'm-1',
+        'claude',
+        undefined,
+        expect.objectContaining({
+          platform: 'discord',
+          sourceChannelId: 'ch-1',
+          routeChannelId: 'ch-1',
+          authorId: 'u-1',
+          conversationKey: 'discord:channel:ch-1:author:u-1',
+        }),
+      );
+    });
+
     it('passes message context for mapped channels', async () => {
       const client = new DiscordClient('test-token');
       const callback = vi.fn();
@@ -178,14 +223,14 @@ describe('DiscordClient', () => {
         channel: { isTextBased: () => true },
         channelId: 'ch-1',
         id: 'm-1',
-        content: 'hello',
+        content: '/send hello',
         attachments: { map: () => [] },
         reference: { messageId: 'm-0' },
       });
 
       expect(callback).toHaveBeenCalledWith(
         'claude',
-        'hello',
+        '/send hello',
         'proj',
         'ch-1',
         'm-1',
@@ -220,13 +265,13 @@ describe('DiscordClient', () => {
         channel: { isTextBased: () => true, isThread: () => true, parentId: 'ch-parent' },
         channelId: 'thread-99',
         id: 'm-2',
-        content: 'thread hello',
+        content: '/send thread hello',
         attachments: { map: () => [] },
       });
 
       expect(callback).toHaveBeenCalledWith(
         'claude',
-        'thread hello',
+        '/send thread hello',
         'proj',
         'thread-99',
         'm-2',
@@ -240,6 +285,131 @@ describe('DiscordClient', () => {
           conversationKey: 'discord:thread:thread-99',
         }),
       );
+    });
+
+    it('preserves thread context even when the thread channel itself is mapped', async () => {
+      const client = new DiscordClient('test-token');
+      const callback = vi.fn();
+      client.onMessage(callback);
+      client.registerChannelMappings([
+        { channelId: 'thread-42', projectName: 'proj', agentType: 'claude', instanceId: 'claude-2' },
+      ]);
+
+      const mockClient = getMockClient();
+      const messageCreateHandler = mockClient.on.mock.calls.find(
+        (call: any[]) => call[0] === 'messageCreate',
+      )?.[1];
+
+      await messageCreateHandler({
+        author: { bot: false, id: 'u-thread' },
+        channel: { isTextBased: () => true, isThread: () => true, parentId: 'ch-parent' },
+        channelId: 'thread-42',
+        id: 'm-thread-42',
+        content: '/send keep thread context',
+        attachments: { map: () => [] },
+      });
+
+      expect(callback).toHaveBeenCalledWith(
+        'claude',
+        '/send keep thread context',
+        'proj',
+        'thread-42',
+        'm-thread-42',
+        'claude-2',
+        undefined,
+        expect.objectContaining({
+          sourceChannelId: 'thread-42',
+          routeChannelId: 'ch-parent',
+          threadId: 'thread-42',
+          conversationKey: 'discord:thread:thread-42',
+        }),
+      );
+    });
+
+    it('falls back to channel-name route when mapping is missing', async () => {
+      process.env.AGENT_DISCORD_ROUTE_CHANNEL_NAME_FALLBACK = '1';
+      try {
+        const client = new DiscordClient('test-token', createTestRegistry());
+        const callback = vi.fn();
+        client.onMessage(callback);
+
+        const mockClient = getMockClient();
+        const messageCreateHandler = mockClient.on.mock.calls.find(
+          (call: any[]) => call[0] === 'messageCreate',
+        )?.[1];
+
+        await messageCreateHandler({
+          author: { bot: false, id: 'u-fallback' },
+          channel: { isTextBased: () => true, name: 'demo-test' },
+          channelId: 'ch-fallback',
+          id: 'm-fallback',
+          content: 'hello fallback',
+          attachments: { map: () => [] },
+        });
+
+        expect(callback).toHaveBeenCalledWith(
+          'test',
+          'hello fallback',
+          'demo',
+          'ch-fallback',
+          'm-fallback',
+          undefined,
+          undefined,
+          expect.objectContaining({
+            platform: 'discord',
+            sourceChannelId: 'ch-fallback',
+            routeChannelId: 'ch-fallback',
+            authorId: 'u-fallback',
+          }),
+        );
+        expect(client.getChannelMapping().get('ch-fallback')).toEqual({
+          projectName: 'demo',
+          agentType: 'test',
+        });
+      } finally {
+        delete process.env.AGENT_DISCORD_ROUTE_CHANNEL_NAME_FALLBACK;
+      }
+    });
+
+    it('infers instance id from channel-name suffix for sub-agents', async () => {
+      process.env.AGENT_DISCORD_ROUTE_CHANNEL_NAME_FALLBACK = '1';
+      try {
+        const client = new DiscordClient('test-token', createTestRegistry());
+        const callback = vi.fn();
+        client.onMessage(callback);
+
+        const mockClient = getMockClient();
+        const messageCreateHandler = mockClient.on.mock.calls.find(
+          (call: any[]) => call[0] === 'messageCreate',
+        )?.[1];
+
+        await messageCreateHandler({
+          author: { bot: false, id: 'u-sub' },
+          channel: { isTextBased: () => true, name: 'demo-test-3' },
+          channelId: 'ch-sub',
+          id: 'm-sub',
+          content: '/send run',
+          attachments: { map: () => [] },
+        });
+
+        expect(callback).toHaveBeenCalledWith(
+          'test',
+          '/send run',
+          'demo',
+          'ch-sub',
+          'm-sub',
+          'test-3',
+          undefined,
+          expect.any(Object),
+        );
+        expect(client.getChannelMapping().get('ch-sub')).toEqual({
+          projectName: 'demo',
+          agentType: 'test',
+          instanceId: 'test-3',
+        });
+      } finally {
+        delete process.env.AGENT_DISCORD_ROUTE_CHANNEL_NAME_FALLBACK;
+      }
     });
 
     it('routes /q slash command through message callback', async () => {
@@ -349,6 +519,31 @@ describe('DiscordClient', () => {
       });
     });
 
+    it('suppresses duplicate channel output within dedupe window', async () => {
+      vi.useFakeTimers();
+      process.env.AGENT_DISCORD_OUTPUT_DEDUPE_WINDOW_MS = '2000';
+      try {
+        const client = new DiscordClient('test-token');
+        const mockChannel = {
+          isTextBased: () => true,
+          send: vi.fn().mockResolvedValue(undefined),
+        };
+
+        const mockClient = getMockClient();
+        mockClient.channels.fetch.mockResolvedValue(mockChannel);
+
+        await client.sendToChannel('ch-123', 'same output');
+        await client.sendToChannel('ch-123', 'same output');
+        expect(mockChannel.send).toHaveBeenCalledTimes(1);
+
+        await vi.advanceTimersByTimeAsync(2100);
+        await client.sendToChannel('ch-123', 'same output');
+        expect(mockChannel.send).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('sendToChannel handles non-text channel gracefully', async () => {
       const client = new DiscordClient('test-token');
 
@@ -406,6 +601,68 @@ describe('DiscordClient', () => {
       expect(remove).toHaveBeenCalledWith('bot-1');
     });
 
+    it('suppresses repeated reaction attempts for Unknown Message (10008)', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const client = new DiscordClient('test-token');
+        const unknownMessageError = Object.assign(new Error('Unknown Message'), { code: 10008 });
+        const mockChannel = {
+          isTextBased: () => true,
+          messages: {
+            fetch: vi.fn().mockRejectedValue(unknownMessageError),
+          },
+        };
+        const mockClient = getMockClient();
+        mockClient.channels.fetch.mockResolvedValue(mockChannel);
+        const messageId = '123456789012345678';
+
+        await client.addReactionToMessage('ch-123', messageId, '📥');
+        await client.addReactionToMessage('ch-123', messageId, '📥');
+        await client.replaceOwnReactionOnMessage('ch-123', messageId, '📥', '✅');
+
+        expect(mockClient.channels.fetch).toHaveBeenCalledTimes(1);
+        expect(mockChannel.messages.fetch).toHaveBeenCalledTimes(1);
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Unknown Message (10008)'));
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('retries reaction after suppression TTL expires', async () => {
+      vi.useFakeTimers();
+      process.env.AGENT_DISCORD_REACTION_SUPPRESS_TTL_MS = '5000';
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const client = new DiscordClient('test-token');
+        const unknownMessageError = Object.assign(new Error('Unknown Message'), { code: 10008 });
+        const react = vi.fn().mockResolvedValue(undefined);
+        const mockChannel = {
+          isTextBased: () => true,
+          messages: {
+            fetch: vi
+              .fn()
+              .mockRejectedValueOnce(unknownMessageError)
+              .mockResolvedValue({ react, reactions: { cache: { find: vi.fn() } } }),
+          },
+        };
+        const mockClient = getMockClient();
+        mockClient.channels.fetch.mockResolvedValue(mockChannel);
+        const messageId = '123456789012345678';
+
+        await client.addReactionToMessage('ch-123', messageId, '📥');
+        await client.addReactionToMessage('ch-123', messageId, '📥');
+        expect(mockChannel.messages.fetch).toHaveBeenCalledTimes(1);
+
+        await vi.advanceTimersByTimeAsync(5001);
+        await client.addReactionToMessage('ch-123', messageId, '📥');
+        expect(mockChannel.messages.fetch).toHaveBeenCalledTimes(2);
+        expect(react).toHaveBeenCalledWith('📥');
+      } finally {
+        warnSpy.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
     it('sendLongOutput posts summary and full text in a thread', async () => {
       const client = new DiscordClient('test-token');
       const threadSend = vi.fn().mockResolvedValue(undefined);
@@ -428,7 +685,7 @@ describe('DiscordClient', () => {
 
       expect(mockChannel.send).toHaveBeenCalledWith(
         expect.objectContaining({
-          content: expect.stringContaining('Long response received'),
+          content: expect.stringContaining('Long response moved to thread'),
           allowedMentions: { parse: [], repliedUser: false },
           flags: 4096,
         }),
@@ -437,6 +694,82 @@ describe('DiscordClient', () => {
       expect(threadSend).toHaveBeenCalled();
       const firstThreadPayload = threadSend.mock.calls[0]?.[0];
       expect(String(firstThreadPayload?.content || '')).toContain('Page');
+    });
+
+    it('caps oversized split output and appends truncation notice', async () => {
+      process.env.AGENT_DISCORD_OUTPUT_MAX_CHUNKS = '3';
+      const client = new DiscordClient('test-token');
+      const mockChannel = {
+        isTextBased: () => true,
+        send: vi.fn().mockResolvedValue(undefined),
+      };
+
+      const mockClient = getMockClient();
+      mockClient.channels.fetch.mockResolvedValue(mockChannel);
+
+      await client.sendToChannel('ch-123', 'x'.repeat(12_000));
+
+      expect(mockChannel.send).toHaveBeenCalledTimes(3);
+      const lastPayload = mockChannel.send.mock.calls.at(-1)?.[0];
+      expect(String(lastPayload?.content || '')).toContain('Output truncated');
+    });
+
+    it('condenses very large long-output payloads instead of spawning thread floods', async () => {
+      process.env.AGENT_DISCORD_LONG_OUTPUT_THREAD_MAX_CHUNKS = '2';
+      const client = new DiscordClient('test-token');
+      const mockMessage = {
+        id: 'm-anchor',
+        startThread: vi.fn().mockResolvedValue({
+          id: 'th-1',
+          send: vi.fn().mockResolvedValue(undefined),
+        }),
+      };
+      const mockChannel = {
+        isTextBased: () => true,
+        send: vi.fn().mockResolvedValue(mockMessage),
+      };
+
+      const mockClient = getMockClient();
+      mockClient.channels.fetch.mockResolvedValue(mockChannel);
+
+      await client.sendLongOutput('ch-123', 'x'.repeat(10_000));
+
+      expect(mockMessage.startThread).not.toHaveBeenCalled();
+      expect(mockChannel.send).toHaveBeenCalledTimes(1);
+      const onlyPayload = mockChannel.send.mock.calls[0]?.[0];
+      expect(String(onlyPayload?.content || '')).toContain('Long response condensed');
+      expect(String(onlyPayload?.content || '')).toContain('truncated');
+    });
+
+    it('reuses long-output thread per channel to avoid creating many threads', async () => {
+      const client = new DiscordClient('test-token');
+      const threadSend = vi.fn().mockResolvedValue(undefined);
+      const threadChannel = {
+        id: 'th-long',
+        isTextBased: () => true,
+        send: threadSend,
+      };
+      const anchorMessage = {
+        id: 'm-long-anchor',
+        startThread: vi.fn().mockResolvedValue(threadChannel),
+      };
+      const rootChannel = {
+        isTextBased: () => true,
+        send: vi.fn().mockResolvedValue(anchorMessage),
+      };
+
+      const mockClient = getMockClient();
+      mockClient.channels.fetch.mockImplementation(async (id: string) => {
+        if (id === 'th-long') return threadChannel;
+        return rootChannel;
+      });
+
+      await client.sendLongOutput('ch-123', 'x'.repeat(2400));
+      await client.sendLongOutput('ch-123', 'y'.repeat(2400));
+
+      expect(rootChannel.send).toHaveBeenCalledTimes(1);
+      expect(anchorMessage.startThread).toHaveBeenCalledTimes(1);
+      expect(threadSend).toHaveBeenCalled();
     });
 
     it('sendToProgressThread creates and reuses a progress thread per channel', async () => {
@@ -717,6 +1050,18 @@ describe('DiscordClient', () => {
           description: 'Show codex I/O tracker status for this instance.',
         },
         {
+          name: 'send',
+          description: 'Send a prompt to the mapped agent instance.',
+          options: [
+            {
+              name: 'text',
+              description: 'Prompt text to send to the agent.',
+              type: 3,
+              required: true,
+            },
+          ],
+        },
+        {
           name: 'controls',
           description: 'Post a button control panel in this channel.',
         },
@@ -879,6 +1224,52 @@ describe('DiscordClient', () => {
       expect(interaction.editReply).toHaveBeenCalledWith('✅ `/snapshot` request submitted.');
     });
 
+    it('routes /send slash command text to message callback', async () => {
+      const client = new DiscordClient('test-token');
+      const callback = vi.fn();
+      client.onMessage(callback);
+      client.registerChannelMappings([
+        { channelId: 'ch-1', projectName: 'proj', agentType: 'claude', instanceId: 'claude' },
+      ]);
+
+      const mockClient = getMockClient();
+      const interactionHandler = mockClient.on.mock.calls.find(
+        (call: any[]) => call[0] === 'interactionCreate',
+      )?.[1];
+
+      const interaction = {
+        isButton: () => false,
+        isChatInputCommand: () => true,
+        commandName: 'send',
+        user: { bot: false, id: 'u-1' },
+        channelId: 'ch-1',
+        channel: { isTextBased: () => true },
+        options: {
+          getInteger: vi.fn().mockReturnValue(null),
+          getString: vi.fn().mockReturnValue('implement this task'),
+        },
+        deferred: false,
+        replied: false,
+        deferReply: vi.fn().mockResolvedValue(undefined),
+        editReply: vi.fn().mockResolvedValue(undefined),
+        reply: vi.fn().mockResolvedValue(undefined),
+      };
+
+      await interactionHandler(interaction);
+
+      expect(callback).toHaveBeenCalledWith(
+        'claude',
+        '/send implement this task',
+        'proj',
+        'ch-1',
+        undefined,
+        'claude',
+        undefined,
+        expect.any(Object),
+      );
+      expect(interaction.editReply).toHaveBeenCalledWith('✅ `/send implement this task` request submitted.');
+    });
+
     it('posts control panel for /controls slash command', async () => {
       const client = new DiscordClient('test-token');
       const callback = vi.fn();
@@ -964,6 +1355,7 @@ describe('DiscordClient', () => {
       );
       expect(buttonInteraction.editReply).toHaveBeenCalledWith('✅ `/retry` request submitted.');
     });
+
   });
 
   describe('Typing indicator', () => {

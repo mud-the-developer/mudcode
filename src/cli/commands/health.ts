@@ -9,6 +9,8 @@ import { resolveProjectWindowName } from '../../policy/window-naming.js';
 import { applyTmuxCliOverrides } from '../common/tmux.js';
 import type { TmuxCliOptions } from '../common/types.js';
 import { cleanCapture } from '../../capture/parser.js';
+import { formatPerfMetricsLine, type PerfMetricsSnapshot } from '../../observability/perf-metrics.js';
+import { resolveOrchestratorRole } from '../../bridge/runtime/orchestrator-progress-policy.js';
 
 type HealthLevel = 'ok' | 'warn' | 'fail';
 
@@ -27,6 +29,7 @@ type InstanceHealth = {
   sessionExists: boolean;
   windowExists: boolean;
   channelId: string | undefined;
+  orchestratorRole?: 'supervisor' | 'worker' | 'none';
   runtime?: RuntimeSnapshot;
   paneWorkingHint?: boolean;
   captureProbe?: CaptureProbeSnapshot;
@@ -53,6 +56,9 @@ type RuntimeSnapshot = {
   eventProgressModeTurnId?: string;
   eventProgressModeUpdatedAt?: string;
   eventProgressModeAgeMs?: number;
+  eventProgressSuppressedCount?: number;
+  eventProgressSuppressedChars?: number;
+  orchestratorRole?: 'supervisor' | 'worker' | 'none';
 };
 
 type RuntimeStatusEntry = RuntimeSnapshot & {
@@ -64,6 +70,12 @@ type RuntimeStatusEntry = RuntimeSnapshot & {
 type RuntimeStatusPayload = {
   generatedAt?: string;
   instances?: RuntimeStatusEntry[];
+  perfMetrics?: unknown;
+};
+
+type RuntimeStatusFetchResult = {
+  runtimeByInstance: Map<string, RuntimeSnapshot>;
+  perfMetrics?: PerfMetricsSnapshot;
 };
 
 type CaptureProbeStatus = 'ok' | 'warn' | 'fail';
@@ -89,6 +101,8 @@ type ProjectScopeResolution = {
   errorDetail?: string;
 };
 
+const RUNTIME_STATUS_FETCH_TIMEOUT_MS = 900;
+
 function pushCheck(checks: HealthCheck[], name: string, level: HealthLevel, detail: string): void {
   checks.push({ name, level, detail });
 }
@@ -106,11 +120,12 @@ function parseRuntimeProgressMode(raw: unknown): 'off' | 'thread' | 'channel' | 
   return undefined;
 }
 
-function parseBoolEnv(raw: string | undefined): boolean | undefined {
-  if (!raw) return undefined;
+function parseRuntimeOrchestratorRole(raw: unknown): 'supervisor' | 'worker' | 'none' | undefined {
+  if (typeof raw !== 'string') return undefined;
   const normalized = raw.trim().toLowerCase();
-  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
-  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  if (normalized === 'supervisor' || normalized === 'worker' || normalized === 'none') {
+    return normalized;
+  }
   return undefined;
 }
 
@@ -123,21 +138,6 @@ function parseProgressModeFromEnv(raw: string | undefined): 'off' | 'thread' | '
   if (['1', 'true', 'yes', 'on'].includes(normalized)) return 'thread';
   if (['0', 'false', 'no'].includes(normalized)) return 'off';
   return undefined;
-}
-
-function resolveCodexEventOnlyEnabled(): boolean {
-  const resolved = parseBoolEnv(process.env.AGENT_DISCORD_CODEX_EVENT_ONLY);
-  return resolved !== false;
-}
-
-function resolveCodexEventOnlyCaptureFallbackEnabled(): boolean {
-  const resolved = parseBoolEnv(process.env.AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK);
-  return resolved === true;
-}
-
-function resolvePromptEchoFallbackRawDeltaOnEventHookEnabled(): boolean {
-  const resolved = parseBoolEnv(process.env.AGENT_DISCORD_CAPTURE_PROMPT_ECHO_FALLBACK_EVENT_HOOK);
-  return resolved === true;
 }
 
 function resolveEventHookCaptureFallbackStaleGraceMs(): number {
@@ -160,6 +160,29 @@ function resolveProgressModeStaleWarnMs(): number {
     return Math.trunc(fromEnv);
   }
   return 90_000;
+}
+
+function resolveIgnoredEventWarnCount(): number {
+  const fromEnv = Number(process.env.AGENT_DISCORD_IGNORED_EVENT_WARN_COUNT || '');
+  if (Number.isFinite(fromEnv) && fromEnv >= 1 && fromEnv <= 10_000) {
+    return Math.trunc(fromEnv);
+  }
+  return 8;
+}
+
+function resolveIgnoredEventWarnWindowMs(): number {
+  const fromEnv = Number(process.env.AGENT_DISCORD_IGNORED_EVENT_WARN_WINDOW_MS || '');
+  if (Number.isFinite(fromEnv) && fromEnv >= 60_000 && fromEnv <= 24 * 60 * 60 * 1000) {
+    return Math.trunc(fromEnv);
+  }
+  return 15 * 60 * 1000;
+}
+
+function parseIsoAgeMs(value?: string): number | undefined {
+  if (!value || typeof value !== 'string') return undefined;
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return undefined;
+  return Math.max(0, Date.now() - parsed);
 }
 
 function formatRuntimeAge(ageMs?: number): string {
@@ -338,13 +361,25 @@ function describeRuntime(runtime?: RuntimeSnapshot, paneWorkingHint: boolean = f
     typeof runtime?.lifecycleRejectedEventCount === 'number' && Number.isFinite(runtime.lifecycleRejectedEventCount)
       ? Math.max(0, Math.trunc(runtime.lifecycleRejectedEventCount))
       : 0;
+  const progressSuppressedCount =
+    typeof runtime?.eventProgressSuppressedCount === 'number' && Number.isFinite(runtime.eventProgressSuppressedCount)
+      ? Math.max(0, Math.trunc(runtime.eventProgressSuppressedCount))
+      : 0;
+  const progressSuppressedChars =
+    typeof runtime?.eventProgressSuppressedChars === 'number' && Number.isFinite(runtime.eventProgressSuppressedChars)
+      ? Math.max(0, Math.trunc(runtime.eventProgressSuppressedChars))
+      : 0;
   const ignoredSuffix = ignoredCount > 0 ? `, ignored hook events=${ignoredCount}` : '';
   const rejectedSuffix = rejectedCount > 0 ? `, lifecycle rejects=${rejectedCount}` : '';
+  const progressSuppressedSuffix =
+    progressSuppressedCount > 0
+      ? `, progress suppressed=${progressSuppressedCount} (${progressSuppressedChars} chars)`
+      : '';
   const progressModeSuffix = runtime?.eventProgressMode
     ? `, progressMode=${runtime.eventProgressMode}` +
       (runtime.eventProgressModeTurnId ? `(${runtime.eventProgressModeTurnId})` : '')
     : '';
-  const contractSuffix = `${ignoredSuffix}${rejectedSuffix}${progressModeSuffix}`;
+  const contractSuffix = `${ignoredSuffix}${rejectedSuffix}${progressSuppressedSuffix}${progressModeSuffix}`;
 
   if (paneWorkingHint) return `working (pane shows "Esc to interrupt"${contractSuffix})`;
   if (!runtime) return 'unavailable';
@@ -364,16 +399,38 @@ function describeRuntime(runtime?: RuntimeSnapshot, paneWorkingHint: boolean = f
   return `idle${contractSuffix}`;
 }
 
-async function fetchRuntimeStatus(port: number): Promise<Map<string, RuntimeSnapshot>> {
-  const response = await fetch(`http://127.0.0.1:${port}/runtime-status`, {
-    method: 'GET',
-    headers: { Accept: 'application/json' },
-  });
-  if (!response.ok) {
-    throw new Error(`runtime endpoint returned ${response.status}`);
+function parsePerfMetricsSnapshot(raw: unknown): PerfMetricsSnapshot | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const candidate = raw as Partial<PerfMetricsSnapshot>;
+  if (!candidate.timers || !candidate.counters || !candidate.stateSaveFrequency) return undefined;
+  return candidate as PerfMetricsSnapshot;
+}
+
+async function fetchRuntimeStatusWithPerf(port: number): Promise<RuntimeStatusFetchResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RUNTIME_STATUS_FETCH_TIMEOUT_MS);
+  timer.unref?.();
+
+  let payload: RuntimeStatusPayload;
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/runtime-status`, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`runtime endpoint returned ${response.status}`);
+    }
+    payload = (await response.json()) as RuntimeStatusPayload;
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(`runtime endpoint timed out after ${RUNTIME_STATUS_FETCH_TIMEOUT_MS}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
   }
 
-  const payload = (await response.json()) as RuntimeStatusPayload;
   const entries = Array.isArray(payload.instances) ? payload.instances : [];
   const map = new Map<string, RuntimeSnapshot>();
   for (const entry of entries) {
@@ -417,9 +474,21 @@ async function fetchRuntimeStatus(port: number): Promise<Map<string, RuntimeSnap
         typeof entry.eventProgressModeAgeMs === 'number' && Number.isFinite(entry.eventProgressModeAgeMs)
           ? Math.max(0, Math.trunc(entry.eventProgressModeAgeMs))
           : undefined,
+      eventProgressSuppressedCount:
+        typeof entry.eventProgressSuppressedCount === 'number' && Number.isFinite(entry.eventProgressSuppressedCount)
+          ? Math.max(0, Math.trunc(entry.eventProgressSuppressedCount))
+          : undefined,
+      eventProgressSuppressedChars:
+        typeof entry.eventProgressSuppressedChars === 'number' && Number.isFinite(entry.eventProgressSuppressedChars)
+          ? Math.max(0, Math.trunc(entry.eventProgressSuppressedChars))
+          : undefined,
+      orchestratorRole: parseRuntimeOrchestratorRole(entry.orchestratorRole),
     });
   }
-  return map;
+  return {
+    runtimeByInstance: map,
+    perfMetrics: parsePerfMetricsSnapshot(payload.perfMetrics),
+  };
 }
 
 function resolveProjectScope(
@@ -476,12 +545,13 @@ export async function healthCommand(
   const instances: InstanceHealth[] = [];
   let daemonRunning = false;
   const runtimeByInstance = new Map<string, RuntimeSnapshot>();
-  const codexEventOnlyEnabled = resolveCodexEventOnlyEnabled();
-  const codexEventOnlyCaptureFallbackEnabled = resolveCodexEventOnlyCaptureFallbackEnabled();
-  const promptEchoFallbackRawDeltaOnEventHookEnabled = resolvePromptEchoFallbackRawDeltaOnEventHookEnabled();
+  let runtimePerfMetrics: PerfMetricsSnapshot | undefined;
   const eventHookCaptureFallbackStaleGraceMs = resolveEventHookCaptureFallbackStaleGraceMs();
   const expectedCodexProgressMode = resolveExpectedCodexProgressMode();
   const progressModeStaleWarnMs = resolveProgressModeStaleWarnMs();
+  const ignoredEventWarnCount = resolveIgnoredEventWarnCount();
+  const ignoredEventWarnWindowMs = resolveIgnoredEventWarnWindowMs();
+  const channelOwnersById = new Map<string, string[]>();
 
   try {
     validateConfig();
@@ -508,11 +578,17 @@ export async function healthCommand(
 
   if (daemonRunning) {
     try {
-      const runtime = await fetchRuntimeStatus(effectiveConfig.hookServerPort || 18470);
-      for (const [key, value] of runtime.entries()) {
+      const runtime = await fetchRuntimeStatusWithPerf(effectiveConfig.hookServerPort || 18470);
+      for (const [key, value] of runtime.runtimeByInstance.entries()) {
         runtimeByInstance.set(key, value);
       }
-      pushCheck(checks, 'runtime', 'ok', `loaded runtime status for ${runtime.size} instance(s)`);
+      runtimePerfMetrics = runtime.perfMetrics;
+      pushCheck(
+        checks,
+        'runtime',
+        'ok',
+        `loaded runtime status for ${runtime.runtimeByInstance.size} instance(s)`,
+      );
     } catch (error) {
       pushCheck(checks, 'runtime', 'warn', `runtime status unavailable: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -523,26 +599,10 @@ export async function healthCommand(
   const allProjects = stateManager.listProjects();
   const scopedProjects = resolveProjectScope(allProjects, options.project);
   const projects = scopedProjects.projects;
-  if (codexEventOnlyEnabled && codexEventOnlyCaptureFallbackEnabled) {
+  if (eventHookCaptureFallbackStaleGraceMs > 30_000) {
     pushCheck(
       checks,
-      'contract:event-only',
-      'warn',
-      'event-only strict parity disabled: AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK=1',
-    );
-  }
-  if (codexEventOnlyEnabled && promptEchoFallbackRawDeltaOnEventHookEnabled) {
-    pushCheck(
-      checks,
-      'contract:event-only',
-      'warn',
-      'event-hook capture path allows prompt-echo raw delta fallback. Consider AGENT_DISCORD_CAPTURE_PROMPT_ECHO_FALLBACK_EVENT_HOOK=0',
-    );
-  }
-  if (codexEventOnlyCaptureFallbackEnabled && eventHookCaptureFallbackStaleGraceMs > 30_000) {
-    pushCheck(
-      checks,
-      'contract:event-only',
+      'contract:codex-runtime',
       'warn',
       `event-hook capture fallback stale grace is high (${eventHookCaptureFallbackStaleGraceMs}ms)`,
     );
@@ -580,7 +640,19 @@ export async function healthCommand(
 
     const projectInstances = listProjectInstances(project);
     if (projectInstances.length === 0) {
-      pushCheck(checks, `project:${project.projectName}`, 'warn', 'no agent instances');
+      const hasMappedChannels = Object.values(project.discordChannels || {}).some(
+        (channelId) => typeof channelId === 'string' && channelId.trim().length > 0,
+      );
+      if (project.orchestrator?.enabled && !hasMappedChannels) {
+        pushCheck(
+          checks,
+          `project:${project.projectName}`,
+          'ok',
+          'no active instances (orchestrator workers cleaned)',
+        );
+      } else {
+        pushCheck(checks, `project:${project.projectName}`, 'warn', 'no agent instances');
+      }
       continue;
     }
 
@@ -596,6 +668,13 @@ export async function healthCommand(
       const paneWorkingHint =
         windowExists && detectPaneWorkingHint(tmux, project.tmuxSession, windowName, instance.agentType);
       const runtime = runtimeByInstance.get(runtimeKey(project.projectName, instance.instanceId));
+      const runtimeOrchestratorRole = runtime?.orchestratorRole;
+      const stateOrchestratorRole = resolveOrchestratorRole({
+        project,
+        instanceId: instance.instanceId,
+        agentType: instance.agentType,
+      });
+      const orchestratorRole = runtimeOrchestratorRole || stateOrchestratorRole;
       instances.push({
         projectName: project.projectName,
         instanceId: instance.instanceId,
@@ -605,9 +684,17 @@ export async function healthCommand(
         sessionExists,
         windowExists,
         channelId,
+        orchestratorRole,
         runtime,
         paneWorkingHint,
       });
+
+      if (channelId) {
+        const owner = `${project.projectName}/${instance.instanceId}`;
+        const owners = channelOwnersById.get(channelId) || [];
+        owners.push(owner);
+        channelOwnersById.set(channelId, owners);
+      }
 
       if (!windowExists) {
         pushCheck(
@@ -618,20 +705,39 @@ export async function healthCommand(
         );
       }
       if (!channelId) {
-        pushCheck(
-          checks,
-          `instance:${project.projectName}/${instance.instanceId}`,
-          'fail',
-          'channel mapping missing',
-        );
+        if (orchestratorRole === 'worker') {
+          pushCheck(
+            checks,
+            `instance:${project.projectName}/${instance.instanceId}`,
+            'ok',
+            'channel mapping optional for orchestrator worker',
+          );
+        } else {
+          pushCheck(
+            checks,
+            `instance:${project.projectName}/${instance.instanceId}`,
+            'fail',
+            'channel mapping missing',
+          );
+        }
       }
       const ignoredEventCount = runtime?.ignoredEventCount || 0;
       if (ignoredEventCount > 0) {
+        const ignoredAgeMs = parseIsoAgeMs(runtime?.ignoredLastAt);
+        const shouldWarnIgnoredEvents =
+          ignoredEventCount >= ignoredEventWarnCount &&
+          typeof ignoredAgeMs === 'number' &&
+          ignoredAgeMs <= ignoredEventWarnWindowMs;
+        const ignoredEventDetail = shouldWarnIgnoredEvents
+          ? `ignored ${ignoredEventCount} event-hook payload(s) recently (${formatRuntimeAge(ignoredAgeMs)} ago) for capture-driven instance`
+          : typeof ignoredAgeMs === 'number'
+            ? `ignored ${ignoredEventCount} event-hook payload(s), last seen ${formatRuntimeAge(ignoredAgeMs)} ago (informational)`
+            : `ignored ${ignoredEventCount} event-hook payload(s) (informational)`;
         pushCheck(
           checks,
           `hook:${project.projectName}/${instance.instanceId}`,
-          'warn',
-          `ignored ${ignoredEventCount} event-hook payload(s) for capture-driven instance`,
+          shouldWarnIgnoredEvents ? 'warn' : 'ok',
+          ignoredEventDetail,
         );
       }
       const rejectedEventCount = runtime?.lifecycleRejectedEventCount || 0;
@@ -643,13 +749,23 @@ export async function healthCommand(
           `strict lifecycle rejected ${rejectedEventCount} event(s) for this instance`,
         );
       }
-      if (instance.agentType === 'codex' && codexEventOnlyEnabled) {
+      const progressSuppressedCount = runtime?.eventProgressSuppressedCount || 0;
+      const progressSuppressedChars = runtime?.eventProgressSuppressedChars || 0;
+      if (progressSuppressedCount > 0) {
+        pushCheck(
+          checks,
+          `hook:${project.projectName}/${instance.instanceId}`,
+          'warn',
+          `suppressed ${progressSuppressedCount} progress update(s) (${progressSuppressedChars} chars) by burst guard`,
+        );
+      }
+      if (instance.agentType === 'codex') {
         if (runtime?.eventProgressMode === 'channel') {
           pushCheck(
             checks,
             `contract:${project.projectName}/${instance.instanceId}`,
             'warn',
-            'event-only mode detected progressMode=channel; consider thread/off to avoid intermediary channel output',
+            'codex runtime detected progressMode=channel; consider thread/off to avoid intermediary channel output',
           );
         }
         if (
@@ -679,6 +795,16 @@ export async function healthCommand(
         );
       }
     }
+  }
+
+  for (const [channelId, owners] of channelOwnersById.entries()) {
+    if (owners.length < 2) continue;
+    pushCheck(
+      checks,
+      'mapping:duplicate-channel',
+      'fail',
+      `channel \`${channelId}\` is assigned to multiple instances: ${owners.join(', ')}`,
+    );
   }
 
   if (options.captureTest) {
@@ -714,6 +840,7 @@ export async function healthCommand(
           summary,
           checks,
           instances,
+          perfMetrics: runtimePerfMetrics,
         },
         null,
         2,
@@ -727,6 +854,7 @@ export async function healthCommand(
     if (scopedProjects.resolvedProject) {
       console.log(chalk.gray(`Project scope: ${scopedProjects.resolvedProject}`));
     }
+    console.log(chalk.gray(formatPerfMetricsLine(runtimePerfMetrics)));
     if (options.captureTest) {
       const probePolls = resolveCaptureProbePolls(options.captureTestPolls);
       const probeIntervalMs = resolveCaptureProbeIntervalMs(options.captureTestIntervalMs);
@@ -744,7 +872,11 @@ export async function healthCommand(
       console.log(chalk.cyan('\nInstances:\n'));
       for (const instance of instances) {
         const tmuxStatus = instance.windowExists ? chalk.green('ok') : chalk.yellow('missing');
-        const channelStatus = instance.channelId ? chalk.green('ok') : chalk.red('missing');
+        const channelStatus = instance.channelId
+          ? chalk.green('ok')
+          : instance.orchestratorRole === 'worker'
+            ? chalk.yellow('optional')
+            : chalk.red('missing');
         console.log(
           chalk.gray(
             `- ${instance.projectName}/${instance.instanceId} (${instance.agentType})`,

@@ -17,8 +17,9 @@ function clearManagedTmuxSessions(): { cleared: string[]; failed: string[] } {
     .listProjects()
     .map((project) => project.tmuxSession)
     .filter((sessionName): sessionName is string => typeof sessionName === 'string' && sessionName.trim().length > 0);
-  const tmuxSessions = tmux.listSessions().map((session) => session.name);
-  const allSessions = [...new Set([...stateSessions, ...tmuxSessions])];
+  // Safety rule: clear-session should only target sessions currently tracked in state.
+  // Prefix-based tmux scanning is unsafe when TMUX_SESSION_PREFIX is empty.
+  const allSessions = [...new Set(stateSessions)];
 
   const cleared: string[] = [];
   const failed: string[] = [];

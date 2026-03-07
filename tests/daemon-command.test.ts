@@ -159,6 +159,24 @@ describe('daemonCommand restart action', () => {
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Cleared 2 tmux session(s)'));
   });
 
+  it('does not clear arbitrary tmux sessions when state has no managed sessions', async () => {
+    mocks.config.tmux.sessionPrefix = '';
+    mocks.stateManager.listProjects.mockReturnValue([]);
+    mocks.tmuxManagerInstance.listSessions.mockReturnValue([
+      { name: 'work' },
+      { name: 'personal' },
+      { name: 'bridge' },
+    ]);
+
+    const { daemonCommand } = await import('../src/cli/commands/daemon.js');
+
+    await daemonCommand('restart', { clearSession: true });
+
+    expect(mocks.tmuxManagerInstance.killSession).not.toHaveBeenCalled();
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('No managed tmux sessions were running.'));
+    mocks.config.tmux.sessionPrefix = 'agent-';
+  });
+
   it('skips capture auto-tune when explicitly disabled', async () => {
     const { daemonCommand } = await import('../src/cli/commands/daemon.js');
 

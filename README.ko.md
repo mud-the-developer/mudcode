@@ -70,7 +70,7 @@ mudcode attach my-app --instance codex
 - `mudcode daemon <start|stop|status|restart>`: 데몬 관리
 - `mudcode doctor [--fix]`: 설정/환경/런타임 드리프트 점검 및 자동 수정
 - `mudcode repair [mode] [--project <name>]`: 셀프힐 실행 (`default|doctor-only|restart-only|verify|deep`)
-- `mudcode update [--git]`: 최신 버전 업데이트 (git 자동 감지 지원)
+- `mudcode update [--git] [--explain]`: 최신 버전 업데이트 (git 자동 감지 지원, `--explain`은 실행 계획만 출력)
 - `mudcode stop [project] --instance <id>`: 특정 인스턴스 중지
 - `mudcode skill list [--all]`: `AGENTS.md`와 `.agents/skills` 기반 스킬 목록/상태 확인
 - `mudcode skill install [name]`: 로컬/no-api 스킬을 Codex 스킬 디렉토리에 설치
@@ -165,6 +165,12 @@ Doctor 안전 점검:
 
 매핑된 채널/스레드에서 사용:
 
+빠른 목록:
+- 일반 텍스트(슬래시 없음, 기본): 매핑된 agent로 바로 전달
+- `/send <text>` (명시적 전송 경로)
+- `/orchestrator enable|disable [supervisorInstanceId|supervisor=<id>] [hidden|thread|channel]` (고급/수동 토글, `/help all`에 표시)
+
+- `/help [all]` (alias: `/commands [all]`; 기본 = 카테고리 요약, `all` = 고급 orchestrator 명령 포함)
 - `/retry`
 - `/health`
 - `/snapshot`
@@ -225,6 +231,13 @@ Self-check:
 - `AGENTS.md`의 `### Available skills`를 기반으로 Codex 프롬프트에 자동 skill 힌트를 붙일 수 있습니다.
 
 환경 변수:
+- Gemini preflight fallback:
+  - `AGENT_DISCORD_GEMINI_PREFLIGHT_ENABLED=1|0` : 기본값 `1`, 런타임 디스패치 전에 Gemini 모델 사용 가능 여부 사전 점검
+  - `AGENT_DISCORD_GEMINI_PREFLIGHT_MODEL=<model>` : 기본값 `pro 3.1`, preflight probe 대상 모델 문자열
+  - `AGENT_DISCORD_GEMINI_PREFLIGHT_CACHE_TTL_MS=<n>` : 기본값 `60000`, preflight probe 결과 캐시 TTL(ms)
+- Turn-route ledger:
+  - `AGENT_DISCORD_TURN_ROUTE_RETENTION_MS=<n>` : 기본값 `21600000`, 범위 `60000..86400000`, event 라우팅 fallback용 turn->channel 힌트 유지 시간
+  - `AGENT_DISCORD_TURN_ROUTE_MAX=<n>` : 기본값 `20000`, 범위 `100..200000`, 메모리 내 turn route 엔트리 최대치(초과 시 오래된 항목부터 제거)
 - `AGENT_DISCORD_CODEX_IO_V2=0` : 추적기 비활성화
 - `AGENT_DISCORD_CODEX_IO_V2_ANNOUNCE=0` : transcript는 저장하고 채널 이벤트 메시지만 비활성화
 - `AGENT_DISCORD_CODEX_IO_V2_DIR=/path` : transcript 저장 루트 경로 변경
@@ -235,8 +248,35 @@ Self-check:
 - `AGENT_DISCORD_CODEX_AUTO_LANGUAGE_POLICY_MODE=off|korean|always` : 기본값 `off`, 필요한 경우에만 `korean`/`always`로 명시 설정
 - `AGENT_DISCORD_CAPTURE_FINAL_BUFFER_MAX_CHARS=<n>` : 기본값 `120000`, 범위 `4000..500000`, final-only capture 버퍼 잘림 기준
 - `AGENT_DISCORD_EVENT_PROGRESS_TRANSCRIPT_MAX_CHARS=<n>` : 기본값 `100000`, 범위 `500..500000`, 빈 `session.final` 보완용 transcript 예산
-- `AGENT_DISCORD_CODEX_EVENT_ONLY=1|0` : 기본값 `1`, `0`이면 기존 direct capture 출력 경로 유지
-- `AGENT_DISCORD_CODEX_EVENT_ONLY_CAPTURE_FALLBACK=0|1` : 기본값 `0`, `1`이면 tmux stale fallback capture 재활성화
+- `AGENT_DISCORD_EVENT_PROGRESS_MAX_MESSAGES_PER_TURN=<n>` : 기본값 `6`, 범위 `0..200`, 턴 단위 progress burst guard (`0`이면 억제 비활성화)
+- `AGENT_DISCORD_EVENT_PROGRESS_MAX_CHARS_PER_TURN=<n>` : 기본값 `6000`, 범위 `0..200000`, 턴 단위 progress 텍스트 예산(초과분 suppress, `0`이면 char budget 비활성화)
+- `AGENT_DISCORD_EVENT_PROGRESS_DUPLICATE_WINDOW_MS=<n>` : 기본값 `10000`, 범위 `0..600000`, 동일 progress payload 반복 전송 억제 윈도우 (`0`이면 중복 억제 비활성화)
+- `AGENT_DISCORD_EVENT_PROGRESS_MODE_STALE_WARN_MS=<n>` : 기본값 `90000`, 범위 `5000..3600000`, pending 상태에서 Codex progress-mode 런타임 신호가 오래됐을 때 health 경고 임계값
+- `AGENT_DISCORD_EVENT_HOOK_OUTBOX_MAX=<n>` : 기본값 `2000`, 범위 `1..20000`, hook 이벤트 메모리 큐 최대 길이(초과 시 오래된 항목을 drop하며 `session.progress`를 우선 정리)
+- `AGENT_DISCORD_EVENT_HOOK_OUTBOX_PATH=<path|off>` : 기본값 `~/.mudcode/runtime/agent-event-hook-outbox.json`, hook outbox 영속 경로(`off`로 설정하면 비활성화)
+- `AGENT_DISCORD_EVENT_HOOK_OUTBOX_FLUSH_MS=<n>` : 기본값 `200`, 범위 `0..10000`, outbox 파일 flush 주기(`0`이면 동기 flush)
+- `AGENT_DISCORD_EVENT_HOOK_OUTBOX_RETENTION_MS=<n>` : 기본값 `86400000`, 범위 `1000..604800000`, 재시작 시 복원 가능한 outbox 항목 최대 보관 시간
+- `AGENT_DISCORD_OUTPUT_DEDUPE_WINDOW_MS=<n>` : 기본값 `2500`, 범위 `0..60000`, 동일 텍스트 출력 폭주 억제 윈도우(`0`이면 비활성화)
+- `AGENT_DISCORD_OUTPUT_MAX_CHUNKS=<n>` : 기본값 `4`, 범위 `1..40`, 1회 전송당 Discord 텍스트/페이지 청크 fan-out 상한(초과 시 마지막에 truncation notice 추가)
+- `AGENT_DISCORD_LONG_OUTPUT_THREAD_MAX_CHUNKS=<n>` : 기본값 `8`, 범위 `1..200`, long-output 예상 청크가 상한을 넘으면 thread fan-out 대신 condensed 요약만 전송
+- `AGENT_DISCORD_INPUT_DEDUPE_MESSAGE_WINDOW_MS=<n>` : 기본값 `1800000`, 범위 `0..86400000`, 동일 messageId 중복 디스패치 차단 윈도우
+- `AGENT_DISCORD_INPUT_DEDUPE_SIGNATURE_WINDOW_MS=<n>` : 기본값 `5000`, 범위 `0..3600000`, messageId 없는 slash/control 이벤트의 서명 기반 단기 중복 차단 윈도우
+- `AGENT_DISCORD_INPUT_DEDUPE_MAX=<n>` : 기본값 `50000`, 범위 `100..1000000`, 입력 중복 차단 캐시 최대 엔트리 수
+- `AGENT_DISCORD_TMUX_DEFER_MISSING_ENABLED=1|0` : 기본값 `1`, tmux target 누락 시 즉시 실패 대신 자동 재시도 큐로 지연 전달
+- `AGENT_DISCORD_TMUX_DEFER_MISSING_RETRY_BASE_MS=<n>` : 기본값 `2500`, 범위 `250..60000`, 지연 전달 재시도 기본 backoff
+- `AGENT_DISCORD_TMUX_DEFER_MISSING_RETRY_MAX_MS=<n>` : 기본값 `15000`, 범위 `500..120000`, 지연 전달 재시도 최대 backoff
+- `AGENT_DISCORD_TMUX_DEFER_MISSING_RETRY_MAX_ATTEMPTS=<n>` : 기본값 `24`, 범위 `1..200`, 지연 전달 최대 재시도 횟수
+- `AGENT_DISCORD_TMUX_DEFER_MISSING_MAX_AGE_MS=<n>` : 기본값 `600000`, 범위 `10000..86400000`, 지연 전달 큐 항목 최대 유지 시간
+- `AGENT_DISCORD_TMUX_DEFER_MISSING_MAX_QUEUE=<n>` : 기본값 `400`, 범위 `1..5000`, 지연 전달 큐 최대 길이
+- `AGENT_DISCORD_BACKGROUND_CLI_SCHEDULE_COOLDOWN_MS=<n>` : 기본값 `15000`, 범위 `0..600000`, 동일 CLI 인자 배경 유지보수 스케줄 중복 억제 윈도우(`0`이면 비활성화)
+- `MUDCODE_REPAIR_LOCK_PATH=<path>` : 기본값 `~/.mudcode/locks/repair.lock`, `mudcode repair` 동시 실행 방지용 파일시스템 락 경로
+- `MUDCODE_REPAIR_LOCK_WAIT_MS=<n>` : 기본값 `2000`, 범위 `0..30000`, 락 점유 시 대기 후 실패하기까지의 시간(ms)
+- `MUDCODE_REPAIR_LOCK_STALE_MS=<n>` : 기본값 `300000`, 범위 `1000..86400000`, stale 락으로 간주해 자동 복구하는 기준(ms)
+- `AGENT_DISCORD_CODEX_EVENT_POC=1|0` : 기본값 `1`, Codex 로컬 event-hook 브리지 사용 (`0`이면 legacy direct capture 출력 경로)
+- `AGENT_DISCORD_CODEX_EVENT_ONLY` : deprecated/ignored (런타임 영향 없음; Codex 안전 게이트는 항상 유지: `session.progress` channel -> thread/off, `session.idle` 기본 억제)
+- `AGENT_DISCORD_CODEX_EVENT_ONLY_IDLE_OUTPUT=1|0` : 기본값 `0`, debug/legacy 용도에서만 Codex `session.idle` 채널 출력을 임시 허용
+- `AGENT_DISCORD_CODEX_FORCE_EVENT_OUTPUT=1|0` : 기본값 `1`, event-hook 브리지가 활성화된 Codex 출력은 event 경로를 authoritative로 유지 (`0`이어도 hook 전달이 살아 있으면 direct fallback은 다시 켜지지 않음)
+- `AGENT_DISCORD_EVENT_HOOK_CAPTURE_OUTPUT=1|0` : 기본값 `0`, event-hook stale-capture fallback 동안 non-codex 인스턴스의 legacy raw direct 출력은 `1`일 때만 허용
 - `AGENT_DISCORD_EVENT_LIFECYCLE_STRICT_MODE=off|warn|reject` : 기본값 `warn`
 - `AGENT_DISCORD_SUPERVISOR_FINAL_FORMAT_STRICT=0|1` : 기본값 `1`, supervisor final-format 자동 재요청 검증을 엄격 모드로 수행
 
