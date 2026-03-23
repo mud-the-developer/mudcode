@@ -1136,12 +1136,20 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
     .command('agents', 'List available AI agent adapters', () => {}, () => agentsCommand())
     .command(
       'skill <action> [name]',
-      'List/install Codex skills discovered from AGENTS.md or .agents/skills',
+      'List/install Codex skills discovered from AGENTS.md, .agents/skills, or a GitHub repo source',
       (y: Argv) => y
         .positional('action', { choices: ['list', 'install'] as const, describe: 'skill action' })
         .positional('name', { type: 'string', describe: 'Skill name (install only; omit to install all local/no-api-ready skills)' })
         .option('project', { type: 'string', describe: 'Project path containing AGENTS.md or .agents/skills (default: current directory)' })
         .option('all', { type: 'boolean', default: false, describe: 'List action: show all skills including external-risk/missing ones' })
+        .option('repo', {
+          type: 'string',
+          describe: 'Install action: source repo/path (GitHub URL, owner/repo, or local path)',
+        })
+        .option('ref', {
+          type: 'string',
+          describe: 'Install action: git ref for --repo (branch/tag/commit)',
+        })
         .option('allow-external', {
           type: 'boolean',
           default: false,
@@ -1160,6 +1168,8 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
           allowExternal: argv.allowExternal,
           force: argv.force,
           dryRun: argv.dryRun,
+          repo: argv.repo,
+          ref: argv.ref,
         });
       }
     )
@@ -1171,6 +1181,8 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
         .positional('name', { type: 'string' })
         .option('project', { type: 'string' })
         .option('all', { type: 'boolean', default: false })
+        .option('repo', { type: 'string' })
+        .option('ref', { type: 'string' })
         .option('allow-external', { type: 'boolean', default: false })
         .option('force', { type: 'boolean', default: false })
         .option('dry-run', { type: 'boolean', default: false }),
@@ -1185,6 +1197,8 @@ export async function runCli(rawArgs: string[] = hideBin(process.argv)): Promise
           allowExternal: argv.allowExternal,
           force: argv.force,
           dryRun: argv.dryRun,
+          repo: argv.repo,
+          ref: argv.ref,
         });
       }
     )

@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, readlinkSync, rmSync, writeFileSync, existsSync
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { afterEach, describe, expect, it } from 'vitest';
-import { discoverSkills, installSkills } from '../../../src/cli/commands/skills.js';
+import { discoverSkills, installSkills, resolveKnownSkillRepoAlias } from '../../../src/cli/commands/skills.js';
 
 function createProjectWithSkills(options: { includeAvailableSkillsSection?: boolean } = {}): { projectPath: string } {
   const includeAvailableSkillsSection = options.includeAvailableSkillsSection ?? true;
@@ -114,5 +114,47 @@ describe('skills command helpers', () => {
       const linkPath = readlinkSync(target);
       expect(linkPath.length).toBeGreaterThan(0);
     }
+  });
+
+  it('installs skills from external repo path recursively', () => {
+    const { projectPath } = createProjectWithSkills({ includeAvailableSkillsSection: false });
+    dirs.push(projectPath);
+    const codexHome = mkdtempSync(join(tmpdir(), 'mudcode-codex-home-'));
+    dirs.push(codexHome);
+
+    const repoPath = mkdtempSync(join(tmpdir(), 'mudcode-skill-repo-'));
+    dirs.push(repoPath);
+    const remoteSkillDir = join(repoPath, 'skills', 'react-best-practices');
+    mkdirSync(remoteSkillDir, { recursive: true });
+    writeFileSync(
+      join(remoteSkillDir, 'SKILL.md'),
+      [
+        '---',
+        'name: react-best-practices',
+        'description: React best practice skill for frontend refactors',
+        '---',
+        '',
+        '# React Best Practices',
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const result = installSkills({
+      projectPath,
+      codexHome,
+      repo: repoPath,
+    });
+    expect(result.installed).toContain('react-best-practices');
+    const target = join(codexHome, 'skills', 'react-best-practices');
+    expect(existsSync(target)).toBe(true);
+  });
+
+  it('maps vercel-labs/skills alias to vercel-labs/agent-skills', () => {
+    const fromUrl = resolveKnownSkillRepoAlias('https://github.com/vercel-labs/skills');
+    expect(fromUrl.resolved).toBe('vercel-labs/agent-skills');
+    expect(fromUrl.reason).toContain('mapped `vercel-labs/skills`');
+
+    const fromSlug = resolveKnownSkillRepoAlias('vercel-labs/skills');
+    expect(fromSlug.resolved).toBe('vercel-labs/agent-skills');
   });
 });

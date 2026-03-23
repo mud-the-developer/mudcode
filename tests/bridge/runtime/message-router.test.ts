@@ -86,6 +86,7 @@ describe('BridgeMessageRouter (codex)', () => {
     delete process.env.AGENT_DISCORD_CODEX_AUTO_SUBAGENT_MIN_CHARS;
     delete process.env.AGENT_DISCORD_CODEX_AUTO_SUBAGENT_MIN_LINES;
     delete process.env.AGENT_DISCORD_CODEX_AUTO_SUBAGENT_MIN_BULLETS;
+    delete process.env.AGENT_DISCORD_CODEX_SUBAGENT_CLEANUP_BEFORE_SPAWN;
     delete process.env.MUDCODE_CODEX_AUTO_SKILL_LINK;
     for (const dir of tempDirs.splice(0)) {
       rmSync(dir, { recursive: true, force: true });
@@ -411,6 +412,9 @@ describe('BridgeMessageRouter (codex)', () => {
     const sentPrompt = String(tmux.typeKeysToWindow.mock.calls[0]?.[2] ?? '');
     expect(sentPrompt).toContain('[mudcode auto-subagent]');
     expect(sentPrompt).toContain('sub-agent Codex workers');
+    expect(sentPrompt).toContain('close previously completed sub-agent sessions');
+    expect(sentPrompt).toContain('[mudcode subagent-cleanup]');
+    expect(sentPrompt).toContain('Close each finished session with `close_agent`');
   });
 
   it('does not inject sub-agent hint when prompt already requests sub-agent split', async () => {
@@ -458,6 +462,62 @@ describe('BridgeMessageRouter (codex)', () => {
     const sentPrompt = String(tmux.typeKeysToWindow.mock.calls[0]?.[2] ?? '');
     expect(sentPrompt).toContain('Use sub-agent codex');
     expect(sentPrompt).not.toContain('[mudcode auto-subagent]');
+    expect(sentPrompt).toContain('[mudcode subagent-cleanup]');
+  });
+
+  it('does not duplicate sub-agent cleanup directive when already present', async () => {
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_SUBMIT_VERIFY_DELAY_MS = '0';
+    process.env.AGENT_DISCORD_CODEX_AUTO_SUBAGENT = '0';
+
+    const { messaging, getCallback } = createMessagingMock();
+    const tmux = {
+      getPaneCurrentCommand: vi.fn().mockReturnValue('codex'),
+      typeKeysToWindow: vi.fn(),
+      sendEnterToWindow: vi.fn(),
+      sendKeysToWindow: vi.fn(),
+      sendRawKeyToWindow: vi.fn(),
+    } as any;
+    const stateManager = {
+      getProject: vi.fn().mockReturnValue(createProjectState()),
+      updateLastActive: vi.fn(),
+    } as any;
+    const pendingTracker = {
+      markPending: vi.fn().mockResolvedValue(undefined),
+      markRouteResolved: vi.fn().mockResolvedValue(undefined),
+      markHasAttachments: vi.fn().mockResolvedValue(undefined),
+      markDispatching: vi.fn().mockResolvedValue(undefined),
+      markRetry: vi.fn().mockResolvedValue(undefined),
+      markCompleted: vi.fn().mockResolvedValue(undefined),
+      markError: vi.fn().mockResolvedValue(undefined),
+      clearPendingForInstance: vi.fn(),
+    } as any;
+
+    const router = new BridgeMessageRouter({
+      messaging,
+      tmux,
+      stateManager,
+      pendingTracker,
+      sanitizeInput: (content) => content,
+    });
+    router.register();
+
+    const callback = getCallback();
+    const prompt = [
+      '[mudcode subagent-cleanup]',
+      'Before any new `spawn_agent` call in this turn:',
+      '1) Find previously used sub-agent sessions that already finished.',
+      '2) Close each finished session with `close_agent` before spawning new workers.',
+      '3) Keep still-running sessions open; close only completed/failed/cancelled sessions.',
+      '[/mudcode subagent-cleanup]',
+      '',
+      'Use sub-agent codex workers for this refactor.',
+    ].join('\n');
+    await callback('codex', prompt, 'demo', 'ch-1', 'msg-1', 'codex');
+
+    const sentPrompt = String(tmux.typeKeysToWindow.mock.calls[0]?.[2] ?? '');
+    const occurrences = (sentPrompt.match(/\[mudcode subagent-cleanup\]/g) || []).length;
+    expect(occurrences).toBe(1);
   });
 
   it('re-sends Enter when codex submit verification still sees prompt tail', async () => {

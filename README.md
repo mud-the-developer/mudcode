@@ -70,7 +70,7 @@ mudcode attach my-app --instance codex
 - `mudcode daemon <start|stop|status|restart>`: manage daemon
 - `mudcode stop [project] --instance <id>`: stop one instance
 - `mudcode skill list [--all]`: list skills from `AGENTS.md` and `.agents/skills`
-- `mudcode skill install [name]`: install local/no-api skills into Codex skills dir
+- `mudcode skill install [name] [--repo <source>] [--ref <git-ref>]`: install skills from local project or external repo source
 - `mudcode config --show`: print current config
 - `mudcode uninstall`: remove mudcode from machine
 
@@ -127,6 +127,19 @@ Use these inside mapped channels/threads:
 - Mudcode records Codex turn I/O transcript as JSONL: `~/.mudcode/io-v2/<project>/<instance>/YYYY-MM-DD.jsonl`
 - If command markers are detected in output, Mudcode posts command start/end summaries in the mapped channel.
 - Mudcode can auto-link skills from `AGENTS.md` (`### Available skills`) and append a skill hint to outgoing Codex prompts.
+
+External skill source examples:
+
+```bash
+# install all skills from a GitHub skill bundle repo
+mudcode skill install --repo vercel-labs/agent-skills
+
+# vercel-labs/skills URL is auto-mapped to vercel-labs/agent-skills
+mudcode skill install --repo https://github.com/vercel-labs/skills
+
+# install one skill from a specific git ref
+mudcode skill install react-best-practices --repo vercel-labs/agent-skills --ref main
+```
 
 Environment toggles:
 - `AGENT_DISCORD_CODEX_IO_V2=0` to disable tracker

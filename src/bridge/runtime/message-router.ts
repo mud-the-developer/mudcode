@@ -286,6 +286,7 @@ export class BridgeMessageRouter {
       '[mudcode auto-subagent]',
       'This request looks context-heavy. Split work and run focused sub-agent Codex workers.',
       '- Create 2-4 sub-agents with explicit ownership (files/responsibility).',
+      '- Before spawning new sub-agents, close previously completed sub-agent sessions.',
       '- Run independent chunks in parallel, then merge and verify once.',
       '- Keep each sub-agent context narrow; avoid full-repo rereads unless needed.',
       '- Return one integrated summary with changed files and verification results.',
@@ -294,6 +295,40 @@ export class BridgeMessageRouter {
 
     const augmented = `${prompt.trimEnd()}\n\n${hint}`;
     return { prompt: augmented, applied: true };
+  }
+
+  private hasSubAgentSpawnIntent(prompt: string): boolean {
+    if (/\[mudcode auto-subagent\]/i.test(prompt)) return true;
+    if (/\bsub[-\s]?agent\b/i.test(prompt)) return true;
+    if (/\bspawn[_-]?agent\b/i.test(prompt)) return true;
+    if (/서브\s*에이전트/i.test(prompt)) return true;
+    return false;
+  }
+
+  private hasSubAgentCleanupDirective(prompt: string): boolean {
+    return /\[mudcode subagent-cleanup\]/i.test(prompt);
+  }
+
+  private maybeInjectSubAgentCleanupDirective(prompt: string): { prompt: string; applied: boolean } {
+    if (!this.getEnvBool('AGENT_DISCORD_CODEX_SUBAGENT_CLEANUP_BEFORE_SPAWN', true)) {
+      return { prompt, applied: false };
+    }
+    if (!this.hasSubAgentSpawnIntent(prompt)) return { prompt, applied: false };
+    if (this.hasSubAgentCleanupDirective(prompt)) return { prompt, applied: false };
+
+    const cleanupDirective = [
+      '[mudcode subagent-cleanup]',
+      'Before any new `spawn_agent` call in this turn:',
+      '1) Find previously used sub-agent sessions that already finished.',
+      '2) Close each finished session with `close_agent` before spawning new workers.',
+      '3) Keep still-running sessions open; close only completed/failed/cancelled sessions.',
+      '[/mudcode subagent-cleanup]',
+    ].join('\n');
+
+    return {
+      prompt: `${cleanupDirective}\n\n${prompt.trimStart()}`,
+      applied: true,
+    };
   }
 
   private shouldRetryCodexSubmit(sessionName: string, windowName: string, prompt: string): boolean {
@@ -1059,7 +1094,13 @@ export class BridgeMessageRouter {
                 `🧩 [${projectName}/${resolvedAgentType}] auto sub-agent hint injected (${withSkillHint.length} chars)`,
               );
             }
-            promptToSend = subAgentHinted.prompt;
+            const cleanupDirected = this.maybeInjectSubAgentCleanupDirective(subAgentHinted.prompt);
+            if (cleanupDirected.applied) {
+              console.log(
+                `🧹 [${projectName}/${resolvedAgentType}] sub-agent cleanup directive injected before spawn`,
+              );
+            }
+            promptToSend = cleanupDirected.prompt;
           } else {
             promptToSend = sanitized;
           }

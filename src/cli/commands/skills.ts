@@ -3,6 +3,7 @@ import {
   cpSync,
   existsSync,
   lstatSync,
+  mkdtempSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -10,8 +11,9 @@ import {
   rmSync,
   symlinkSync,
 } from 'fs';
-import { homedir } from 'os';
-import { dirname, isAbsolute, join, resolve } from 'path';
+import { execFileSync } from 'child_process';
+import { homedir, tmpdir } from 'os';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'path';
 
 const EXTERNAL_DEPENDENCY_HINTS: RegExp[] = [
   /\bcloudflare\b/i,
@@ -26,6 +28,27 @@ const EXTERNAL_DEPENDENCY_HINTS: RegExp[] = [
 ];
 
 const LOCAL_SKILL_DIR_CANDIDATES = ['.agents/skills'];
+const REMOTE_SKILL_DISCOVERY_EXCLUDED_DIRS = new Set([
+  '.git',
+  '.hg',
+  '.svn',
+  'node_modules',
+  'dist',
+  'build',
+  '.next',
+  '.turbo',
+  '.venv',
+  'venv',
+  'target',
+  '.cache',
+]);
+const KNOWN_SKILL_REPO_ALIASES: Record<string, { target: string; reason: string }> = {
+  'vercel-labs/skills': {
+    target: 'vercel-labs/agent-skills',
+    reason:
+      'mapped `vercel-labs/skills` to `vercel-labs/agent-skills` because the former is installer tooling, not a skill bundle.',
+  },
+};
 
 export interface DiscoveredSkill {
   name: string;
@@ -49,6 +72,8 @@ export interface InstallSkillsOptions {
   force?: boolean;
   dryRun?: boolean;
   codexHome?: string;
+  repo?: string;
+  ref?: string;
 }
 
 export interface InstallSkillsResult {
@@ -58,6 +83,7 @@ export interface InstallSkillsResult {
   skipped: Array<{ name: string; reason: string }>;
   failed: Array<{ name: string; reason: string }>;
   codexSkillsDir: string;
+  notices: string[];
 }
 
 function resolveProjectPath(projectPath?: string): string {
@@ -73,6 +99,124 @@ function resolveCodexSkillsDir(codexHome?: string): string {
     process.env.CODEX_HOME?.trim() ||
     join(homedir(), '.codex');
   return join(home, 'skills');
+}
+
+function normalizeGitHubRepoSlug(input: string): string | undefined {
+  const trimmed = input.trim().replace(/\.git$/i, '').replace(/\/+$/, '');
+  if (!trimmed) return undefined;
+
+  const urlMatch = trimmed.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)(?:\/.*)?$/i);
+  if (urlMatch) {
+    return `${urlMatch[1]}/${urlMatch[2]}`.toLowerCase();
+  }
+
+  const slugMatch = trimmed.match(/^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)$/);
+  if (slugMatch) {
+    return `${slugMatch[1]}/${slugMatch[2]}`.toLowerCase();
+  }
+
+  return undefined;
+}
+
+export function resolveKnownSkillRepoAlias(input: string): { resolved: string; reason?: string } {
+  const slug = normalizeGitHubRepoSlug(input);
+  if (!slug) {
+    return { resolved: input.trim() };
+  }
+  const alias = KNOWN_SKILL_REPO_ALIASES[slug];
+  if (!alias) {
+    return { resolved: slug };
+  }
+  return { resolved: alias.target, reason: alias.reason };
+}
+
+interface SkillSourceContext {
+  discoveryRoot: string;
+  forceCopyInstall: boolean;
+  notices: string[];
+  cleanup?: () => void;
+}
+
+function cloneGitHubRepo(params: { repoSlug: string; ref?: string }): { checkoutPath: string; cleanup: () => void } {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'mudcode-skill-repo-'));
+  const checkoutPath = join(tempRoot, 'repo');
+  const cloneUrl = `https://github.com/${params.repoSlug}.git`;
+  const args = ['clone', '--depth', '1'];
+  const ref = params.ref?.trim();
+  if (ref) {
+    args.push('--branch', ref);
+  }
+  args.push(cloneUrl, checkoutPath);
+
+  try {
+    execFileSync('git', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      encoding: 'utf8',
+    });
+  } catch (error) {
+    try {
+      rmSync(tempRoot, { recursive: true, force: true });
+    } catch {
+      // best-effort cleanup
+    }
+    const stderr =
+      typeof error === 'object' &&
+      error !== null &&
+      'stderr' in error &&
+      typeof (error as { stderr?: unknown }).stderr === 'string'
+        ? (error as { stderr: string }).stderr
+        : '';
+    const detail = stderr.trim().split('\n').slice(-1)[0] || (error instanceof Error ? error.message : String(error));
+    throw new Error(`failed to clone ${cloneUrl}${ref ? `@${ref}` : ''}: ${detail}`);
+  }
+
+  return {
+    checkoutPath,
+    cleanup: () => {
+      try {
+        rmSync(tempRoot, { recursive: true, force: true });
+      } catch {
+        // best-effort cleanup
+      }
+    },
+  };
+}
+
+function resolveSkillSource(projectPath: string, options: InstallSkillsOptions): SkillSourceContext {
+  const repoInput = options.repo?.trim();
+  if (!repoInput) {
+    return {
+      discoveryRoot: projectPath,
+      forceCopyInstall: false,
+      notices: [],
+    };
+  }
+
+  const localPath = resolve(projectPath, repoInput);
+  if (existsSync(localPath)) {
+    return {
+      discoveryRoot: localPath,
+      forceCopyInstall: false,
+      notices: [`using local skill source: ${localPath}`],
+    };
+  }
+
+  const aliased = resolveKnownSkillRepoAlias(repoInput);
+  const repoSlug = normalizeGitHubRepoSlug(aliased.resolved);
+  if (!repoSlug) {
+    throw new Error(`unsupported --repo value: ${repoInput}`);
+  }
+  const cloned = cloneGitHubRepo({ repoSlug, ref: options.ref });
+  const notices = [`cloned skill source: https://github.com/${repoSlug}${options.ref?.trim() ? ` @ ${options.ref.trim()}` : ''}`];
+  if (aliased.reason) {
+    notices.unshift(aliased.reason);
+  }
+  return {
+    discoveryRoot: cloned.checkoutPath,
+    forceCopyInstall: true,
+    notices,
+    cleanup: cloned.cleanup,
+  };
 }
 
 function parseSkillLine(line: string): { name: string; description: string; filePath?: string } | undefined {
@@ -242,6 +386,64 @@ function discoverSkillsFromLocalDirs(projectPath: string, knownNames: Set<string
   return discovered;
 }
 
+function discoverSkillsFromRecursiveSkillFiles(projectPath: string, knownNames: Set<string>): DiscoveredSkill[] {
+  const discovered: DiscoveredSkill[] = [];
+  const stack: string[] = [projectPath];
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) continue;
+
+    let entries: Array<{ name: string | Buffer; isDirectory: () => boolean; isFile: () => boolean; isSymbolicLink: () => boolean }> = [];
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      const entryName = String(entry.name);
+      const nextPath = join(current, entryName);
+
+      if (entry.isSymbolicLink()) continue;
+
+      if (entry.isDirectory()) {
+        if (REMOTE_SKILL_DISCOVERY_EXCLUDED_DIRS.has(entryName)) continue;
+        stack.push(nextPath);
+        continue;
+      }
+
+      if (!entry.isFile()) continue;
+      if (entryName !== 'SKILL.md') continue;
+
+      const skillDir = dirname(nextPath);
+      const skillName = basename(skillDir);
+      const normalizedName = skillName.toLowerCase();
+      if (!skillName || knownNames.has(normalizedName)) continue;
+
+      const skillText = loadSkillText(nextPath);
+      const relPath = relative(projectPath, nextPath);
+      const description =
+        summarizeSkillDescription(skillText) ||
+        `Skill from ${relPath.length > 0 ? relPath : nextPath}`;
+
+      discovered.push(
+        buildDiscoveredSkill({
+          projectPath,
+          name: skillName,
+          description,
+          rawFilePath: relPath.length > 0 ? relPath : nextPath,
+          resolvedPath: nextPath,
+        }),
+      );
+      knownNames.add(normalizedName);
+    }
+  }
+
+  discovered.sort((a, b) => a.name.localeCompare(b.name));
+  return discovered;
+}
+
 export function discoverSkills(options: DiscoverSkillsOptions = {}): DiscoveredSkill[] {
   const projectPath = resolveProjectPath(options.projectPath);
   const agentsPath = join(projectPath, 'AGENTS.md');
@@ -280,6 +482,7 @@ function linkOrCopySkill(params: {
   targetPath: string;
   force: boolean;
   dryRun: boolean;
+  preferCopy?: boolean;
 }): { mode?: 'linked' | 'copied'; skipReason?: string; failReason?: string } {
   const sourceDir = params.skill.skillDirPath;
   if (!sourceDir) {
@@ -315,7 +518,18 @@ function linkOrCopySkill(params: {
   }
 
   if (params.dryRun) {
-    return { mode: 'linked' };
+    return { mode: params.preferCopy ? 'copied' : 'linked' };
+  }
+
+  if (params.preferCopy) {
+    try {
+      cpSync(sourceDir, targetPath, { recursive: true });
+      return { mode: 'copied' };
+    } catch (copyError) {
+      return {
+        failReason: `copy failed (${copyError instanceof Error ? copyError.message : String(copyError)})`,
+      };
+    }
   }
 
   try {
@@ -338,9 +552,6 @@ function linkOrCopySkill(params: {
 export function installSkills(options: InstallSkillsOptions = {}): InstallSkillsResult {
   const projectPath = resolveProjectPath(options.projectPath);
   const codexSkillsDir = resolveCodexSkillsDir(options.codexHome);
-  const skills = discoverSkills({ projectPath });
-  const selected = findSelectedSkills(skills, options);
-
   const result: InstallSkillsResult = {
     installed: [],
     linked: [],
@@ -348,44 +559,71 @@ export function installSkills(options: InstallSkillsOptions = {}): InstallSkills
     skipped: [],
     failed: [],
     codexSkillsDir,
+    notices: [],
   };
 
-  if (selected.length === 0) {
-    result.skipped.push({
-      name: options.name?.trim() || '(none)',
-      reason: options.name ? 'skill not found or not installable' : 'no installable local skills found',
+  const source = resolveSkillSource(projectPath, options);
+  result.notices.push(...source.notices);
+
+  try {
+    const discovered = discoverSkills({ projectPath: source.discoveryRoot });
+    const knownNames = new Set(discovered.map((skill) => skill.name.toLowerCase()));
+    if (options.repo) {
+      discovered.push(...discoverSkillsFromRecursiveSkillFiles(source.discoveryRoot, knownNames));
+    }
+
+    const selected = findSelectedSkills(discovered, {
+      ...options,
+      allowExternal: options.repo ? true : options.allowExternal,
     });
+    if (options.repo && !options.allowExternal) {
+      result.notices.push('remote source install includes external-risk skills by default.');
+    }
+
+    if (selected.length === 0) {
+      result.skipped.push({
+        name: options.name?.trim() || '(none)',
+        reason: options.name
+          ? 'skill not found or not installable'
+          : options.repo
+            ? 'no installable skills found in source repo'
+            : 'no installable local skills found',
+      });
+      return result;
+    }
+
+    if (!options.dryRun) {
+      mkdirSync(codexSkillsDir, { recursive: true });
+    }
+
+    for (const skill of selected) {
+      const targetPath = join(codexSkillsDir, skill.name);
+      const installResult = linkOrCopySkill({
+        skill,
+        targetPath,
+        force: !!options.force,
+        dryRun: !!options.dryRun,
+        preferCopy: source.forceCopyInstall,
+      });
+
+      if (installResult.skipReason) {
+        result.skipped.push({ name: skill.name, reason: installResult.skipReason });
+        continue;
+      }
+      if (installResult.failReason) {
+        result.failed.push({ name: skill.name, reason: installResult.failReason });
+        continue;
+      }
+
+      result.installed.push(skill.name);
+      if (installResult.mode === 'linked') result.linked.push(skill.name);
+      if (installResult.mode === 'copied') result.copied.push(skill.name);
+    }
+
     return result;
+  } finally {
+    source.cleanup?.();
   }
-
-  if (!options.dryRun) {
-    mkdirSync(codexSkillsDir, { recursive: true });
-  }
-
-  for (const skill of selected) {
-    const targetPath = join(codexSkillsDir, skill.name);
-    const installResult = linkOrCopySkill({
-      skill,
-      targetPath,
-      force: !!options.force,
-      dryRun: !!options.dryRun,
-    });
-
-    if (installResult.skipReason) {
-      result.skipped.push({ name: skill.name, reason: installResult.skipReason });
-      continue;
-    }
-    if (installResult.failReason) {
-      result.failed.push({ name: skill.name, reason: installResult.failReason });
-      continue;
-    }
-
-    result.installed.push(skill.name);
-    if (installResult.mode === 'linked') result.linked.push(skill.name);
-    if (installResult.mode === 'copied') result.copied.push(skill.name);
-  }
-
-  return result;
 }
 
 export function skillsListCommand(options: { project?: string; all?: boolean } = {}): void {
@@ -429,6 +667,8 @@ export function skillsInstallCommand(options: {
   force?: boolean;
   dryRun?: boolean;
   codexHome?: string;
+  repo?: string;
+  ref?: string;
 } = {}): void {
   const allowExternal = !!options.allowExternal;
   const name = options.name?.trim();
@@ -439,7 +679,15 @@ export function skillsInstallCommand(options: {
     force: !!options.force,
     dryRun: !!options.dryRun,
     codexHome: options.codexHome,
+    repo: options.repo,
+    ref: options.ref,
   });
+
+  if (installResult.notices.length > 0) {
+    for (const notice of installResult.notices) {
+      console.log(chalk.gray(`ℹ️ ${notice}`));
+    }
+  }
 
   if (installResult.installed.length > 0) {
     const actionLabel = options.dryRun ? 'would install' : 'installed';
