@@ -173,6 +173,7 @@ Release is automated in GitHub Actions.
 
 - Push to `main`: auto patch version bump + tag creation
 - Tag push (`v*`): publish workflow runs with `full` profile (Linux/macOS/Windows targets)
+- Tag publish success: GitHub Release is created automatically with generated notes and release artifacts (`*.tgz`, `manifest.json`)
 
 Workflow files:
 

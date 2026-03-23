@@ -136,6 +136,7 @@ MUDCODE_NPM_SCOPE=@your-npm-id npm run publish:release:bun:single
   - `linux`: Linux x64 (glibc/musl/baseline 변형 포함)
   - `full`: Linux + macOS + Windows x64
 - 필수 시크릿: `NPM_TOKEN`
+- 태그 릴리즈(`v*`) 성공 시 GitHub Releases 페이지가 자동 생성되고, `dist/release/**/*.tgz` 및 `manifest.json`이 아티팩트로 업로드됩니다.
 
 실행 방법:
 
